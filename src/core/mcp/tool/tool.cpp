@@ -7,9 +7,10 @@
  */
 
 #include "tool.h"
-#include "tool_result.h"
+
 #include "../../../utils/json/json_parser.h"
 #include "../../../utils/logging/logger.h"
+#include "tool_result.h"
 
 namespace aerojs {
 namespace core {
@@ -17,28 +18,28 @@ namespace mcp {
 namespace tool {
 
 utils::JSONValue* Tool::parseParams(const std::string& params) const {
-    if (params.empty()) {
-        return nullptr;
-    }
-    
-    try {
-        utils::JSONParser parser;
-        return parser.parse(params);
-    } catch (const std::exception& e) {
-        AEROJS_LOG_ERROR("JSONパースエラー: %s", e.what());
-        return nullptr;
-    }
+  if (params.empty()) {
+    return nullptr;
+  }
+
+  try {
+    utils::JSONParser parser;
+    return parser.parse(params);
+  } catch (const std::exception& e) {
+    AEROJS_LOG_ERROR("JSONパースエラー: %s", e.what());
+    return nullptr;
+  }
 }
 
 ToolResult* Tool::createError(int code, const std::string& message) const {
-    return ToolResult::createError(code, message);
+  return ToolResult::createError(code, message);
 }
 
 ToolResult* Tool::createSuccess(const std::string& content) const {
-    return ToolResult::createSuccess(content);
+  return ToolResult::createSuccess(content);
 }
 
-} // namespace tool
-} // namespace mcp
-} // namespace core
-} // namespace aerojs 
+}  // namespace tool
+}  // namespace mcp
+}  // namespace core
+}  // namespace aerojs

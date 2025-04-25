@@ -6,8 +6,10 @@
  */
 
 #include "types.h"
+
 #include <cmath>
 #include <limits>
+
 #include "../error/error.h"
 #include "../iteration/iteration.h"
 #include "../symbols/symbols.h"
@@ -42,14 +44,14 @@ bool TypeChecking::isInteger(ExecutionContext* ctx, const Value& value) {
   if (!value.isNumber()) {
     return false;
   }
-  
+
   double num = value.asNumber();
-  
+
   // NaNやInfinityはfalse
   if (std::isnan(num) || std::isinf(num)) {
     return false;
   }
-  
+
   // 整数かどうか確認
   return std::floor(num) == num;
 }
@@ -74,7 +76,7 @@ bool TypeChecking::isFunction(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isCallable();
 }
 
@@ -82,7 +84,7 @@ bool TypeChecking::isArray(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   // Array.isArray()と同等の動作
   return value.asObject()->isArray();
 }
@@ -91,7 +93,7 @@ bool TypeChecking::isDate(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isDate();
 }
 
@@ -99,7 +101,7 @@ bool TypeChecking::isRegExp(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isRegExp(ctx);
 }
 
@@ -107,7 +109,7 @@ bool TypeChecking::isError(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isError();
 }
 
@@ -115,7 +117,7 @@ bool TypeChecking::isMap(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isMap();
 }
 
@@ -123,7 +125,7 @@ bool TypeChecking::isSet(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isSet();
 }
 
@@ -131,7 +133,7 @@ bool TypeChecking::isWeakMap(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isWeakMap();
 }
 
@@ -139,7 +141,7 @@ bool TypeChecking::isWeakSet(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isWeakSet();
 }
 
@@ -147,7 +149,7 @@ bool TypeChecking::isArrayBuffer(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isArrayBuffer();
 }
 
@@ -155,7 +157,7 @@ bool TypeChecking::isSharedArrayBuffer(ExecutionContext* ctx, const Value& value
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isSharedArrayBuffer();
 }
 
@@ -163,7 +165,7 @@ bool TypeChecking::isDataView(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isDataView();
 }
 
@@ -171,7 +173,7 @@ bool TypeChecking::isTypedArray(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isTypedArray();
 }
 
@@ -179,7 +181,7 @@ bool TypeChecking::isPromise(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isPromise(ctx);
 }
 
@@ -187,7 +189,7 @@ bool TypeChecking::isProxy(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isProxy();
 }
 
@@ -195,7 +197,7 @@ bool TypeChecking::isConstructor(ExecutionContext* ctx, const Value& value) {
   if (!value.isObject()) {
     return false;
   }
-  
+
   return value.asObject()->isConstructor();
 }
 
@@ -279,22 +281,22 @@ double TypeConversion::toNumber(ExecutionContext* ctx, const Value& value) {
 int64_t TypeConversion::toInteger(ExecutionContext* ctx, const Value& value) {
   // まず数値に変換
   double num = toNumber(ctx, value);
-  
+
   // NaNの場合は0
   if (std::isnan(num)) {
     return 0;
   }
-  
+
   // ±0の場合は0
   if (num == 0) {
     return 0;
   }
-  
+
   // 無限大の場合はそのまま
   if (std::isinf(num)) {
     return num > 0 ? std::numeric_limits<int64_t>::max() : std::numeric_limits<int64_t>::min();
   }
-  
+
   // 整数部分を抽出
   return static_cast<int64_t>(std::trunc(num));
 }
@@ -302,20 +304,20 @@ int64_t TypeConversion::toInteger(ExecutionContext* ctx, const Value& value) {
 int32_t TypeConversion::toInt32(ExecutionContext* ctx, const Value& value) {
   // まず数値に変換
   double num = toNumber(ctx, value);
-  
+
   // NaN、±0、±Infinityの場合は0
   if (std::isnan(num) || num == 0 || std::isinf(num)) {
     return 0;
   }
-  
+
   // モジュロ2^32を計算
   double modulo = std::fmod(std::trunc(num), 4294967296.0);
-  
+
   // 負数の場合は2^32を加算
   if (modulo < 0) {
     modulo += 4294967296.0;
   }
-  
+
   // 符号付き32ビット整数に変換
   if (modulo >= 2147483648.0) {
     return static_cast<int32_t>(modulo - 4294967296.0);
@@ -327,20 +329,20 @@ int32_t TypeConversion::toInt32(ExecutionContext* ctx, const Value& value) {
 uint32_t TypeConversion::toUint32(ExecutionContext* ctx, const Value& value) {
   // まず数値に変換
   double num = toNumber(ctx, value);
-  
+
   // NaN、±0、±Infinityの場合は0
   if (std::isnan(num) || num == 0 || std::isinf(num)) {
     return 0;
   }
-  
+
   // モジュロ2^32を計算
   double modulo = std::fmod(std::trunc(num), 4294967296.0);
-  
+
   // 負数の場合は2^32を加算
   if (modulo < 0) {
     modulo += 4294967296.0;
   }
-  
+
   return static_cast<uint32_t>(modulo);
 }
 
@@ -355,7 +357,7 @@ std::string TypeConversion::toString(ExecutionContext* ctx, const Value& value) 
       return value.asBoolean() ? "true" : "false";
     case ValueType::Number: {
       double num = value.asNumber();
-      
+
       // 特殊な処理
       if (std::isnan(num)) {
         return "NaN";
@@ -366,7 +368,7 @@ std::string TypeConversion::toString(ExecutionContext* ctx, const Value& value) 
       if (std::isinf(num)) {
         return num > 0 ? "Infinity" : "-Infinity";
       }
-      
+
       // 数値を文字列に変換
       return std::to_string(num);
     }
@@ -425,9 +427,9 @@ Value TypeConversion::toPrimitive(ExecutionContext* ctx, const Value& value, con
   if (!value.isObject()) {
     return value;
   }
-  
+
   Object* obj = value.asObject();
-  
+
   // Symbol.toPrimitiveメソッドを確認
   Value toPrimitiveFn = obj->get(ctx, Symbol::toPrimitive());
   if (toPrimitiveFn.isCallable()) {
@@ -435,17 +437,17 @@ Value TypeConversion::toPrimitive(ExecutionContext* ctx, const Value& value, con
     std::vector<Value> args;
     args.push_back(Value::createString(preferredType));
     Value result = toPrimitiveFn.asFunction()->call(ctx, value, args);
-    
+
     // 結果がオブジェクトでなければ返す
     if (!result.isObject()) {
       return result;
     }
-    
+
     // オブジェクトが返された場合はTypeError
     ctx->throwError(Error::createTypeError(ctx, "Cannot convert object to primitive value"));
     return Value::createUndefined();
   }
-  
+
   // デフォルトの変換アルゴリズム
   std::vector<std::string> methods;
   if (preferredType == "string") {
@@ -453,20 +455,20 @@ Value TypeConversion::toPrimitive(ExecutionContext* ctx, const Value& value, con
   } else {
     methods = {"valueOf", "toString"};
   }
-  
+
   for (const auto& method : methods) {
     Value fn = obj->get(ctx, method);
     if (fn.isCallable()) {
       std::vector<Value> args;
       Value result = fn.asFunction()->call(ctx, value, args);
-      
+
       // 結果がオブジェクトでなければ返す
       if (!result.isObject()) {
         return result;
       }
     }
   }
-  
+
   // 変換できなかった場合はTypeError
   ctx->throwError(Error::createTypeError(ctx, "Cannot convert object to primitive value"));
   return Value::createUndefined();
@@ -475,12 +477,12 @@ Value TypeConversion::toPrimitive(ExecutionContext* ctx, const Value& value, con
 Value TypeConversion::toPropertyKey(ExecutionContext* ctx, const Value& value) {
   // まず原始値に変換
   Value key = toPrimitive(ctx, value, "string");
-  
+
   // シンボルかどうかを確認
   if (key.isSymbol()) {
     return key;
   }
-  
+
   // 文字列に変換
   return Value::createString(toString(ctx, key));
 }
@@ -488,18 +490,18 @@ Value TypeConversion::toPropertyKey(ExecutionContext* ctx, const Value& value) {
 uint32_t TypeConversion::toLength(ExecutionContext* ctx, const Value& value) {
   // 整数に変換
   int64_t len = toInteger(ctx, value);
-  
+
   // 負数や大きすぎる値を調整
   if (len <= 0) {
     return 0;
   }
-  
+
   // 2^53-1を超える場合は上限を適用
-  const int64_t MAX_SAFE_INTEGER = 9007199254740991; // 2^53-1
+  const int64_t MAX_SAFE_INTEGER = 9007199254740991;  // 2^53-1
   if (len > MAX_SAFE_INTEGER) {
     return MAX_SAFE_INTEGER;
   }
-  
+
   return static_cast<uint32_t>(len);
 }
 
@@ -508,16 +510,16 @@ uint32_t TypeConversion::toIndex(ExecutionContext* ctx, const Value& value) {
   if (value.isUndefined()) {
     return 0;
   }
-  
+
   // 整数に変換
   int64_t index = toInteger(ctx, value);
-  
+
   // 負数や大きすぎる値をチェック
   if (index < 0 || index > std::numeric_limits<uint32_t>::max()) {
     ctx->throwError(Error::createRangeError(ctx, "Invalid array index"));
     return 0;
   }
-  
+
   return static_cast<uint32_t>(index);
 }
 
@@ -530,7 +532,7 @@ bool TypeComparison::strictEquals(ExecutionContext* ctx, const Value& x, const V
   if (x.getType() != y.getType()) {
     return false;
   }
-  
+
   // 型ごとの比較
   switch (x.getType()) {
     case ValueType::Undefined:
@@ -541,17 +543,17 @@ bool TypeComparison::strictEquals(ExecutionContext* ctx, const Value& x, const V
     case ValueType::Number: {
       double numX = x.asNumber();
       double numY = y.asNumber();
-      
+
       // NaNは自身と等しくない
       if (std::isnan(numX) || std::isnan(numY)) {
         return false;
       }
-      
+
       // 0と-0は等しい
       if (numX == 0 && numY == 0) {
         return true;
       }
-      
+
       return numX == numY;
     }
     case ValueType::String:
@@ -573,7 +575,7 @@ bool TypeComparison::sameValue(ExecutionContext* ctx, const Value& x, const Valu
   if (x.getType() != y.getType()) {
     return false;
   }
-  
+
   // 型ごとの比較
   switch (x.getType()) {
     case ValueType::Undefined:
@@ -584,17 +586,17 @@ bool TypeComparison::sameValue(ExecutionContext* ctx, const Value& x, const Valu
     case ValueType::Number: {
       double numX = x.asNumber();
       double numY = y.asNumber();
-      
+
       // NaNは自身と等しい（strictEqualsと違い）
       if (std::isnan(numX) && std::isnan(numY)) {
         return true;
       }
-      
+
       // 0と-0は区別する（strictEqualsと違い）
       if (numX == 0 && numY == 0) {
         return std::signbit(numX) == std::signbit(numY);
       }
-      
+
       return numX == numY;
     }
     case ValueType::String:
@@ -616,7 +618,7 @@ bool TypeComparison::sameValueZero(ExecutionContext* ctx, const Value& x, const 
   if (x.getType() != y.getType()) {
     return false;
   }
-  
+
   // 型ごとの比較
   switch (x.getType()) {
     case ValueType::Undefined:
@@ -627,17 +629,17 @@ bool TypeComparison::sameValueZero(ExecutionContext* ctx, const Value& x, const 
     case ValueType::Number: {
       double numX = x.asNumber();
       double numY = y.asNumber();
-      
+
       // NaNは自身と等しい（strictEqualsと違い）
       if (std::isnan(numX) && std::isnan(numY)) {
         return true;
       }
-      
+
       // 0と-0は等しい（sameValueと違い）
       if (numX == 0 && numY == 0) {
         return true;
       }
-      
+
       return numX == numY;
     }
     case ValueType::String:
@@ -662,4 +664,4 @@ void initializeTypeSystem(ExecutionContext* ctx, Object* globalObj) {
   // 必要なら型システムの初期化処理を実装
 }
 
-} // namespace aero 
+}  // namespace aero

@@ -21,9 +21,9 @@ extern "C" {
  * @param value パラメータ値
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
-AEROJS_EXPORT AerojsStatus AerojsSetEngineParameter(AerojsEngine* engine, 
-                                                 const char* paramName,
-                                                 const char* value);
+AEROJS_EXPORT AerojsStatus AerojsSetEngineParameter(AerojsEngine* engine,
+                                                    const char* paramName,
+                                                    const char* value);
 
 /**
  * @brief エンジンのパラメータを取得
@@ -34,26 +34,26 @@ AEROJS_EXPORT AerojsStatus AerojsSetEngineParameter(AerojsEngine* engine,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsGetEngineParameter(AerojsEngine* engine,
-                                                 const char* paramName,
-                                                 char* value,
-                                                 AerojsSize maxSize);
+                                                    const char* paramName,
+                                                    char* value,
+                                                    AerojsSize maxSize);
 
 /**
  * @brief メモリ使用統計を取得
  */
 typedef struct {
-  AerojsSize totalHeapSize;         /* 合計ヒープサイズ（バイト単位） */
-  AerojsSize usedHeapSize;          /* 使用中ヒープサイズ（バイト単位） */
-  AerojsSize heapSizeLimit;         /* ヒープサイズ制限（バイト単位） */
-  AerojsSize totalExternalSize;     /* 外部メモリ合計（バイト単位） */
-  AerojsSize mallocedMemory;        /* malloc()で確保されたメモリ（バイト単位） */
-  AerojsSize peakMallocedMemory;    /* malloc()のピーク使用量（バイト単位） */
-  AerojsUInt32 objectCount;         /* オブジェクト数 */
-  AerojsUInt32 stringCount;         /* 文字列数 */
-  AerojsUInt32 symbolCount;         /* シンボル数 */
-  AerojsUInt32 contextCount;        /* コンテキスト数 */
-  AerojsUInt32 gcCount;             /* GC実行回数 */
-  AerojsUInt32 gcTime;              /* GC累積実行時間（ミリ秒） */
+  AerojsSize totalHeapSize;      /* 合計ヒープサイズ（バイト単位） */
+  AerojsSize usedHeapSize;       /* 使用中ヒープサイズ（バイト単位） */
+  AerojsSize heapSizeLimit;      /* ヒープサイズ制限（バイト単位） */
+  AerojsSize totalExternalSize;  /* 外部メモリ合計（バイト単位） */
+  AerojsSize mallocedMemory;     /* malloc()で確保されたメモリ（バイト単位） */
+  AerojsSize peakMallocedMemory; /* malloc()のピーク使用量（バイト単位） */
+  AerojsUInt32 objectCount;      /* オブジェクト数 */
+  AerojsUInt32 stringCount;      /* 文字列数 */
+  AerojsUInt32 symbolCount;      /* シンボル数 */
+  AerojsUInt32 contextCount;     /* コンテキスト数 */
+  AerojsUInt32 gcCount;          /* GC実行回数 */
+  AerojsUInt32 gcTime;           /* GC累積実行時間（ミリ秒） */
 } AerojsMemoryStats;
 
 /**
@@ -87,9 +87,9 @@ AEROJS_EXPORT AerojsStatus AerojsSetMemoryLimit(AerojsEngine* engine, AerojsSize
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsEnumerateContexts(AerojsEngine* engine,
-                                                 AerojsContext** contexts,
-                                                 AerojsSize maxContexts,
-                                                 AerojsSize* contextCount);
+                                                   AerojsContext** contexts,
+                                                   AerojsSize maxContexts,
+                                                   AerojsSize* contextCount);
 
 /**
  * @brief JITコンパイラを有効/無効化
@@ -157,16 +157,16 @@ typedef enum {
  * @brief デバッグ情報
  */
 typedef struct {
-  const char* sourceFile;     /* ソースファイル名（NULL可能） */
-  AerojsUInt32 lineNumber;    /* 行番号 */
-  AerojsUInt32 columnNumber;  /* 列番号 */
-  const char* functionName;   /* 関数名（NULL可能） */
-  AerojsValueRef exception;   /* 例外オブジェクト（例外発生時のみ、それ以外はNULL） */
+  const char* sourceFile;    /* ソースファイル名（NULL可能） */
+  AerojsUInt32 lineNumber;   /* 行番号 */
+  AerojsUInt32 columnNumber; /* 列番号 */
+  const char* functionName;  /* 関数名（NULL可能） */
+  AerojsValueRef exception;  /* 例外オブジェクト（例外発生時のみ、それ以外はNULL） */
 } AerojsDebugInfo;
 
 /**
  * @brief デバッグフックコールバック型
- * 
+ *
  * @param engine エンジンインスタンス
  * @param ctx 実行コンテキスト
  * @param hookType フックタイプ
@@ -174,10 +174,10 @@ typedef struct {
  * @param userData ユーザーデータ
  */
 typedef void (*AerojsDebugHookCallback)(AerojsEngine* engine,
-                                       AerojsContext* ctx,
-                                       AerojsDebugHookType hookType,
-                                       const AerojsDebugInfo* debugInfo,
-                                       void* userData);
+                                        AerojsContext* ctx,
+                                        AerojsDebugHookType hookType,
+                                        const AerojsDebugInfo* debugInfo,
+                                        void* userData);
 
 /**
  * @brief デバッグフックを設定
@@ -188,9 +188,9 @@ typedef void (*AerojsDebugHookCallback)(AerojsEngine* engine,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsSetDebugHook(AerojsEngine* engine,
-                                            AerojsDebugHookType hookType,
-                                            AerojsDebugHookCallback callback,
-                                            void* userData);
+                                              AerojsDebugHookType hookType,
+                                              AerojsDebugHookCallback callback,
+                                              void* userData);
 
 /**
  * @brief エンジンにカスタムデータを関連付ける
@@ -201,9 +201,9 @@ AEROJS_EXPORT AerojsStatus AerojsSetDebugHook(AerojsEngine* engine,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsSetEngineData(AerojsEngine* engine,
-                                             const char* key,
-                                             void* data,
-                                             void (*destructor)(void*));
+                                               const char* key,
+                                               void* data,
+                                               void (*destructor)(void*));
 
 /**
  * @brief エンジンからカスタムデータを取得
@@ -229,8 +229,8 @@ AEROJS_EXPORT AerojsBool AerojsRemoveEngineData(AerojsEngine* engine, const char
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsEnableScriptCache(AerojsEngine* engine,
-                                                 AerojsBool enable,
-                                                 const char* cacheDir);
+                                                   AerojsBool enable,
+                                                   const char* cacheDir);
 
 /**
  * @brief キャッシュをクリア
@@ -243,4 +243,4 @@ AEROJS_EXPORT AerojsStatus AerojsClearScriptCache(AerojsEngine* engine);
 }
 #endif
 
-#endif /* AEROJS_ENGINE_H */ 
+#endif /* AEROJS_ENGINE_H */

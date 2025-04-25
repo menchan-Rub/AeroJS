@@ -1,1111 +1,1014 @@
-/**
- * @file dead_code_elimination.cpp
+/*******************************************************************************
+ * @file src/core/transformers/dead_code_elimination.cpp
  * @version 1.0.0
- * @copyright Copyright (c) 2023 AeroJS Project
+ * @copyright Copyright (c) 2024 AeroJS Project
  * @license MIT License
- * @brief 不要なコード（デッドコード）を除去するトランスフォーマーの実装
- */
+ * @brief 不要なコード（デッドコード）を除去するトランスフォーマーの実装ファイル。
+ ******************************************************************************/
 
-#include "dead_code_elimination.h"
-#include "core/ast/node.h"
-#include "core/ast/visitor.h"
-#include <algorithm>
-#include <cmath>
-#include <limits>
+#include "src/core/transformers/dead_code_elimination.h"  // 対応ヘッダーを最初にインクルード
 
-namespace aero {
-namespace transformers {
+#include <algorithm>  // std::remove_if など
+#include <cmath>      // isnan, isinf などの数値評価関数
+#include <limits>     // 数値の限界値
+#include <memory>     // std::make_shared, std::move
+#include <vector>     // std::vector
 
-DeadCodeEliminationTransformer::DeadCodeEliminationTransformer()
-    : Transformer("DeadCodeElimination", "不要なコード（デッドコード）を除去するトランスフォーマー")
-    , m_unreachableCodeDetected(false)
+// AST関連
+#include "src/core/common/logger.h"                // ログ出力
+#include "src/core/parser/ast/ast_node_factory.h"  // ノード生成
+#include "src/core/parser/ast/ast_node_types.h"
+#include "src/core/parser/ast/nodes/all_nodes.h"
+
+namespace aerojs::core::transformers {
+
+// 必要な型のみ using 宣言
+using aerojs::parser::ast::BlockStatement;
+using aerojs::parser::ast::CaseClause;
+using aerojs::parser::ast::ExpressionStatement;
+using aerojs::parser::ast::ForStatement;
+using aerojs::parser::ast::IfStatement;
+using aerojs::parser::ast::LiteralPtr;
+using aerojs::parser::ast::LiteralType;
+using aerojs::parser::ast::Node;
+using aerojs::parser::ast::NodePtr;
+using aerojs::parser::ast::NodeType;
+using aerojs::parser::ast::ReturnStatement;
+using aerojs::parser::ast::SwitchStatement;
+using aerojs::parser::ast::UnaryOperator;
+
+// === コンストラクタ ===
+
+DeadCodeEliminationTransformer::DeadCodeEliminationTransformer(
+    optimization::OptimizationLevel optimizationLevel)
+    : Transformer("DeadCodeEliminationTransformer", "デッドコードと到達不能コードを除去します"),
+      m_optimizationLevel(optimizationLevel),
+      m_unreachableCodeDetected(false),
+      m_usedGlobals()
 {
+  // スコープスタックは空の状態で初期化される
 }
 
-void DeadCodeEliminationTransformer::visitBlockStatement(ast::BlockStatement* node) {
-    // 既にブロック内に到達不能コードが含まれているか確認
-    bool hasUnreachableCode = removeUnreachableCode(node->body);
-    if (hasUnreachableCode) {
-        m_changed = true;
+// === ITransformer 実装 ===
+
+TransformResult DeadCodeEliminationTransformer::Transform(NodePtr node) {
+  // 統計情報をリセット
+  m_statistics = Statistics();
+  
+  // スコープスタックをクリア
+  while (!m_scopeStack.empty()) {
+    m_scopeStack.pop();
+  }
+  
+  // グローバル変数の使用状況をリセット
+  m_usedGlobals.clear();
+  
+  // 到達不能フラグをリセット
+  m_unreachableCodeDetected = false;
+  
+  // 基底クラスの変換処理を呼び出す
+  return Transformer::Transform(std::move(node));
+}
+
+// === 設定・統計 ===
+
+void DeadCodeEliminationTransformer::SetOptimizationLevel(optimization::OptimizationLevel level) {
+  m_optimizationLevel = level;
+}
+
+optimization::OptimizationLevel DeadCodeEliminationTransformer::GetOptimizationLevel() const noexcept {
+  return m_optimizationLevel;
+}
+
+const DeadCodeEliminationTransformer::Statistics& DeadCodeEliminationTransformer::GetStatistics() const noexcept {
+  return m_statistics;
+}
+
+// === AST Visitor メソッドの実装 ===
+
+void DeadCodeEliminationTransformer::VisitBlockStatement(BlockStatement* node) {
+  // ブロックスコープに入る
+  EnterScope("block");
+
+  // 現在のスコープが到達不能かチェック
+  if (IsCurrentScopeUnreachable()) {
+    // このブロック全体が到達不能なので空にする
+    if (!node->GetBody().empty()) {
+      node->ClearBody();
+      m_statistics.m_removedStatements += node->GetBody().size();
     }
-    
-    // 空のブロックステートメントを削除（または最適化）する
-    if (node->body.empty()) {
-        // 空のブロックは変更なしとマークする（必要に応じてサブクラスでカスタマイズ可能）
-        return;
-    }
-    
-    // 再帰的に子ノードを処理
-    bool localChanged = false;
-    for (size_t i = 0; i < node->body.size(); ++i) {
-        auto result = transformNode(node->body[i]);
-        if (result.changed) {
-            localChanged = true;
-            node->body[i] = std::move(result.node);
-        }
-    }
-    
-    // 最適化の結果、ブロックが空になった場合
-    if (node->body.empty()) {
-        // 空のブロックになった場合は変更ありとマーク
-        m_changed = true;
+    LeaveScope();
+    return;
+  }
+
+  // 到達不能コードを削除
+  bool unreachableRemoved = RemoveUnreachableCode(node->GetBodyMut());
+  if (unreachableRemoved) {
+    m_statistics.m_unreachableCodeBlocks++;
+  }
+
+  // 効果のない式を削除
+  bool noEffectRemoved = RemoveNoEffectExpressions(node->GetBodyMut());
+  if (noEffectRemoved) {
+    m_statistics.m_removedStatements++;
+  }
+
+  // 子ノードを訪問
+  Transformer::VisitBlockStatement(node);
+
+  // スコープから出る
+  LeaveScope();
+}
+
+void DeadCodeEliminationTransformer::VisitIfStatement(IfStatement* node) {
+  // 到達不能なら何もしない
+  if (IsCurrentScopeUnreachable()) return;
+
+  // 先に子ノードを訪問して定数畳み込みなどを適用させる
+  Transformer::VisitIfStatement(node);
+
+  // 条件式を評価してみる
+  std::optional<bool> conditionValue = TryEvaluateAsBoolean(node->GetTest());
+
+  if (conditionValue.has_value()) {
+    m_statistics.m_optimizedConditions++;
+    NodePtr replacementNode = nullptr;
+    if (conditionValue.value()) {
+      // 条件が常に true -> then 節を採用
+      common::Logger::Debug("if文の条件が常にtrueのため、then節に置き換えます");
+      replacementNode = node->GetConsequent();
     } else {
-        m_changed = localChanged;
+      // 条件が常に false -> alternate 節を採用 (なければ null)
+      common::Logger::Debug("if文の条件が常にfalseのため、else節に置き換えます");
+      replacementNode = node->GetAlternate();
     }
+
+    // ノードを置き換える
+    ReplaceCurrentNode(std::move(replacementNode));
+  }
 }
 
-void DeadCodeEliminationTransformer::visitIfStatement(ast::IfStatement* node) {
-    // 条件式を変換
-    auto testResult = transformNode(node->test);
-    if (testResult.changed) {
-        m_changed = true;
-        node->test = std::move(testResult.node);
-    }
+void DeadCodeEliminationTransformer::VisitSwitchStatement(SwitchStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+
+  // 子ノードを訪問
+  Transformer::VisitSwitchStatement(node);
+
+  // switch文の最適化
+  std::optional<parser::ast::Value> discriminantValue = TryEvaluateConstant(node->GetDiscriminant());
+  if (discriminantValue.has_value()) {
+    // discriminantが定数の場合、一致するcaseだけを残す
+    bool foundMatch = false;
+    NodePtr matchingCase = nullptr;
     
-    // 条件式が静的に評価可能かチェック
-    bool conditionValue;
-    bool canDetermine = evaluatesToTruthy(node->test, conditionValue);
-    
-    if (canDetermine) {
-        if (conditionValue) {
-            // 条件が常にtrueの場合、then節だけを保持
-            auto consequentResult = transformNode(node->consequent);
-            if (consequentResult.changed) {
-                m_changed = true;
-                node->consequent = std::move(consequentResult.node);
-            }
-            
-            // ifステートメントをthen節で置き換え
-            m_result = node->consequent;
-            m_changed = true;
-            return;
-        } else {
-            // 条件が常にfalseの場合、else節があればそれを保持、なければifステートメントを削除
-            if (node->alternate) {
-                auto alternateResult = transformNode(node->alternate);
-                if (alternateResult.changed) {
-                    m_changed = true;
-                    node->alternate = std::move(alternateResult.node);
-                }
-                
-                // ifステートメントをelse節で置き換え
-                m_result = node->alternate;
-                m_changed = true;
-                return;
-            } else {
-                // else節がない場合は空のブロックに置き換え
-                m_result = std::make_shared<ast::BlockStatement>();
-                m_changed = true;
-                return;
-            }
+    for (const auto& caseNode : node->GetCases()) {
+      auto* caseClause = dynamic_cast<CaseClause*>(caseNode.get());
+      if (!caseClause) continue;
+      
+      if (caseClause->GetTest()) {
+        std::optional<parser::ast::Value> testValue = TryEvaluateConstant(caseClause->GetTest());
+        if (testValue.has_value() && ValuesEqual(*discriminantValue, *testValue)) {
+          foundMatch = true;
+          matchingCase = caseNode;
+          break;
         }
+      } else {
+        // default case
+        matchingCase = caseNode;
+      }
     }
     
-    // 条件が静的に決定できない場合は通常処理を続行
-    
-    // then節を変換
-    auto consequentResult = transformNode(node->consequent);
-    if (consequentResult.changed) {
-        m_changed = true;
-        node->consequent = std::move(consequentResult.node);
+    if (foundMatch) {
+      // 一致するcaseが見つかった場合、そのcaseのブロックに置き換える
+      common::Logger::Debug("switch文の条件が定数のため、一致するcaseに置き換えます");
+      auto* caseClause = dynamic_cast<CaseClause*>(matchingCase.get());
+      auto blockNode = parser::ast::ASTNodeFactory::CreateBlockStatement(
+          node->GetLocation(), caseClause->GetConsequent());
+      ReplaceCurrentNode(std::move(blockNode));
+      m_statistics.m_optimizedSwitches++;
     }
-    
-    // else節を変換
-    if (node->alternate) {
-        auto alternateResult = transformNode(node->alternate);
-        if (alternateResult.changed) {
-            m_changed = true;
-            node->alternate = std::move(alternateResult.node);
-        }
-    }
+  }
+
+  // 空の case 節を削除
+  auto& cases = node->GetCasesMut();
+  size_t originalSize = cases.size();
+  cases.erase(
+      std::remove_if(cases.begin(), cases.end(),
+                     [](const NodePtr& caseNode) {
+                       if (!caseNode) return true;
+                       auto* caseClause = dynamic_cast<CaseClause*>(caseNode.get());
+                       return !caseClause || caseClause->GetConsequent().empty();
+                     }),
+      cases.end());
+
+  if (cases.size() != originalSize) {
+    m_statistics.m_removedStatements += (originalSize - cases.size());
+  }
+
+  // ケース節がすべてなくなった場合
+  if (cases.empty()) {
+    common::Logger::Debug("switch文のすべてのcaseが削除されたため、switch文自体を削除します");
+    ReplaceCurrentNode(nullptr);
+  }
 }
 
-void DeadCodeEliminationTransformer::visitSwitchStatement(ast::SwitchStatement* node) {
-    // 判別式を変換
-    auto discriminantResult = transformNode(node->discriminant);
-    if (discriminantResult.changed) {
-        m_changed = true;
-        node->discriminant = std::move(discriminantResult.node);
+void DeadCodeEliminationTransformer::VisitForStatement(ForStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+
+  // 子ノードを訪問
+  Transformer::VisitForStatement(node);
+
+  // 条件式が常に false かチェック
+  if (node->GetTest()) {
+    std::optional<bool> testValue = TryEvaluateAsBoolean(node->GetTest());
+    if (testValue.has_value() && !testValue.value()) {
+      // ループは実行されない
+      m_statistics.m_optimizedLoops++;
+      NodePtr replacementNode = nullptr;
+      if (node->GetInit() && HasSideEffects(node->GetInit())) {
+        // 副作用のある init だけ残す
+        common::Logger::Debug("for文の条件が常にfalseのため、初期化式のみ残します");
+        replacementNode = parser::ast::ASTNodeFactory::CreateExpressionStatement(
+            node->GetLocation(), node->GetInit());
+      } else {
+        // init も副作用がないか存在しない -> ループ全体を削除
+        common::Logger::Debug("for文の条件が常にfalseで初期化式も副作用がないため、for文全体を削除します");
+      }
+      ReplaceCurrentNode(std::move(replacementNode));
     }
-    
-    // ケース節を変換
-    bool localChanged = false;
-    for (size_t i = 0; i < node->cases.size(); ++i) {
-        auto caseResult = transformNode(node->cases[i]);
-        if (caseResult.changed) {
-            localChanged = true;
-            node->cases[i] = std::move(caseResult.node);
+  } else if (node->GetBody()) {
+    // for(;;) のような無限ループの場合、ループ本体に到達不能コードがあるか確認
+    auto* bodyBlock = dynamic_cast<BlockStatement*>(node->GetBody().get());
+    if (bodyBlock) {
+      bool hasBreak = false;
+      bool hasReturn = false;
+      
+      // ループ本体内にbreak/returnがあるか確認
+      for (const auto& stmt : bodyBlock->GetBody()) {
+        if (stmt->GetType() == NodeType::BREAK_STATEMENT) {
+          hasBreak = true;
+          break;
+        } else if (stmt->GetType() == NodeType::RETURN_STATEMENT) {
+          hasReturn = true;
+          break;
         }
+      }
+      
+      // 脱出手段がない無限ループの後のコードは到達不能
+      if (!hasBreak && !hasReturn) {
+        MarkUnreachable();
+      }
     }
-    
-    // 空のケース節を削除
-    node->cases.erase(
-        std::remove_if(node->cases.begin(), node->cases.end(),
-            [](const ast::NodePtr& caseNode) {
-                auto* caseClause = static_cast<ast::CaseClause*>(caseNode.get());
-                return caseClause->consequent.empty();
-            }),
-        node->cases.end()
-    );
-    
-    // ケース節がすべて削除された場合
-    if (node->cases.empty()) {
-        // 空のブロックに置き換え
-        m_result = std::make_shared<ast::BlockStatement>();
-        m_changed = true;
-        return;
-    }
-    
-    m_changed = localChanged || (node->cases.size() != node->cases.size());
+  }
 }
 
-void DeadCodeEliminationTransformer::visitForStatement(ast::ForStatement* node) {
-    // 初期化式を変換
-    if (node->init) {
-        auto initResult = transformNode(node->init);
-        if (initResult.changed) {
-            m_changed = true;
-            node->init = std::move(initResult.node);
-        }
-    }
-    
-    // 条件式を変換
-    if (node->test) {
-        auto testResult = transformNode(node->test);
-        if (testResult.changed) {
-            m_changed = true;
-            node->test = std::move(testResult.node);
-        }
-        
-        // 条件式が静的に評価可能かチェック
-        bool conditionValue;
-        bool canDetermine = evaluatesToTruthy(node->test, conditionValue);
-        
-        if (canDetermine && !conditionValue) {
-            // 条件が常にfalseの場合、ループは一度も実行されない
-            if (node->init && !hasSideEffects(node->init)) {
-                // 初期化式が副作用を持たない場合は完全に削除
-                m_result = std::make_shared<ast::BlockStatement>();
-                m_changed = true;
-                return;
-            } else {
-                // 初期化式が副作用を持つ場合は初期化式だけを実行
-                auto block = std::make_shared<ast::BlockStatement>();
-                if (node->init) {
-                    // 初期化式を式ステートメントとして追加
-                    auto exprStmt = std::make_shared<ast::ExpressionStatement>();
-                    exprStmt->expression = node->init;
-                    block->body.push_back(exprStmt);
-                }
-                m_result = block;
-                m_changed = true;
-                return;
-            }
-        }
-    }
-    
-    // 更新式を変換
-    if (node->update) {
-        auto updateResult = transformNode(node->update);
-        if (updateResult.changed) {
-            m_changed = true;
-            node->update = std::move(updateResult.node);
-        }
-    }
-    
-    // 本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        m_changed = true;
-        node->body = std::move(bodyResult.node);
-    }
+void DeadCodeEliminationTransformer::VisitReturnStatement(ReturnStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+
+  // 子ノード (argument) を訪問
+  Transformer::VisitReturnStatement(node);
+
+  // この return 文以降は到達不能になることをマーク
+  MarkUnreachable();
 }
 
-void DeadCodeEliminationTransformer::visitReturnStatement(ast::ReturnStatement* node) {
-    // return文以降は到達不能コードになるため、そのことを記録
-    m_unreachableCodeDetected = true;
-    
-    // 戻り値があれば変換
-    if (node->argument) {
-        auto argumentResult = transformNode(node->argument);
-        if (argumentResult.changed) {
-            m_changed = true;
-            node->argument = std::move(argumentResult.node);
-        }
-    }
+void DeadCodeEliminationTransformer::VisitBreakStatement(parser::ast::BreakStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+  Transformer::VisitBreakStatement(node);
+  MarkUnreachable();
 }
 
-void DeadCodeEliminationTransformer::visitExpressionStatement(ast::ExpressionStatement* node) {
-    // 式を変換
-    auto expressionResult = transformNode(node->expression);
-    if (expressionResult.changed) {
-        m_changed = true;
-        node->expression = std::move(expressionResult.node);
-    }
-    
-    // 副作用のない式ステートメントは削除
-    if (!hasSideEffects(node->expression)) {
-        // 空のブロックに置き換え
-        m_result = std::make_shared<ast::BlockStatement>();
-        m_changed = true;
-    }
+void DeadCodeEliminationTransformer::VisitContinueStatement(parser::ast::ContinueStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+  Transformer::VisitContinueStatement(node);
+  MarkUnreachable();
 }
 
-void DeadCodeEliminationTransformer::visitVariableDeclaration(ast::VariableDeclaration* node) {
-    // 変数宣言子を変換
-    bool localChanged = false;
-    
-    // 使用されない宣言を削除するための一時リスト
-    std::vector<std::shared_ptr<ast::VariableDeclarator>> usedDeclarations;
-    usedDeclarations.reserve(node->declarations.size());
-    
-    for (size_t i = 0; i < node->declarations.size(); ++i) {
-        auto& declaration = node->declarations[i];
-        
-        // 初期化式があれば変換
-        if (declaration->init) {
-            auto initResult = transformNode(declaration->init);
-            if (initResult.changed) {
-                localChanged = true;
-                declaration->init = std::move(initResult.node);
-            }
-            
-            // 初期化式がある場合は副作用がある可能性があるため保持
-            usedDeclarations.push_back(declaration);
-            
-            // 変数使用状況を追跡
-            if (auto* id = dynamic_cast<ast::Identifier*>(declaration->id.get())) {
-                m_currentFunctionVariables[id->name] = VariableInfo{
-                    .initialized = true,
-                    .used = false,
-                    .constValue = evaluateConstantExpression(declaration->init.get())
-                };
-            }
-        } else {
-            // 初期化式がない場合でも、constやletの場合は保持
-            if (node->kind != ast::VariableDeclarationKind::Var || 
-                isVariableUsed(declaration->id.get())) {
-                usedDeclarations.push_back(declaration);
-            } else {
-                // 使用されていないvarで初期化もない変数は削除
-                localChanged = true;
-            }
-            
-            // 変数使用状況を追跡
-            if (auto* id = dynamic_cast<ast::Identifier*>(declaration->id.get())) {
-                m_currentFunctionVariables[id->name] = VariableInfo{
-                    .initialized = false,
-                    .used = false,
-                    .constValue = std::nullopt
-                };
-            }
-        }
-    }
-    
-    // 使用されない宣言が削除された場合
-    if (usedDeclarations.size() != node->declarations.size()) {
-        localChanged = true;
-        
-        // すべての宣言が削除された場合は空のブロックに置き換え
-        if (usedDeclarations.empty()) {
-            m_result = std::make_shared<ast::BlockStatement>();
-        } else {
-            // 残った宣言で更新
-            node->declarations = std::move(usedDeclarations);
-        }
-    }
-    
-    // 変数宣言の種類に基づいて最適化
-    if (node->kind == ast::VariableDeclarationKind::Const) {
-        // 定数伝播のための情報を収集
-        for (const auto& declaration : node->declarations) {
-            if (auto* id = dynamic_cast<ast::Identifier*>(declaration->id.get())) {
-                if (declaration->init) {
-                    auto constValue = evaluateConstantExpression(declaration->init.get());
-                    if (constValue) {
-                        m_constantValues[id->name] = *constValue;
-                    }
-                }
-            }
-        }
-    }
-    
-    m_changed |= localChanged;
+void DeadCodeEliminationTransformer::VisitThrowStatement(parser::ast::ThrowStatement* node) {
+  if (IsCurrentScopeUnreachable()) return;
+  Transformer::VisitThrowStatement(node);
+  MarkUnreachable();
 }
 
-void DeadCodeEliminationTransformer::visitFunctionDeclaration(ast::FunctionDeclaration* node) {
-    // 現在の関数スコープの変数を保存
-    auto oldFunctionVariables = m_currentFunctionVariables;
-    m_currentFunctionVariables.clear();
-    
-    // 関数名を変換
-    auto idResult = transformNode(node->id);
-    if (idResult.changed) {
-        m_changed = true;
-        node->id = std::move(idResult.node);
-    }
-    
-    // パラメータを変換
-    bool localChanged = false;
-    for (size_t i = 0; i < node->params.size(); ++i) {
-        auto paramResult = transformNode(node->params[i]);
-        if (paramResult.changed) {
-            localChanged = true;
-            node->params[i] = std::move(paramResult.node);
-        }
-    }
-    
-    // 本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        localChanged = true;
-        node->body = std::move(bodyResult.node);
-    }
-    
-    // 関数スコープの変数を復元
-    m_currentFunctionVariables = oldFunctionVariables;
-    
-    m_changed = localChanged;
+void DeadCodeEliminationTransformer::VisitExpressionStatement(ExpressionStatement* node) {
+  if (IsCurrentScopeUnreachable()) {
+    ReplaceCurrentNode(nullptr);
+    m_statistics.m_removedStatements++;
+    return;
+  }
+
+  // 子ノードを訪問
+  Transformer::VisitExpressionStatement(node);
+
+  // 副作用のない式文を削除
+  if (node->GetExpression() && !HasSideEffects(node->GetExpression())) {
+    common::Logger::Debug("副作用のない式文を削除します");
+    ReplaceCurrentNode(nullptr);
+    m_statistics.m_removedStatements++;
+  }
 }
 
-void DeadCodeEliminationTransformer::visitFunctionExpression(ast::FunctionExpression* node) {
-    // 現在の関数スコープの変数を保存
-    auto oldFunctionVariables = m_currentFunctionVariables;
-    m_currentFunctionVariables.clear();
-    
-    // 関数名があれば変換
-    bool localChanged = false;
-    if (node->id) {
-        auto idResult = transformNode(node->id);
-        if (idResult.changed) {
-            localChanged = true;
-            node->id = std::move(idResult.node);
-        }
+void DeadCodeEliminationTransformer::VisitVariableDeclaration(parser::ast::VariableDeclaration* node) {
+  if (IsCurrentScopeUnreachable()) {
+    ReplaceCurrentNode(nullptr);
+    m_statistics.m_removedStatements++;
+    return;
+  }
+
+  // 子ノードを訪問
+  Transformer::VisitVariableDeclaration(node);
+
+  // 変数宣言を処理
+  for (const auto& declarator : node->GetDeclarations()) {
+    auto* varDeclarator = dynamic_cast<parser::ast::VariableDeclarator*>(declarator.get());
+    if (varDeclarator && varDeclarator->GetId()) {
+      auto* identifier = dynamic_cast<parser::ast::Identifier*>(varDeclarator->GetId().get());
+      if (identifier) {
+        // 変数を現在のスコープに登録
+        DeclareVariable(identifier->GetName());
+      }
     }
-    
-    // パラメータを変換
-    for (size_t i = 0; i < node->params.size(); ++i) {
-        auto paramResult = transformNode(node->params[i]);
-        if (paramResult.changed) {
-            localChanged = true;
-            node->params[i] = std::move(paramResult.node);
-        }
-    }
-    
-    // 本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        localChanged = true;
-        node->body = std::move(bodyResult.node);
-    }
-    
-    // 関数スコープの変数を復元
-    m_currentFunctionVariables = oldFunctionVariables;
-    
-    m_changed = localChanged;
+  }
+
+  // 未使用変数の削除は LeaveScope() で行う
 }
 
-void DeadCodeEliminationTransformer::visitArrowFunctionExpression(ast::ArrowFunctionExpression* node) {
-    // 現在の関数スコープの変数を保存
-    auto oldFunctionVariables = m_currentFunctionVariables;
-    m_currentFunctionVariables.clear();
-    
-    // パラメータを変換
-    bool localChanged = false;
-    for (size_t i = 0; i < node->params.size(); ++i) {
-        auto paramResult = transformNode(node->params[i]);
-        if (paramResult.changed) {
-            localChanged = true;
-            node->params[i] = std::move(paramResult.node);
-        }
-    }
-    
-    // 本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        localChanged = true;
-        node->body = std::move(bodyResult.node);
-    }
-    
-    // 関数スコープの変数を復元
-    m_currentFunctionVariables = oldFunctionVariables;
-    
-    m_changed = localChanged;
+void DeadCodeEliminationTransformer::VisitIdentifier(parser::ast::Identifier* node) {
+  if (IsCurrentScopeUnreachable()) return;
+
+  // 変数の使用をマーク
+  MarkVariableUsed(node->GetName());
+
+  // 基底クラスの処理を呼び出す
+  Transformer::VisitIdentifier(node);
 }
 
-void DeadCodeEliminationTransformer::visitLiteral(ast::Literal* node) {
-    // リテラルに対する最適化は特にない
+// === ヘルパーメソッドの実装 ===
+
+bool DeadCodeEliminationTransformer::HasSideEffects(const NodePtr& node) const {
+  if (!node) return false;
+
+  switch (node->GetType()) {
+    case NodeType::LITERAL:
+    case NodeType::IDENTIFIER:
+    case NodeType::THIS_EXPRESSION:
+    case NodeType::SUPER:
+    case NodeType::ARRAY_EXPRESSION:  // 配列リテラル自体は副作用なし
+    case NodeType::OBJECT_EXPRESSION: // オブジェクトリテラル自体は副作用なし
+      return false;
+
+    case NodeType::CALL_EXPRESSION:
+      // 関数呼び出しは基本的に副作用があると見なす
+      // 将来的には純粋関数のリストを持つことも検討
+      return true;
+
+    case NodeType::NEW_EXPRESSION:
+    case NodeType::ASSIGNMENT_EXPRESSION:
+    case NodeType::UPDATE_EXPRESSION:
+    case NodeType::YIELD_EXPRESSION:
+    case NodeType::AWAIT_EXPRESSION:
+      return true;
+
+    case NodeType::UNARY_EXPRESSION: {
+      // delete演算子は副作用あり、それ以外は引数に依存
+      auto* unaryExpr = dynamic_cast<parser::ast::UnaryExpression*>(node.get());
+      if (unaryExpr && unaryExpr->GetOperator() == parser::ast::UnaryOperator::DELETE) {
+        return true;
+      }
+      return HasSideEffects(unaryExpr->GetArgument());
+    }
+
+    case NodeType::BINARY_EXPRESSION: {
+      // 二項演算子は両方のオペランドに依存
+      auto* binaryExpr = dynamic_cast<parser::ast::BinaryExpression*>(node.get());
+      return HasSideEffects(binaryExpr->GetLeft()) || HasSideEffects(binaryExpr->GetRight());
+    }
+
+    case NodeType::LOGICAL_EXPRESSION: {
+      // 論理演算子は両方のオペランドに依存
+      auto* logicalExpr = dynamic_cast<parser::ast::LogicalExpression*>(node.get());
+      return HasSideEffects(logicalExpr->GetLeft()) || HasSideEffects(logicalExpr->GetRight());
+    }
+
+    case NodeType::CONDITIONAL_EXPRESSION: {
+      // 条件演算子は全てのオペランドに依存
+      auto* condExpr = dynamic_cast<parser::ast::ConditionalExpression*>(node.get());
+      return HasSideEffects(condExpr->GetTest()) || 
+             HasSideEffects(condExpr->GetConsequent()) || 
+             HasSideEffects(condExpr->GetAlternate());
+    }
+
+    case NodeType::MEMBER_EXPRESSION: {
+      // メンバー式はオブジェクトに依存
+      auto* memberExpr = dynamic_cast<parser::ast::MemberExpression*>(node.get());
+      return HasSideEffects(memberExpr->GetObject());
+    }
+
+    default:
+      // 安全側に倒して、不明な式は副作用があると見なす
+      return true;
+  }
 }
 
-void DeadCodeEliminationTransformer::visitBinaryExpression(ast::BinaryExpression* node) {
-    // 左辺を変換
-    auto leftResult = transformNode(node->left);
-    if (leftResult.changed) {
-        m_changed = true;
-        node->left = std::move(leftResult.node);
-    }
-    
-    // 右辺を変換
-    auto rightResult = transformNode(node->right);
-    if (rightResult.changed) {
-        m_changed = true;
-        node->right = std::move(rightResult.node);
-    }
-    
-    // 静的に評価可能な二項演算を計算
-    ast::LiteralPtr result;
-    if (evaluateBinaryExpression(node, result)) {
-        m_result = result;
-        m_changed = true;
-    }
-}
+std::optional<bool> DeadCodeEliminationTransformer::TryEvaluateAsBoolean(const NodePtr& node) {
+  if (!node) return std::nullopt;
 
-void DeadCodeEliminationTransformer::visitLogicalExpression(ast::LogicalExpression* node) {
-    // 左辺を変換
-    auto leftResult = transformNode(node->left);
-    if (leftResult.changed) {
-        m_changed = true;
-        node->left = std::move(leftResult.node);
-    }
-    
-    // 左辺が静的に評価可能かチェック
-    bool leftValue;
-    bool canDetermineLeft = evaluatesToTruthy(node->left, leftValue);
-    
-    if (canDetermineLeft) {
-        if (node->operator_ == "&&") {
-            if (!leftValue) {
-                // left && right で左辺がfalseなら、常にfalse
-                m_result = std::make_shared<ast::Literal>(false);
-                m_changed = true;
-                return;
-            } else {
-                // left && right で左辺がtrueなら、右辺の値に等しい
-                auto rightResult = transformNode(node->right);
-                if (rightResult.changed) {
-                    m_changed = true;
-                    node->right = std::move(rightResult.node);
-                }
-                m_result = node->right;
-                m_changed = true;
-                return;
-            }
-        } else if (node->operator_ == "||") {
-            if (leftValue) {
-                // left || right で左辺がtrueなら、常にtrue
-                m_result = std::make_shared<ast::Literal>(true);
-                m_changed = true;
-                return;
-            } else {
-                // left || right で左辺がfalseなら、右辺の値に等しい
-                auto rightResult = transformNode(node->right);
-                if (rightResult.changed) {
-                    m_changed = true;
-                    node->right = std::move(rightResult.node);
-                }
-                m_result = node->right;
-                m_changed = true;
-                return;
-            }
-        }
-    }
-    
-    // 右辺を変換
-    auto rightResult = transformNode(node->right);
-    if (rightResult.changed) {
-        m_changed = true;
-        node->right = std::move(rightResult.node);
-    }
-}
-
-void DeadCodeEliminationTransformer::visitUnaryExpression(ast::UnaryExpression* node) {
-    // 引数を変換
-    auto argumentResult = transformNode(node->argument);
-    if (argumentResult.changed) {
-        m_changed = true;
-        node->argument = std::move(argumentResult.node);
-    }
-    
-    // 静的に評価可能な単項演算を計算
-    if (node->operator_ == "!" && node->argument->type == ast::NodeType::Literal) {
-        auto* literal = static_cast<ast::Literal*>(node->argument.get());
-        if (literal->valueType == ast::LiteralType::Boolean) {
-            // !true -> false, !false -> true
-            m_result = std::make_shared<ast::Literal>(!literal->booleanValue);
-            m_changed = true;
-            return;
-        } else if (literal->valueType == ast::LiteralType::Null) {
-            // !null -> true
-            m_result = std::make_shared<ast::Literal>(true);
-            m_changed = true;
-            return;
-        } else if (literal->valueType == ast::LiteralType::Number) {
-            // !0 -> true, !非0 -> false
-            m_result = std::make_shared<ast::Literal>(literal->numberValue == 0.0);
-            m_changed = true;
-            return;
-        } else if (literal->valueType == ast::LiteralType::String) {
-            // !"" -> true, !非"" -> false
-            m_result = std::make_shared<ast::Literal>(literal->stringValue.empty());
-            m_changed = true;
-            return;
-        }
-    } else if (node->operator_ == "-" && node->argument->type == ast::NodeType::Literal) {
-        auto* literal = static_cast<ast::Literal*>(node->argument.get());
-        if (literal->valueType == ast::LiteralType::Number) {
-            // -数値 -> 符号を反転した数値
-            m_result = std::make_shared<ast::Literal>(-literal->numberValue);
-            m_changed = true;
-            return;
-        }
-    } else if (node->operator_ == "+" && node->argument->type == ast::NodeType::Literal) {
-        auto* literal = static_cast<ast::Literal*>(node->argument.get());
-        if (literal->valueType == ast::LiteralType::Number) {
-            // +数値 -> そのまま
-            m_result = node->argument;
-            m_changed = true;
-            return;
-        } else if (literal->valueType == ast::LiteralType::String) {
-            // +文字列 -> 文字列を数値に変換
-            try {
-                double value = std::stod(literal->stringValue);
-                m_result = std::make_shared<ast::Literal>(value);
-                m_changed = true;
-                return;
-            } catch (...) {
-                // 変換できない場合はNaN
-                m_result = std::make_shared<ast::Literal>(std::numeric_limits<double>::quiet_NaN());
-                m_changed = true;
-                return;
-            }
-        } else if (literal->valueType == ast::LiteralType::Boolean) {
-            // +true -> 1, +false -> 0
-            m_result = std::make_shared<ast::Literal>(literal->booleanValue ? 1.0 : 0.0);
-            m_changed = true;
-            return;
-        } else if (literal->valueType == ast::LiteralType::Null) {
-            // +null -> 0
-            m_result = std::make_shared<ast::Literal>(0.0);
-            m_changed = true;
-            return;
-        }
-    }
-}
-
-void DeadCodeEliminationTransformer::visitConditionalExpression(ast::ConditionalExpression* node) {
-    // 条件式を変換
-    auto testResult = transformNode(node->test);
-    if (testResult.changed) {
-        m_changed = true;
-        node->test = std::move(testResult.node);
-    }
-    
-    // 条件式が静的に評価可能かチェック
-    bool conditionValue;
-    bool canDetermine = evaluatesToTruthy(node->test, conditionValue);
-    
-    if (canDetermine) {
-        if (conditionValue) {
-            // 条件がtrueの場合、consequent部分だけを変換して結果とする
-            auto consequentResult = transformNode(node->consequent);
-            if (consequentResult.changed) {
-                m_changed = true;
-                node->consequent = std::move(consequentResult.node);
-            }
-            m_result = node->consequent;
-            m_changed = true;
-            return;
-        } else {
-            // 条件がfalseの場合、alternate部分だけを変換して結果とする
-            auto alternateResult = transformNode(node->alternate);
-            if (alternateResult.changed) {
-                m_changed = true;
-                node->alternate = std::move(alternateResult.node);
-            }
-            m_result = node->alternate;
-            m_changed = true;
-            return;
-        }
-    }
-    
-    // 条件式が静的に評価できない場合は通常の処理を続行
-    
-    // then部分を変換
-    auto consequentResult = transformNode(node->consequent);
-    if (consequentResult.changed) {
-        m_changed = true;
-        node->consequent = std::move(consequentResult.node);
-    }
-    
-    // else部分を変換
-    auto alternateResult = transformNode(node->alternate);
-    if (alternateResult.changed) {
-        m_changed = true;
-        node->alternate = std::move(alternateResult.node);
-    }
-}
-
-bool DeadCodeEliminationTransformer::hasSideEffects(ast::NodePtr node) {
-    if (!node) {
+  // リテラル値の場合
+  if (auto literal = std::dynamic_pointer_cast<parser::ast::Literal>(node)) {
+    switch (literal->GetLiteralType()) {
+      case LiteralType::Boolean:
+        return literal->GetBooleanValue();
+      case LiteralType::Null:
         return false;
+      case LiteralType::Number: {
+        double value = literal->GetNumberValue();
+        return value != 0 && !std::isnan(value);
+      }
+      case LiteralType::String:
+        return !literal->GetStringValue().empty();
+      case LiteralType::BigInt:
+        // BigIntは0でなければtrue
+        return literal->GetBigIntValue() != "0";
+      case LiteralType::RegExp:
+        // 正規表現は常にtrue
+        return true;
+      default:
+        return std::nullopt;
     }
+  }
+
+  // 単項演算子の場合
+  if (auto unaryExpr = std::dynamic_pointer_cast<parser::ast::UnaryExpression>(node)) {
+    if (unaryExpr->GetOperator() == UnaryOperator::LOGICAL_NOT) {
+      auto operandValue = TryEvaluateAsBoolean(unaryExpr->GetArgument());
+      if (operandValue.has_value()) {
+        return !operandValue.value();
+      }
+    } else if (unaryExpr->GetOperator() == UnaryOperator::VOID) {
+      // void演算子は常にundefinedを返す
+      return false;
+    }
+  }
+
+  // 論理演算子の場合
+  if (auto logicalExpr = std::dynamic_pointer_cast<parser::ast::LogicalExpression>(node)) {
+    auto leftValue = TryEvaluateAsBoolean(logicalExpr->GetLeft());
     
-    switch (node->type) {
-        case ast::NodeType::CallExpression:
-        case ast::NodeType::NewExpression:
-        case ast::NodeType::AssignmentExpression:
-        case ast::NodeType::UpdateExpression:
-        case ast::NodeType::AwaitExpression:
-        case ast::NodeType::YieldExpression:
-        case ast::NodeType::ThrowStatement:
-            // これらの式は副作用を持つ
-            return true;
-            
-        case ast::NodeType::UnaryExpression: {
-            auto* unary = static_cast<ast::UnaryExpression*>(node.get());
-            // delete演算子は副作用を持つ
-            if (unary->operator_ == "delete") {
-                return true;
-            }
-            // その他の単項演算子は引数に依存
-            return hasSideEffects(unary->argument);
-        }
+    if (leftValue.has_value()) {
+      if (logicalExpr->GetOperator() == parser::ast::LogicalOperator::AND) {
+        // &&演算子: 左辺がfalseなら全体はfalse
+        if (!leftValue.value()) return false;
         
-        case ast::NodeType::BinaryExpression: {
-            auto* binary = static_cast<ast::BinaryExpression*>(node.get());
-            // 左辺または右辺に副作用があるかチェック
-            return hasSideEffects(binary->left) || hasSideEffects(binary->right);
-        }
+        // 左辺がtrueなら右辺の値
+        return TryEvaluateAsBoolean(logicalExpr->GetRight());
+      } else if (logicalExpr->GetOperator() == parser::ast::LogicalOperator::OR) {
+        // ||演算子: 左辺がtrueなら全体はtrue
+        if (leftValue.value()) return true;
         
-        case ast::NodeType::LogicalExpression: {
-            auto* logical = static_cast<ast::LogicalExpression*>(node.get());
-            // 左辺または右辺に副作用があるかチェック
-            return hasSideEffects(logical->left) || hasSideEffects(logical->right);
-        }
-        
-        case ast::NodeType::ConditionalExpression: {
-            auto* conditional = static_cast<ast::ConditionalExpression*>(node.get());
-            // 条件式、then式、else式のいずれかに副作用があるかチェック
-            return hasSideEffects(conditional->test) ||
-                   hasSideEffects(conditional->consequent) ||
-                   hasSideEffects(conditional->alternate);
-        }
-        
-        case ast::NodeType::SequenceExpression: {
-            auto* sequence = static_cast<ast::SequenceExpression*>(node.get());
-            // 式のいずれかに副作用があるかチェック
-            for (const auto& expr : sequence->expressions) {
-                if (hasSideEffects(expr)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        
+        // 左辺がfalseなら右辺の値
+        return TryEvaluateAsBoolean(logicalExpr->GetRight());
+      }
+    }
+  }
+
+  // 二項演算子の場合
+  if (auto binaryExpr = std::dynamic_pointer_cast<parser::ast::BinaryExpression>(node)) {
+    auto leftValue = TryEvaluateConstant(binaryExpr->GetLeft());
+    auto rightValue = TryEvaluateConstant(binaryExpr->GetRight());
+    
+    if (leftValue.has_value() && rightValue.has_value()) {
+      // 比較演算子の評価
+      switch (binaryExpr->GetOperator()) {
+        case parser::ast::BinaryOperator::EQUAL:
+          return ValuesEqual(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::NOT_EQUAL:
+          return !ValuesEqual(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::STRICT_EQUAL:
+          return ValuesStrictEqual(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::STRICT_NOT_EQUAL:
+          return !ValuesStrictEqual(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::LESS_THAN:
+          return ValuesLessThan(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::GREATER_THAN:
+          return ValuesGreaterThan(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::LESS_THAN_EQUAL:
+          return ValuesLessThanEqual(*leftValue, *rightValue);
+        case parser::ast::BinaryOperator::GREATER_THAN_EQUAL:
+          return ValuesGreaterThanEqual(*leftValue, *rightValue);
         default:
-            // その他のノードタイプは副作用がないと判断
-            return false;
+          break;
+      }
     }
+  }
+
+  return std::nullopt;  // 静的に評価できない
 }
 
-bool DeadCodeEliminationTransformer::evaluatesToTruthy(ast::NodePtr node, bool& result) {
-    if (!node) {
-        return false;
-    }
+std::optional<parser::ast::Value> DeadCodeEliminationTransformer::TryEvaluateConstant(const NodePtr& node) {
+  if (!node) return std::nullopt;
+
+  // リテラル値の場合
+  if (auto literal = std::dynamic_pointer_cast<parser::ast::Literal>(node)) {
+    parser::ast::Value value;
     
-    if (node->type == ast::NodeType::Literal) {
-        auto* literal = static_cast<ast::Literal*>(node.get());
-        switch (literal->valueType) {
-            case ast::LiteralType::Boolean:
-                result = literal->booleanValue;
-                return true;
-                
-            case ast::LiteralType::Number:
-                // 0と非0で真偽値が決まる
-                result = literal->numberValue != 0.0 && !std::isnan(literal->numberValue);
-                return true;
-                
-            case ast::LiteralType::String:
-                // 空文字と非空文字で真偽値が決まる
-                result = !literal->stringValue.empty();
-                return true;
-                
-            case ast::LiteralType::Null:
-                // nullはfalseと評価される
-                result = false;
-                return true;
-                
-            default:
-                return false;
-        }
-    } else if (node->type == ast::NodeType::UnaryExpression) {
-        auto* unary = static_cast<ast::UnaryExpression*>(node.get());
-        if (unary->operator_ == "!") {
-            // !式の場合、式を評価して結果を反転
-            bool innerResult;
-            if (evaluatesToTruthy(unary->argument, innerResult)) {
-                result = !innerResult;
-                return true;
-            }
-        }
-    } else if (node->type == ast::NodeType::BinaryExpression) {
-        // 二項演算の結果を評価
-        ast::LiteralPtr literalResult;
-        if (evaluateBinaryExpression(static_cast<ast::BinaryExpression*>(node.get()), literalResult)) {
-            return evaluatesToTruthy(literalResult, result);
-        }
+    switch (literal->GetLiteralType()) {
+      case LiteralType::Boolean:
+        value.type = parser::ast::ValueType::Boolean;
+        value.booleanValue = literal->GetBooleanValue();
+        return value;
+      case LiteralType::Null:
+        value.type = parser::ast::ValueType::Null;
+        return value;
+      case LiteralType::Number:
+        value.type = parser::ast::ValueType::Number;
+        value.numberValue = literal->GetNumberValue();
+        return value;
+      case LiteralType::String:
+        value.type = parser::ast::ValueType::String;
+        value.stringValue = literal->GetStringValue();
+        return value;
+      case LiteralType::BigInt:
+        value.type = parser::ast::ValueType::BigInt;
+        value.bigIntValue = literal->GetBigIntValue();
+        return value;
+      default:
+        return std::nullopt;
     }
-    
-    // 静的に評価できない
-    return false;
-}
-void DeadCodeEliminationTransformer::collectUsedVariables(ast::NodePtr node, std::unordered_set<std::string>& usedVariables) {
-    if (!node) {
-        return;
-    }
-    
-    switch (node->type) {
-        case ast::NodeType::Identifier: {
-            auto* identifier = static_cast<ast::Identifier*>(node.get());
-            usedVariables.insert(identifier->name);
-            break;
-        }
-        case ast::NodeType::MemberExpression: {
-            auto* memberExpr = static_cast<ast::MemberExpression*>(node.get());
-            // オブジェクトの変数を収集
-            collectUsedVariables(memberExpr->object, usedVariables);
-            // 計算されたプロパティの場合、そのプロパティ式内の変数も収集
-            if (memberExpr->computed) {
-                collectUsedVariables(memberExpr->property, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::CallExpression: {
-            auto* callExpr = static_cast<ast::CallExpression*>(node.get());
-            // 関数自体の変数を収集
-            collectUsedVariables(callExpr->callee, usedVariables);
-            // 引数内の変数を収集
-            for (const auto& arg : callExpr->arguments) {
-                collectUsedVariables(arg, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::BinaryExpression: {
-            auto* binaryExpr = static_cast<ast::BinaryExpression*>(node.get());
-            collectUsedVariables(binaryExpr->left, usedVariables);
-            collectUsedVariables(binaryExpr->right, usedVariables);
-            break;
-        }
-        case ast::NodeType::UnaryExpression: {
-            auto* unaryExpr = static_cast<ast::UnaryExpression*>(node.get());
-            collectUsedVariables(unaryExpr->argument, usedVariables);
-            break;
-        }
-        case ast::NodeType::ConditionalExpression: {
-            auto* condExpr = static_cast<ast::ConditionalExpression*>(node.get());
-            collectUsedVariables(condExpr->test, usedVariables);
-            collectUsedVariables(condExpr->consequent, usedVariables);
-            collectUsedVariables(condExpr->alternate, usedVariables);
-            break;
-        }
-        case ast::NodeType::AssignmentExpression: {
-            auto* assignExpr = static_cast<ast::AssignmentExpression*>(node.get());
-            // 右辺の変数を収集
-            collectUsedVariables(assignExpr->right, usedVariables);
-            // 左辺が識別子でない場合（例：obj.prop = value）、その中の変数も収集
-            if (assignExpr->left->type != ast::NodeType::Identifier) {
-                collectUsedVariables(assignExpr->left, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::ArrayExpression: {
-            auto* arrayExpr = static_cast<ast::ArrayExpression*>(node.get());
-            for (const auto& element : arrayExpr->elements) {
-                if (element) { // スパース配列の場合、nullの要素がある可能性がある
-                    collectUsedVariables(element, usedVariables);
-                }
-            }
-            break;
-        }
-        case ast::NodeType::ObjectExpression: {
-            auto* objExpr = static_cast<ast::ObjectExpression*>(node.get());
-            for (const auto& prop : objExpr->properties) {
-                // 計算されたプロパティキーの場合
-                if (prop->computed) {
-                    collectUsedVariables(prop->key, usedVariables);
-                }
-                // プロパティ値内の変数を収集
-                collectUsedVariables(prop->value, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::SequenceExpression: {
-            auto* seqExpr = static_cast<ast::SequenceExpression*>(node.get());
-            for (const auto& expr : seqExpr->expressions) {
-                collectUsedVariables(expr, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::UpdateExpression: {
-            auto* updateExpr = static_cast<ast::UpdateExpression*>(node.get());
-            collectUsedVariables(updateExpr->argument, usedVariables);
-            break;
-        }
-        case ast::NodeType::LogicalExpression: {
-            auto* logicalExpr = static_cast<ast::LogicalExpression*>(node.get());
-            collectUsedVariables(logicalExpr->left, usedVariables);
-            collectUsedVariables(logicalExpr->right, usedVariables);
-            break;
-        }
-        case ast::NodeType::TemplateLiteral: {
-            auto* templateLit = static_cast<ast::TemplateLiteral*>(node.get());
-            for (const auto& expr : templateLit->expressions) {
-                collectUsedVariables(expr, usedVariables);
-            }
-            break;
-        }
-        case ast::NodeType::TaggedTemplateExpression: {
-            auto* taggedExpr = static_cast<ast::TaggedTemplateExpression*>(node.get());
-            collectUsedVariables(taggedExpr->tag, usedVariables);
-            collectUsedVariables(taggedExpr->quasi, usedVariables);
-            break;
-        }
-        case ast::NodeType::ArrowFunctionExpression:
-        case ast::NodeType::FunctionExpression: {
-            // 関数式内のスコープは別途処理するため、ここでは収集しない
-            // ただし、クロージャとして外部変数を参照する場合は別途解析が必要
-            break;
-        }
-        // リテラルや定数などの場合は変数参照がないのでスキップ
-        case ast::NodeType::Literal:
-        case ast::NodeType::ThisExpression:
-        case ast::NodeType::Super:
-            break;
-        // その他のノードタイプに対する処理
+  }
+
+  // 単項演算子の場合
+  if (auto unaryExpr = std::dynamic_pointer_cast<parser::ast::UnaryExpression>(node)) {
+    auto operandValue = TryEvaluateConstant(unaryExpr->GetArgument());
+    if (operandValue.has_value()) {
+      parser::ast::Value result;
+      
+      switch (unaryExpr->GetOperator()) {
+        case UnaryOperator::PLUS:
+          if (operandValue->type == parser::ast::ValueType::Number) {
+            result.type = parser::ast::ValueType::Number;
+            result.numberValue = operandValue->numberValue;
+            return result;
+          }
+          break;
+        case UnaryOperator::MINUS:
+          if (operandValue->type == parser::ast::ValueType::Number) {
+            result.type = parser::ast::ValueType::Number;
+            result.numberValue = -operandValue->numberValue;
+            return result;
+          }
+          break;
+        case UnaryOperator::LOGICAL_NOT:
+          result.type = parser::ast::ValueType::Boolean;
+          result.booleanValue = !IsValueTruthy(*operandValue);
+          return result;
         default:
-            // 子ノードがある可能性のあるその他のノードタイプを処理
-            if (auto* block = node->asBlock()) {
-                for (const auto& stmt : block->body) {
-                    collectUsedVariables(stmt, usedVariables);
-                }
-            } else if (auto* program = node->asProgram()) {
-                for (const auto& stmt : program->body) {
-                    collectUsedVariables(stmt, usedVariables);
-                }
-            } else if (auto* ifStmt = node->asIfStatement()) {
-                collectUsedVariables(ifStmt->test, usedVariables);
-                collectUsedVariables(ifStmt->consequent, usedVariables);
-                if (ifStmt->alternate) {
-                    collectUsedVariables(ifStmt->alternate, usedVariables);
-                }
-            } else if (auto* loopStmt = node->asLoopStatement()) {
-                // 各種ループ文の条件式と本体を処理
-                if (loopStmt->test) {
-                    collectUsedVariables(loopStmt->test, usedVariables);
-                }
-                if (loopStmt->body) {
-                    collectUsedVariables(loopStmt->body, usedVariables);
-                }
-                if (auto* forStmt = node->asForStatement()) {
-                    if (forStmt->init) {
-                        collectUsedVariables(forStmt->init, usedVariables);
-                    }
-                    if (forStmt->update) {
-                        collectUsedVariables(forStmt->update, usedVariables);
-                    }
-                }
-            } else if (auto* switchStmt = node->asSwitchStatement()) {
-                collectUsedVariables(switchStmt->discriminant, usedVariables);
-                for (const auto& caseClause : switchStmt->cases) {
-                    if (caseClause->test) {
-                        collectUsedVariables(caseClause->test, usedVariables);
-                    }
-                    for (const auto& stmt : caseClause->consequent) {
-                        collectUsedVariables(stmt, usedVariables);
-                    }
-                }
-            } else if (auto* tryStmt = node->asTryStatement()) {
-                collectUsedVariables(tryStmt->block, usedVariables);
-                if (tryStmt->handler) {
-                    collectUsedVariables(tryStmt->handler->body, usedVariables);
-                }
-                if (tryStmt->finalizer) {
-                    collectUsedVariables(tryStmt->finalizer, usedVariables);
-                }
+          break;
+      }
+    }
+  }
+
+  // 二項演算子の場合
+  if (auto binaryExpr = std::dynamic_pointer_cast<parser::ast::BinaryExpression>(node)) {
+    auto leftValue = TryEvaluateConstant(binaryExpr->GetLeft());
+    auto rightValue = TryEvaluateConstant(binaryExpr->GetRight());
+    
+    if (leftValue.has_value() && rightValue.has_value()) {
+      parser::ast::Value result;
+      
+      // 数値演算
+      if (leftValue->type == parser::ast::ValueType::Number && 
+          rightValue->type == parser::ast::ValueType::Number) {
+        result.type = parser::ast::ValueType::Number;
+        
+        switch (binaryExpr->GetOperator()) {
+          case parser::ast::BinaryOperator::PLUS:
+            result.numberValue = leftValue->numberValue + rightValue->numberValue;
+            return result;
+          case parser::ast::BinaryOperator::MINUS:
+            result.numberValue = leftValue->numberValue - rightValue->numberValue;
+            return result;
+          case parser::ast::BinaryOperator::MULTIPLY:
+            result.numberValue = leftValue->numberValue * rightValue->numberValue;
+            return result;
+          case parser::ast::BinaryOperator::DIVIDE:
+            if (rightValue->numberValue != 0) {
+              result.numberValue = leftValue->numberValue / rightValue->numberValue;
+              return result;
             }
             break;
+          case parser::ast::BinaryOperator::MODULO:
+            if (rightValue->numberValue != 0) {
+              result.numberValue = std::fmod(leftValue->numberValue, rightValue->numberValue);
+              return result;
+            }
+            break;
+          default:
+            break;
+        }
+      }
+      
+      // 文字列連結
+      if (binaryExpr->GetOperator() == parser::ast::BinaryOperator::PLUS) {
+        if (leftValue->type == parser::ast::ValueType::String || 
+            rightValue->type == parser::ast::ValueType::String) {
+          result.type = parser::ast::ValueType::String;
+          result.stringValue = ValueToString(*leftValue) + ValueToString(*rightValue);
+          return result;
+        }
+      }
     }
+  }
+
+  return std::nullopt;  // 静的に評価できない
 }
 
-bool DeadCodeEliminationTransformer::evaluateBinaryExpression(ast::BinaryExpression* node, ast::LiteralPtr& result) {
-    // リテラル同士の演算のみを静的に評価
-    if (node->left->type != ast::NodeType::Literal || node->right->type != ast::NodeType::Literal) {
-        return false;
+bool DeadCodeEliminationTransformer::IsValueTruthy(const parser::ast::Value& value) {
+  switch (value.type) {
+    case parser::ast::ValueType::Boolean:
+      return value.booleanValue;
+    case parser::ast::ValueType::Null:
+      return false;
+    case parser::ast::ValueType::Number:
+      return value.numberValue != 0 && !std::isnan(value.numberValue);
+    case parser::ast::ValueType::String:
+      return !value.stringValue.empty();
+    case parser::ast::ValueType::BigInt:
+      return value.bigIntValue != "0";
+    default:
+      return true;  // Object, Function, Symbol は常にtruthy
+  }
+}
+
+std::string DeadCodeEliminationTransformer::ValueToString(const parser::ast::Value& value) {
+  switch (value.type) {
+    case parser::ast::ValueType::Boolean:
+      return value.booleanValue ? "true" : "false";
+    case parser::ast::ValueType::Null:
+      return "null";
+    case parser::ast::ValueType::Number:
+      return std::to_string(value.numberValue);
+    case parser::ast::ValueType::String:
+      return value.stringValue;
+    case parser::ast::ValueType::BigInt:
+      return value.bigIntValue;
+    case parser::ast::ValueType::Undefined:
+      return "undefined";
+    case parser::ast::ValueType::Symbol:
+      return "Symbol()";
+    default:
+      return "[object Object]";  // オブジェクト型のデフォルト文字列表現
+  }
+}
+
+bool DeadCodeEliminationTransformer::ValuesEqual(const parser::ast::Value& left, const parser::ast::Value& right) {
+  // 型が同じ場合は厳密等価
+  if (left.type == right.type) {
+    return ValuesStrictEqual(left, right);
+  }
+  
+  // 型が異なる場合の等価比較
+  // 数値と文字列
+  if (left.type == parser::ast::ValueType::Number && right.type == parser::ast::ValueType::String) {
+    try {
+      return left.numberValue == std::stod(right.stringValue);
+    } catch (...) {
+      return false;
     }
-    
-    auto* left = static_cast<ast::Literal*>(node->left.get());
-    auto* right = static_cast<ast::Literal*>(node->right.get());
-    
-    // 数値演算
-    if (left->valueType == ast::LiteralType::Number && right->valueType == ast::LiteralType::Number) {
-        double leftValue = left->numberValue;
-        double rightValue = right->numberValue;
-        
-        if (node->operator_ == "+") {
-            result = std::make_shared<ast::Literal>(leftValue + rightValue);
-            return true;
-        } else if (node->operator_ == "-") {
-            result = std::make_shared<ast::Literal>(leftValue - rightValue);
-            return true;
-        } else if (node->operator_ == "*") {
-            result = std::make_shared<ast::Literal>(leftValue * rightValue);
-            return true;
-        } else if (node->operator_ == "/") {
-            if (rightValue == 0.0) {
-                // ゼロ除算の場合は静的評価しない
-                return false;
-            }
-            result = std::make_shared<ast::Literal>(leftValue / rightValue);
-            return true;
-        } else if (node->operator_ == "%") {
-            if (rightValue == 0.0) {
-                // ゼロ除算の場合は静的評価しない
-                return false;
-            }
-            result = std::make_shared<ast::Literal>(std::fmod(leftValue, rightValue));
-            return true;
-        } else if (node->operator_ == "**") {
-            result = std::make_shared<ast::Literal>(std::pow(leftValue, rightValue));
-            return true;
-        } else if (node->operator_ == "<") {
-            result = std::make_shared<ast::Literal>(leftValue < rightValue);
-            return true;
-        } else if (node->operator_ == ">") {
-            result = std::make_shared<ast::Literal>(leftValue > rightValue);
-            return true;
-        } else if (node->operator_ == "<=") {
-            result = std::make_shared<ast::Literal>(leftValue <= rightValue);
-            return true;
-        } else if (node->operator_ == ">=") {
-            result = std::make_shared<ast::Literal>(leftValue >= rightValue);
-            return true;
-        } else if (node->operator_ == "==") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!=") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        } else if (node->operator_ == "===") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!==") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        }
+  }
+  if (left.type == parser::ast::ValueType::String && right.type == parser::ast::ValueType::Number) {
+    try {
+      return std::stod(left.stringValue) == right.numberValue;
+    } catch (...) {
+      return false;
     }
-    
-    // 文字列演算
-    if (left->valueType == ast::LiteralType::String && right->valueType == ast::LiteralType::String) {
-        const std::string& leftValue = left->stringValue;
-        const std::string& rightValue = right->stringValue;
-        
-        if (node->operator_ == "+") {
-            result = std::make_shared<ast::Literal>(leftValue + rightValue);
-            return true;
-        } else if (node->operator_ == "==") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!=") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        } else if (node->operator_ == "===") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!==") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        }
+  }
+  
+  // nullとundefined
+  if ((left.type == parser::ast::ValueType::Null && right.type == parser::ast::ValueType::Undefined) ||
+      (left.type == parser::ast::ValueType::Undefined && right.type == parser::ast::ValueType::Null)) {
+    return true;
+  }
+  
+  // 数値とブール値
+  if (left.type == parser::ast::ValueType::Number && right.type == parser::ast::ValueType::Boolean) {
+    return left.numberValue == (right.booleanValue ? 1.0 : 0.0);
+  }
+  if (left.type == parser::ast::ValueType::Boolean && right.type == parser::ast::ValueType::Number) {
+    return (left.booleanValue ? 1.0 : 0.0) == right.numberValue;
+  }
+  
+  // 文字列とブール値
+  if (left.type == parser::ast::ValueType::String && right.type == parser::ast::ValueType::Boolean) {
+    if (left.stringValue.empty()) {
+      return !right.booleanValue;
     }
-    
-    // ブール演算
-    if (left->valueType == ast::LiteralType::Boolean && right->valueType == ast::LiteralType::Boolean) {
-        bool leftValue = left->booleanValue;
-        bool rightValue = right->booleanValue;
-        
-        if (node->operator_ == "==") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!=") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        } else if (node->operator_ == "===") {
-            result = std::make_shared<ast::Literal>(leftValue == rightValue);
-            return true;
-        } else if (node->operator_ == "!==") {
-            result = std::make_shared<ast::Literal>(leftValue != rightValue);
-            return true;
-        }
+    return right.booleanValue;
+  }
+  if (left.type == parser::ast::ValueType::Boolean && right.type == parser::ast::ValueType::String) {
+    if (right.stringValue.empty()) {
+      return !left.booleanValue;
     }
-    
-    // null演算
-    if (left->valueType == ast::LiteralType::Null || right->valueType == ast::LiteralType::Null) {
-        if (node->operator_ == "==") {
-            bool result_val = (left->valueType == ast::LiteralType::Null && right->valueType == ast::LiteralType::Null);
-            result = std::make_shared<ast::Literal>(result_val);
-            return true;
-        } else if (node->operator_ == "!=") {
-            bool result_val = !(left->valueType == ast::LiteralType::Null && right->valueType == ast::LiteralType::Null);
-            result = std::make_shared<ast::Literal>(result_val);
-            return true;
-        } else if (node->operator_ == "===") {
-            bool result_val = (left->valueType == ast::LiteralType::Null && right->valueType == ast::LiteralType::Null);
-            result = std::make_shared<ast::Literal>(result_val);
-            return true;
-        } else if (node->operator_ == "!==") {
-            bool result_val = !(left->valueType == ast::LiteralType::Null && right->valueType == ast::LiteralType::Null);
-            result = std::make_shared<ast::Literal>(result_val);
-            return true;
-        }
-    }
-    
-    // 静的に評価できない
+    return left.booleanValue;
+  }
+  
+  return false;
+}
+
+bool DeadCodeEliminationTransformer::ValuesStrictEqual(const parser::ast::Value& left, const parser::ast::Value& right) {
+  if (left.type != right.type) {
     return false;
+  }
+  
+  switch (left.type) {
+    case parser::ast::ValueType::Boolean:
+      return left.booleanValue == right.booleanValue;
+    case parser::ast::ValueType::Null:
+    case parser::ast::ValueType::Undefined:
+      return true;  // null同士、undefined同士は常に等しい
+    case parser::ast::ValueType::Number:
+      // NaNは自分自身と等しくない
+      if (std::isnan(left.numberValue) || std::isnan(right.numberValue)) {
+        return false;
+      }
+      // +0と-0は等しい
+      if (left.numberValue == 0 && right.numberValue == 0) {
+        return true;
+      }
+      return left.numberValue == right.numberValue;
+    case parser::ast::ValueType::String:
+      return left.stringValue == right.stringValue;
+    case parser::ast::ValueType::BigInt:
+      return left.bigIntValue == right.bigIntValue;
+    case parser::ast::ValueType::Symbol:
+      // シンボルは参照で比較
+      return left.symbolId == right.symbolId;
+    default:
+      // オブジェクトは参照で比較（実際のJSエンジンでは参照の比較）
+      return false;  // 異なるオブジェクトは常に異なる
+  }
 }
 
-bool DeadCodeEliminationTransformer::removeUnreachableCode(std::vector<ast::NodePtr>& statements) {
-    // 到達不能コードを検出・削除する
-    bool unreachableFound = false;
-    bool changed = false;
+void DeadCodeEliminationTransformer::MarkVariableUsed(const std::string& name) {
+  if (m_scopeStack.empty()) {
+    m_usedGlobals.insert(name);  // グローバル変数が使用されたとマーク
+    return;
+  }
+  
+  // 現在のスコープから外側に向かって探す
+  auto tempStack = m_scopeStack;
+  bool found = false;
+  
+  while (!tempStack.empty() && !found) {
+    auto& scope = tempStack.top();
+    if (scope.m_declaredVars.count(name) > 0) {
+      scope.m_usedVars.insert(name);
+      found = true;
+    }
+    tempStack.pop();
+  }
+  
+  // どのスコープにも見つからなかった場合はグローバル変数として扱う
+  if (!found) {
+    m_usedGlobals.insert(name);
+  }
+}
+
+void DeadCodeEliminationTransformer::MarkUnreachable() {
+  if (!m_scopeStack.empty()) {
+    m_scopeStack.top().m_unreachableCodeDetected = true;
+  }
+  m_unreachableCodeDetected = true;
+}
+
+bool DeadCodeEliminationTransformer::IsCurrentScopeUnreachable() const {
+  return !m_scopeStack.empty() && m_scopeStack.top().m_unreachableCodeDetected;
+}
+
+// スコープ管理のヘルパーメソッド
+void DeadCodeEliminationTransformer::EnterScope() {
+  m_scopeStack.push(ScopeInfo());
+}
+
+void DeadCodeEliminationTransformer::ExitScope() {
+  if (!m_scopeStack.empty()) {
+    m_scopeStack.pop();
+  }
+}
+
+void DeadCodeEliminationTransformer::DeclareVariable(const std::string& name) {
+  if (!m_scopeStack.empty()) {
+    m_scopeStack.top().m_declaredVars.insert(name);
+  }
+}
+
+bool DeadCodeEliminationTransformer::IsVariableUsed(const std::string& name) const {
+  if (m_scopeStack.empty()) {
+    return m_usedGlobals.count(name) > 0;
+  }
+  
+  return m_scopeStack.top().m_usedVars.count(name) > 0;
+}
+
+bool DeadCodeEliminationTransformer::RemoveUnreachableCode(std::vector<NodePtr>& statements) {
+  bool unreachableFound = false;
+  bool changed = false;
+
+  for (auto it = statements.begin(); it != statements.end();) {
+    if (unreachableFound) {
+      // 到達不能コードが見つかった場合、それ以降のコードを削除
+      it = statements.erase(it);
+      changed = true;
+    } else {
+      NodePtr& stmt = *it;
+
+      // 一時的にフラグをリセット
+      bool prevUnreachable = m_unreachableCodeDetected;
+      m_unreachableCodeDetected = false;
+
+      // ステートメントを変換
+      auto result = Transform(stmt);
+      if (result.changed) {
+        stmt = std::move(result.node);
+        changed = true;
+      }
+
+      // このステートメントが制御フローを終了するかチェック
+      unreachableFound = m_unreachableCodeDetected;
+      
+      // 親スコープの状態を復元
+      if (!unreachableFound) {
+        m_unreachableCodeDetected = prevUnreachable;
+      }
+
+      ++it;
+    }
+  }
+
+  return changed;
+}
+
+bool DeadCodeEliminationTransformer::RemoveNoEffectExpressions(std::vector<NodePtr>& statements) {
+  bool changed = false;
+  
+  for (auto it = statements.begin(); it != statements.end();) {
+    NodePtr& stmt = *it;
     
-    for (auto it = statements.begin(); it != statements.end(); ) {
-        if (unreachableFound) {
-            // 既に到達不能コードが見つかっている場合、それ以降のコードを削除
-            it = statements.erase(it);
-            changed = true;
-        } else {
-            // return, throw, breakなどの制御フロー終了ステートメントをチェック
-            ast::NodePtr& stmt = *it;
-            
-            // リセット
-            m_unreachableCodeDetected = false;
-            
-            // ステートメントを変換
-            auto result = transformNode(stmt);
-            if (result.changed) {
-                stmt = std::move(result.node);
-                changed = true;
-            }
-            
-            // 到達不能コードが検出されたかチェック
-            unreachableFound = m_unreachableCodeDetected;
-            
-            // 次のステートメントへ
-            ++it;
-        }
+    // 式文（ExpressionStatement）の場合
+    if (auto exprStmt = std::dynamic_pointer_cast<parser::ast::ExpressionStatement>(stmt)) {
+      auto expr = exprStmt->GetExpression();
+      
+      // 副作用のない式を検出
+      if (IsExpressionWithoutSideEffects(expr)) {
+        it = statements.erase(it);
+        changed = true;
+        continue;
+      }
     }
     
-    return changed;
+    ++it;
+  }
+  
+  return changed;
 }
 
-} // namespace transformers
-} // namespace aero 
+bool DeadCodeEliminationTransformer::IsExpressionWithoutSideEffects(const NodePtr& expr) {
+  // リテラル（数値、文字列、真偽値など）は副作用なし
+  if (std::dynamic_pointer_cast<parser::ast::Literal>(expr)) {
+    return true;
+  }
+  
+  // 識別子参照は副作用なし
+  if (std::dynamic_pointer_cast<parser::ast::Identifier>(expr)) {
+    return true;
+  }
+  
+  // オブジェクトリテラルや配列リテラルは、その要素に副作用がなければ副作用なし
+  if (auto objExpr = std::dynamic_pointer_cast<parser::ast::ObjectExpression>(expr)) {
+    for (const auto& prop : objExpr->GetProperties()) {
+      if (!IsExpressionWithoutSideEffects(prop->GetValue())) {
+        return false;
+      }
+    }
+    return true;
+  }
+  
+  if (auto arrExpr = std::dynamic_pointer_cast<parser::ast::ArrayExpression>(expr)) {
+    for (const auto& element : arrExpr->GetElements()) {
+      if (element && !IsExpressionWithoutSideEffects(element)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  
+  // 二項演算子は、両オペランドに副作用がなければ副作用なし
+  if (auto binExpr = std::dynamic_pointer_cast<parser::ast::BinaryExpression>(expr)) {
+    return IsExpressionWithoutSideEffects(binExpr->GetLeft()) && 
+           IsExpressionWithoutSideEffects(binExpr->GetRight());
+  }
+  
+  // 単項演算子は、オペランドに副作用がなければ副作用なし（delete演算子を除く）
+  if (auto unaryExpr = std::dynamic_pointer_cast<parser::ast::UnaryExpression>(expr)) {
+    if (unaryExpr->GetOperator() == parser::ast::UnaryOperator::DELETE) {
+      return false;  // deleteは副作用あり
+    }
+    return IsExpressionWithoutSideEffects(unaryExpr->GetArgument());
+  }
+  
+  // その他の式は副作用ありと仮定
+  return false;
+}
+
+NodePtr DeadCodeEliminationTransformer::ReplaceCurrentNode(NodePtr node) {
+  // 現在処理中のノードを置き換える
+  if (m_currentParent.empty()) {
+    return node;  // 親がない場合は単に新しいノードを返す
+  }
+  
+  auto parent = m_currentParent.top();
+  
+  // 親ノードの種類に応じて適切に子ノードを置き換える
+  if (auto blockStmt = std::dynamic_pointer_cast<parser::ast::BlockStatement>(parent)) {
+    // ブロック文の場合、現在の文を置き換える
+    auto& statements = blockStmt->GetBody();
+    if (m_currentIndex < statements.size()) {
+      statements[m_currentIndex] = node;
+    }
+  } else if (auto ifStmt = std::dynamic_pointer_cast<parser::ast::IfStatement>(parent)) {
+    // if文の場合、条件式、then節、else節のいずれかを置き換える
+    if (m_currentChildType == "test") {
+      ifStmt->SetTest(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "consequent") {
+      ifStmt->SetConsequent(node);
+    } else if (m_currentChildType == "alternate") {
+      ifStmt->SetAlternate(node);
+    }
+  } else if (auto forStmt = std::dynamic_pointer_cast<parser::ast::ForStatement>(parent)) {
+    // for文の場合、初期化式、条件式、更新式、本体のいずれかを置き換える
+    if (m_currentChildType == "init") {
+      forStmt->SetInit(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "test") {
+      forStmt->SetTest(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "update") {
+      forStmt->SetUpdate(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "body") {
+      forStmt->SetBody(node);
+    }
+  } else if (auto switchStmt = std::dynamic_pointer_cast<parser::ast::SwitchStatement>(parent)) {
+    // switch文の場合、判別式または各caseを置き換える
+    if (m_currentChildType == "discriminant") {
+      switchStmt->SetDiscriminant(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "case" && m_currentIndex < switchStmt->GetCases().size()) {
+      auto& cases = switchStmt->GetCasesMut();
+      cases[m_currentIndex] = node;
+    }
+  } else if (auto returnStmt = std::dynamic_pointer_cast<parser::ast::ReturnStatement>(parent)) {
+    // return文の場合、戻り値を置き換える
+    if (m_currentChildType == "argument") {
+      returnStmt->SetArgument(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    }
+  } else if (auto exprStmt = std::dynamic_pointer_cast<parser::ast::ExpressionStatement>(parent)) {
+    // 式文の場合、式を置き換える
+    if (m_currentChildType == "expression") {
+      exprStmt->SetExpression(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    }
+  } else if (auto binaryExpr = std::dynamic_pointer_cast<parser::ast::BinaryExpression>(parent)) {
+    // 二項演算式の場合、左辺または右辺を置き換える
+    if (m_currentChildType == "left") {
+      binaryExpr->SetLeft(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "right") {
+      binaryExpr->SetRight(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    }
+  } else if (auto unaryExpr = std::dynamic_pointer_cast<parser::ast::UnaryExpression>(parent)) {
+    // 単項演算式の場合、引数を置き換える
+    if (m_currentChildType == "argument") {
+      unaryExpr->SetArgument(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    }
+  } else if (auto callExpr = std::dynamic_pointer_cast<parser::ast::CallExpression>(parent)) {
+    // 関数呼び出し式の場合、呼び出し対象または引数を置き換える
+    if (m_currentChildType == "callee") {
+      callExpr->SetCallee(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    } else if (m_currentChildType == "argument" && m_currentIndex < callExpr->GetArguments().size()) {
+      auto& args = callExpr->GetArgumentsMut();
+      args[m_currentIndex] = std::dynamic_pointer_cast<parser::ast::Expression>(node);
+    }
+  } else if (auto varDecl = std::dynamic_pointer_cast<parser::ast::VariableDeclaration>(parent)) {
+    // 変数宣言の場合、各宣言子を置き換える
+    if (m_currentChildType == "declarator" && m_currentIndex < varDecl->GetDeclarations().size()) {
+      auto& decls = varDecl->GetDeclarationsMut();
+      decls[m_currentIndex] = std::dynamic_pointer_cast<parser::ast::VariableDeclarator>(node);
+    }
+  } else if (auto varDeclr = std::dynamic_pointer_cast<parser::ast::VariableDeclarator>(parent)) {
+    // 変数宣言子の場合、初期化式を置き換える
+    if (m_currentChildType == "init") {
+      varDeclr->SetInit(std::dynamic_pointer_cast<parser::ast::Expression>(node));
+    }
+  }
+  
+  // 変更が行われたことを記録
+  m_statistics.m_transformedNodes++;
+  
+  return node;
+}
+
+}  // namespace aerojs::core::transformers

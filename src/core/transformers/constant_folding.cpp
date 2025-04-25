@@ -1,1654 +1,994 @@
-/**
- * @file constant_folding.cpp
- * @version 0.1
- * @copyright 2023 AeroJS
- * @brief ConstantFoldingTransformerの実装
+/*******************************************************************************
+ * @file src/core/transformers/constant_folding.cpp
+ * @version 1.0.0
+ * @copyright Copyright (c) 2024 AeroJS Project
+ * @brief ConstantFoldingTransformer の実装ファイル。
  *
- * @details このファイルは、JavaScriptのASTに対する定数畳み込み最適化を実装しています。
- * 定数畳み込みは、コンパイル時に計算可能な式を事前に評価することで、実行時のパフォーマンスを向上させます。
+ * @details このファイルは、JavaScript の AST に対する定数畳み込み最適化を実装しています。
+ *          定数畳み込みは、コンパイル時に計算可能な式を事前に評価することで、
+ *          実行時のパフォーマンスを向上させます。
  *
  * @license
- * Copyright (c) 2023 AeroJS プロジェクト
- * このソースコードはMITライセンスの下で提供されています。
- */
+ * Copyright (c) 2024 AeroJS Project
+ * このソースコードは MIT ライセンスの下で提供されています。
+ ******************************************************************************/
 
-#include "constant_folding.h"
-#include "../ast/ast_node_factory.h"
-#include "../ast/visitors/ast_visitor.h"
-#include "../common/logger.h"
+#include "src/core/transformers/constant_folding.h"
+
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <algorithm>  // std::max_element, std::min_element用
+#include <utility>
+#include <vector>
 
-namespace aero {
-namespace transformers {
+#include "src/core/parser/ast/ast_node_factory.h"
+#include "src/core/parser/ast/ast_node_types.h"
+#include "src/core/parser/ast/nodes/all_nodes.h"
+#include "src/core/common/logger.h"
 
-using namespace ast;
+namespace aerojs::core::transformers {
 
-// キャッシュを使用して同じ演算の再計算を避ける
-// 数値演算のキャッシュ
+namespace {
+
+using aerojs::parser::ast::BinaryOperator;
+using aerojs::parser::ast::LiteralType;
+using aerojs::parser::ast::NodePtr;
+using aerojs::parser::ast::UnaryOperator;
+
 struct BinaryOperationCacheKey {
-    BinaryOperator op;
-    double left;
-    double right;
-    
-    bool operator==(const BinaryOperationCacheKey& other) const {
-        return op == other.op && left == other.left && right == other.right;
-    }
+  BinaryOperator m_op;
+  double m_left;
+  double m_right;
+
+  bool operator==(const BinaryOperationCacheKey& other) const {
+    return m_op == other.m_op && m_left == other.m_left && m_right == other.m_right;
+  }
 };
 
-// ハッシュ関数
 struct BinaryOperationCacheKeyHash {
-    std::size_t operator()(const BinaryOperationCacheKey& key) const {
-        std::size_t h1 = std::hash<int>{}(static_cast<int>(key.op));
-        std::size_t h2 = std::hash<double>{}(key.left);
-        std::size_t h3 = std::hash<double>{}(key.right);
-        return h1 ^ (h2 << 1) ^ (h3 << 2);
-    }
+  std::size_t operator()(const BinaryOperationCacheKey& key) const {
+    std::size_t h1 = std::hash<int>{}(static_cast<int>(key.m_op));
+    std::size_t h2 = std::hash<double>{}(key.m_left);
+    std::size_t h3 = std::hash<double>{}(key.m_right);
+    return h1 ^ (h2 << 1) ^ (h3 << 2);
+  }
 };
 
-// 単項演算のキャッシュキー
 struct UnaryOperationCacheKey {
-    UnaryOperator op;
-    LiteralType type;
-    union {
-        double numValue;
-        bool boolValue;
-    };
-    std::string strValue;
-    
-    bool operator==(const UnaryOperationCacheKey& other) const {
-        if (op != other.op || type != other.type) return false;
-        
-        switch (type) {
-            case LiteralType::Number:
-                return numValue == other.numValue;
-            case LiteralType::Boolean:
-                return boolValue == other.boolValue;
-            case LiteralType::String:
-                return strValue == other.strValue;
-            default:
-                return true;
-        }
-    }
+  UnaryOperator m_op;
+  std::variant<double, bool, std::string> m_operandValue;
+
+  bool operator==(const UnaryOperationCacheKey& other) const {
+    return m_op == other.m_op && m_operandValue == other.m_operandValue;
+  }
 };
 
-// ハッシュ関数
 struct UnaryOperationCacheKeyHash {
-    std::size_t operator()(const UnaryOperationCacheKey& key) const {
-        std::size_t h1 = std::hash<int>{}(static_cast<int>(key.op));
-        std::size_t h2 = std::hash<int>{}(static_cast<int>(key.type));
-        std::size_t h3;
-        
-        switch (key.type) {
-            case LiteralType::Number:
-                h3 = std::hash<double>{}(key.numValue);
-                break;
-            case LiteralType::Boolean:
-                h3 = std::hash<bool>{}(key.boolValue);
-                break;
-            case LiteralType::String:
-                h3 = std::hash<std::string>{}(key.strValue);
-                break;
-            default:
-                h3 = 0;
-                break;
-        }
-        
-        return h1 ^ (h2 << 1) ^ (h3 << 2);
-    }
+  std::size_t operator()(const UnaryOperationCacheKey& key) const {
+    std::size_t h1 = std::hash<int>{}(static_cast<int>(key.m_op));
+    std::size_t h2 = std::hash<std::variant<double, bool, std::string>>{}(key.m_operandValue);
+    return h1 ^ (h2 << 1);
+  }
 };
 
-// キャッシュ
 class ConstantFoldingCache {
-public:
-    // 二項演算のキャッシュ
-    std::unordered_map<BinaryOperationCacheKey, NodePtr, BinaryOperationCacheKeyHash> binaryCache;
-    
-    // 単項演算のキャッシュ
-    std::unordered_map<UnaryOperationCacheKey, NodePtr, UnaryOperationCacheKeyHash> unaryCache;
-    
-    void clear() {
-        binaryCache.clear();
-        unaryCache.clear();
-    }
+ public:
+  std::unordered_map<BinaryOperationCacheKey, NodePtr, BinaryOperationCacheKeyHash> m_binaryCache;
+  std::unordered_map<UnaryOperationCacheKey, NodePtr, UnaryOperationCacheKeyHash> m_unaryCache;
+
+  void Clear() {
+    m_binaryCache.clear();
+    m_unaryCache.clear();
+  }
 };
 
-// シングルトンインスタンス
-static ConstantFoldingCache& getCache() {
-    static ConstantFoldingCache instance;
-    return instance;
+ConstantFoldingCache& GetCacheInstance() {
+  thread_local ConstantFoldingCache instance;
+  return instance;
 }
 
-// 定数として扱える組み込み関数のセット
-static const std::unordered_set<std::string> s_pureFunctions = {
-    "Math.abs", "Math.acos", "Math.acosh", "Math.asin", "Math.asinh", "Math.atan", "Math.atanh",
-    "Math.atan2", "Math.cbrt", "Math.ceil", "Math.clz32", "Math.cos", "Math.cosh", "Math.exp",
-    "Math.expm1", "Math.floor", "Math.fround", "Math.hypot", "Math.imul", "Math.log", "Math.log1p",
-    "Math.log10", "Math.log2", "Math.max", "Math.min", "Math.pow", "Math.round", "Math.sign",
-    "Math.sin", "Math.sinh", "Math.sqrt", "Math.tan", "Math.tanh", "Math.trunc",
-    "Number.isFinite", "Number.isInteger", "Number.isNaN", "Number.isSafeInteger",
-    "String.fromCharCode", "String.fromCodePoint"
+const std::unordered_set<std::string> S_PURE_MATH_FUNCTIONS = {
+    "abs", "acos", "acosh", "asin", "asinh", "atan", "atanh",
+    "atan2", "cbrt", "ceil", "clz32", "cos", "cosh", "exp",
+    "expm1", "floor", "fround", "hypot", "imul", "log", "log1p",
+    "log10", "log2", "max", "min", "pow", "round", "sign",
+    "sin", "sinh", "sqrt", "tan", "tanh", "trunc"};
+
+const std::unordered_set<std::string> S_PURE_NUMBER_FUNCTIONS = {
+    "isFinite", "isInteger", "isNaN", "isSafeInteger"
 };
 
-ConstantFoldingTransformer::ConstantFoldingTransformer()
-    : m_statisticsEnabled(false)
-    , m_foldedExpressions(0)
-    , m_visitedNodes(0) {
-    // キャッシュをクリア
-    getCache().clear();
+const std::unordered_set<std::string> S_PURE_STRING_FUNCTIONS = {
+    "fromCharCode", "fromCodePoint"};
+
+const std::unordered_map<std::string, double> S_CONSTANT_PROPERTIES = {
+    {"Math.E", M_E},
+    {"Math.LN10", M_LN10},
+    {"Math.LN2", M_LN2},
+    {"Math.LOG10E", M_LOG10E},
+    {"Math.LOG2E", M_LOG2E},
+    {"Math.PI", M_PI},
+    {"Math.SQRT1_2", M_SQRT1_2},
+    {"Math.SQRT2", M_SQRT2},
+    {"Number.EPSILON", std::numeric_limits<double>::epsilon()},
+    {"Number.MAX_SAFE_INTEGER", static_cast<double>(9007199254740991LL)},
+    {"Number.MAX_VALUE", std::numeric_limits<double>::max()},
+    {"Number.MIN_SAFE_INTEGER", static_cast<double>(-9007199254740991LL)},
+    {"Number.MIN_VALUE", std::numeric_limits<double>::min()},
+    {"Number.NaN", std::numeric_limits<double>::quiet_NaN()},
+    {"Number.NEGATIVE_INFINITY", -std::numeric_limits<double>::infinity()},
+    {"Number.POSITIVE_INFINITY", std::numeric_limits<double>::infinity()}};
+
+// 値が真偽値として「真」と評価されるかを判定する
+bool IsTruthy(const parser::ast::Literal& literal) {
+  switch (literal.GetLiteralType()) {
+    case LiteralType::BOOLEAN:
+      return literal.GetBooleanValue();
+    case LiteralType::NUMBER:
+      return literal.GetNumberValue() != 0.0 && !std::isnan(literal.GetNumberValue());
+    case LiteralType::STRING:
+      return !literal.GetStringValue().empty();
+    case LiteralType::NULL_TYPE:
+      return false;
+    case LiteralType::UNDEFINED:
+      return false;
+    default:
+      return true;
+  }
 }
 
-ConstantFoldingTransformer::~ConstantFoldingTransformer() {
+// ノードが定数かどうかを判定する
+bool IsConstant(const parser::ast::NodePtr& node) {
+  if (!node) return false;
+  
+  return node->GetType() == parser::ast::NodeType::LITERAL;
 }
 
-void ConstantFoldingTransformer::reset() {
-    m_foldedExpressions = 0;
-    m_visitedNodes = 0;
-    // キャッシュをクリア
-    getCache().clear();
-}
-
-void ConstantFoldingTransformer::enableStatistics(bool enable) {
-    m_statisticsEnabled = enable;
-}
-
-size_t ConstantFoldingTransformer::getFoldedExpressions() const {
-    return m_foldedExpressions;
-}
-
-size_t ConstantFoldingTransformer::getVisitedNodes() const {
-    return m_visitedNodes;
-}
-
-NodePtr ConstantFoldingTransformer::transform(NodePtr node) {
-    if (!node) {
-        return nullptr;
-    }
-
-    if (m_statisticsEnabled) {
-        m_visitedNodes++;
-    }
-
-    // ノードタイプに基づいて適切な変換を適用
-    switch (node->getType()) {
-        case NodeType::BinaryExpression:
-            return foldBinaryExpression(std::static_pointer_cast<BinaryExpression>(node));
-        case NodeType::UnaryExpression:
-            return foldUnaryExpression(std::static_pointer_cast<UnaryExpression>(node));
-        case NodeType::LogicalExpression:
-            return foldLogicalExpression(std::static_pointer_cast<LogicalExpression>(node));
-        case NodeType::ConditionalExpression:
-            return foldConditionalExpression(std::static_pointer_cast<ConditionalExpression>(node));
-        case NodeType::ArrayExpression:
-            return foldArrayExpression(std::static_pointer_cast<ArrayExpression>(node));
-        case NodeType::ObjectExpression:
-            return foldObjectExpression(std::static_pointer_cast<ObjectExpression>(node));
-        case NodeType::CallExpression:
-            return foldCallExpression(std::static_pointer_cast<CallExpression>(node));
-        case NodeType::MemberExpression:
-            return foldMemberExpression(std::static_pointer_cast<MemberExpression>(node));
-        default:
-            // 子ノードを再帰的に処理
-            return traverseChildren(node);
-    }
-}
-
-NodePtr ConstantFoldingTransformer::traverseChildren(NodePtr node) {
-    // 各ノードタイプに応じた子ノードの処理
-    switch (node->getType()) {
-        case NodeType::Program: {
-            auto program = std::static_pointer_cast<Program>(node);
-            auto& body = program->getBody();
-            for (size_t i = 0; i < body.size(); ++i) {
-                body[i] = transform(body[i]);
-            }
-            return program;
-        }
-        case NodeType::BlockStatement: {
-            auto block = std::static_pointer_cast<BlockStatement>(node);
-            auto& body = block->getBody();
-            for (size_t i = 0; i < body.size(); ++i) {
-                body[i] = transform(body[i]);
-            }
-            return block;
-        }
-        case NodeType::ExpressionStatement: {
-            auto expr = std::static_pointer_cast<ExpressionStatement>(node);
-            expr->setExpression(transform(expr->getExpression()));
-            return expr;
-        }
-        case NodeType::IfStatement: {
-            auto ifStmt = std::static_pointer_cast<IfStatement>(node);
-            ifStmt->setTest(transform(ifStmt->getTest()));
-            ifStmt->setConsequent(transform(ifStmt->getConsequent()));
-            if (ifStmt->getAlternate()) {
-                ifStmt->setAlternate(transform(ifStmt->getAlternate()));
-            }
-            return ifStmt;
-        }
-        case NodeType::WhileStatement: {
-            auto whileStmt = std::static_pointer_cast<WhileStatement>(node);
-            whileStmt->setTest(transform(whileStmt->getTest()));
-            whileStmt->setBody(transform(whileStmt->getBody()));
-            return whileStmt;
-        }
-        case NodeType::DoWhileStatement: {
-            auto doWhileStmt = std::static_pointer_cast<DoWhileStatement>(node);
-            doWhileStmt->setBody(transform(doWhileStmt->getBody()));
-            doWhileStmt->setTest(transform(doWhileStmt->getTest()));
-            return doWhileStmt;
-        }
-        case NodeType::ForStatement: {
-            auto forStmt = std::static_pointer_cast<ForStatement>(node);
-            if (forStmt->getInit()) {
-                forStmt->setInit(transform(forStmt->getInit()));
-            }
-            if (forStmt->getTest()) {
-                forStmt->setTest(transform(forStmt->getTest()));
-            }
-            if (forStmt->getUpdate()) {
-                forStmt->setUpdate(transform(forStmt->getUpdate()));
-            }
-            forStmt->setBody(transform(forStmt->getBody()));
-            return forStmt;
-        }
-        case NodeType::ForInStatement: {
-            auto forInStmt = std::static_pointer_cast<ForInStatement>(node);
-            forInStmt->setLeft(transform(forInStmt->getLeft()));
-            forInStmt->setRight(transform(forInStmt->getRight()));
-            forInStmt->setBody(transform(forInStmt->getBody()));
-            return forInStmt;
-        }
-        case NodeType::ForOfStatement: {
-            auto forOfStmt = std::static_pointer_cast<ForOfStatement>(node);
-            forOfStmt->setLeft(transform(forOfStmt->getLeft()));
-            forOfStmt->setRight(transform(forOfStmt->getRight()));
-            forOfStmt->setBody(transform(forOfStmt->getBody()));
-            return forOfStmt;
-        }
-        case NodeType::SwitchStatement: {
-            auto switchStmt = std::static_pointer_cast<SwitchStatement>(node);
-            switchStmt->setDiscriminant(transform(switchStmt->getDiscriminant()));
-            auto& cases = switchStmt->getCases();
-            for (auto& caseClause : cases) {
-                if (caseClause->getTest()) {
-                    caseClause->setTest(transform(caseClause->getTest()));
-                }
-                auto& caseBody = caseClause->getConsequent();
-                for (size_t i = 0; i < caseBody.size(); ++i) {
-                    caseBody[i] = transform(caseBody[i]);
-                }
-            }
-            return switchStmt;
-        }
-        case NodeType::ReturnStatement: {
-            auto returnStmt = std::static_pointer_cast<ReturnStatement>(node);
-            if (returnStmt->getArgument()) {
-                returnStmt->setArgument(transform(returnStmt->getArgument()));
-            }
-            return returnStmt;
-        }
-        case NodeType::ThrowStatement: {
-            auto throwStmt = std::static_pointer_cast<ThrowStatement>(node);
-            throwStmt->setArgument(transform(throwStmt->getArgument()));
-            return throwStmt;
-        }
-        case NodeType::TryStatement: {
-            auto tryStmt = std::static_pointer_cast<TryStatement>(node);
-            tryStmt->setBlock(transform(tryStmt->getBlock()));
-            if (tryStmt->getHandler()) {
-                auto handler = tryStmt->getHandler();
-                if (handler->getParam()) {
-                    handler->setParam(transform(handler->getParam()));
-                }
-                handler->setBody(transform(handler->getBody()));
-            }
-            if (tryStmt->getFinalizer()) {
-                tryStmt->setFinalizer(transform(tryStmt->getFinalizer()));
-            }
-            return tryStmt;
-        }
-        case NodeType::VariableDeclaration: {
-            auto varDecl = std::static_pointer_cast<VariableDeclaration>(node);
-            auto& declarations = varDecl->getDeclarations();
-            for (auto& decl : declarations) {
-                if (decl->getInit()) {
-                    decl->setInit(transform(decl->getInit()));
-                }
-            }
-            return varDecl;
-        }
-        case NodeType::FunctionDeclaration: {
-            auto funcDecl = std::static_pointer_cast<FunctionDeclaration>(node);
-            funcDecl->setBody(transform(funcDecl->getBody()));
-            return funcDecl;
-        }
-        case NodeType::FunctionExpression: {
-            auto funcExpr = std::static_pointer_cast<FunctionExpression>(node);
-            funcExpr->setBody(transform(funcExpr->getBody()));
-            return funcExpr;
-        }
-        case NodeType::ArrowFunctionExpression: {
-            auto arrowFunc = std::static_pointer_cast<ArrowFunctionExpression>(node);
-            arrowFunc->setBody(transform(arrowFunc->getBody()));
-            return arrowFunc;
-        }
-        case NodeType::ClassDeclaration: {
-            auto classDecl = std::static_pointer_cast<ClassDeclaration>(node);
-            if (classDecl->getSuperClass()) {
-                classDecl->setSuperClass(transform(classDecl->getSuperClass()));
-            }
-            auto& body = classDecl->getBody();
-            for (auto& method : body) {
-                method->setValue(transform(method->getValue()));
-            }
-            return classDecl;
-        }
-        case NodeType::ClassExpression: {
-            auto classExpr = std::static_pointer_cast<ClassExpression>(node);
-            if (classExpr->getSuperClass()) {
-                classExpr->setSuperClass(transform(classExpr->getSuperClass()));
-            }
-            auto& body = classExpr->getBody();
-            for (auto& method : body) {
-                method->setValue(transform(method->getValue()));
-            }
-            return classExpr;
-        }
-        case NodeType::SequenceExpression: {
-            auto seqExpr = std::static_pointer_cast<SequenceExpression>(node);
-            auto& expressions = seqExpr->getExpressions();
-            for (size_t i = 0; i < expressions.size(); ++i) {
-                expressions[i] = transform(expressions[i]);
-            }
-            return seqExpr;
-        }
-        default:
-            return node;
-    }
-}
-
-NodePtr ConstantFoldingTransformer::foldBinaryExpression(std::shared_ptr<BinaryExpression> expr) {
-    // 左右の子ノードを再帰的に処理
-    expr->setLeft(transform(expr->getLeft()));
-    expr->setRight(transform(expr->getRight()));
-
-    // 両方の子が定数かどうかチェック
-    if (!isConstant(expr->getLeft()) || !isConstant(expr->getRight())) {
-        return expr;
-    }
-
-    // 定数式を評価
-    auto result = evaluateBinaryOperation(
-        expr->getOperator(),
-        std::static_pointer_cast<Literal>(expr->getLeft()),
-        std::static_pointer_cast<Literal>(expr->getRight())
-    );
-
-    if (result) {
-        if (m_statisticsEnabled) {
-            m_foldedExpressions++;
-        }
-        return result;
-    }
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldUnaryExpression(std::shared_ptr<UnaryExpression> expr) {
-    // 子ノードを再帰的に処理
-    expr->setArgument(transform(expr->getArgument()));
-
-    // 子が定数かどうかチェック
-    if (!isConstant(expr->getArgument())) {
-        return expr;
-    }
-
-    // 定数式を評価
-    auto result = evaluateUnaryOperation(
-        expr->getOperator(),
-        std::static_pointer_cast<Literal>(expr->getArgument())
-    );
-
-    if (result) {
-        if (m_statisticsEnabled) {
-            m_foldedExpressions++;
-        }
-        return result;
-    }
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldLogicalExpression(std::shared_ptr<LogicalExpression> expr) {
-    // 左右の子ノードを再帰的に処理
-    expr->setLeft(transform(expr->getLeft()));
-    expr->setRight(transform(expr->getRight()));
-
-    // 両方の子が定数かどうかチェック
-    if (!isConstant(expr->getLeft()) || !isConstant(expr->getRight())) {
-        return expr;
-    }
-
-    // 定数式を評価
-    auto result = evaluateLogicalOperation(
-        expr->getOperator(),
-        std::static_pointer_cast<Literal>(expr->getLeft()),
-        std::static_pointer_cast<Literal>(expr->getRight())
-    );
-
-    if (result) {
-        if (m_statisticsEnabled) {
-            m_foldedExpressions++;
-        }
-        return result;
-    }
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldConditionalExpression(std::shared_ptr<ConditionalExpression> expr) {
-    // 条件、trueパス、falseパスを再帰的に処理
-    expr->setTest(transform(expr->getTest()));
-    expr->setConsequent(transform(expr->getConsequent()));
-    expr->setAlternate(transform(expr->getAlternate()));
-
-    // 条件が定数かどうかチェック
-    if (!isConstant(expr->getTest())) {
-        return expr;
-    }
-
-    auto testLiteral = std::static_pointer_cast<Literal>(expr->getTest());
-    bool condition = isTruthy(testLiteral);
-
-    // 条件に基づいて結果を選択
-    if (condition) {
-        if (m_statisticsEnabled) {
-            m_foldedExpressions++;
-        }
-        return expr->getConsequent();
-    } else {
-        if (m_statisticsEnabled) {
-            m_foldedExpressions++;
-        }
-        return expr->getAlternate();
-    }
-}
-
-NodePtr ConstantFoldingTransformer::foldArrayExpression(std::shared_ptr<ArrayExpression> expr) {
-    // 配列の要素を再帰的に処理
-    auto& elements = expr->getElements();
-    bool allConstant = true;
-    
-    for (size_t i = 0; i < elements.size(); ++i) {
-        if (elements[i]) {  // nullでない要素のみ変換
-            elements[i] = transform(elements[i]);
-            if (allConstant && !isConstant(elements[i])) {
-                allConstant = false;
-            }
-        }
-    }
-    
-    // 現在の実装では配列リテラルは定数として畳み込まない
-    // 将来的に必要に応じて拡張可能
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldObjectExpression(std::shared_ptr<ObjectExpression> expr) {
-    // オブジェクトのプロパティを再帰的に処理
-    auto& properties = expr->getProperties();
-    bool allConstant = true;
-    
-    for (auto& prop : properties) {
-        if (prop->getValue()) {
-            prop->setValue(transform(prop->getValue()));
-            if (allConstant && !isConstant(prop->getValue())) {
-                allConstant = false;
-            }
-        }
-        if (prop->getKey() && prop->isComputed()) {
-            prop->setKey(transform(prop->getKey()));
-            if (allConstant && !isConstant(prop->getKey())) {
-                allConstant = false;
-            }
-        }
-    }
-    
-    // 現在の実装ではオブジェクトリテラルは定数として畳み込まない
-    // 将来的に必要に応じて拡張可能
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldCallExpression(std::shared_ptr<CallExpression> expr) {
-    // 関数と引数を再帰的に処理
-    expr->setCallee(transform(expr->getCallee()));
-    auto& args = expr->getArguments();
-    
-    for (size_t i = 0; i < args.size(); ++i) {
-        args[i] = transform(args[i]);
-    }
-    
-    // 定数の引数を持つMath関数呼び出しを評価
-    if (expr->getCallee()->getType() == NodeType::MemberExpression) {
-        auto memberExpr = std::static_pointer_cast<MemberExpression>(expr->getCallee());
-        
-        // Math.Xの形式をチェック
-        if (memberExpr->getObject()->getType() == NodeType::Identifier &&
-            !memberExpr->isComputed()) {
-            
-            auto objIdent = std::static_pointer_cast<Identifier>(memberExpr->getObject());
-            if (objIdent->getName() == "Math" && 
-                memberExpr->getProperty()->getType() == NodeType::Identifier) {
-                
-                auto propIdent = std::static_pointer_cast<Identifier>(memberExpr->getProperty());
-                std::string funcName = "Math." + propIdent->getName();
-                
-                // s_pureFunctionsにあるか確認
-                if (s_pureFunctions.find(funcName) != s_pureFunctions.end()) {
-                    
-                    // すべての引数が数値定数かチェック
-                    bool allConstantNumbers = true;
-                    std::vector<double> numArgs;
-                    
-                    for (const auto& arg : args) {
-                        if (!isConstant(arg) || 
-                            std::static_pointer_cast<Literal>(arg)->getLiteralType() != LiteralType::Number) {
-                            allConstantNumbers = false;
-                            break;
-                        }
-                        
-                        numArgs.push_back(std::static_pointer_cast<Literal>(arg)->getNumberValue());
-                    }
-                    
-                    if (allConstantNumbers) {
-                        double result = 0.0;
-                        if (evaluateBuiltInMathFunction(funcName, numArgs, result)) {
-                            if (m_statisticsEnabled) {
-                                m_foldedExpressions++;
-                            }
-                            
-                            ASTNodeFactory factory;
-                            return factory.createLiteral(result);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    return expr;
-}
-
-NodePtr ConstantFoldingTransformer::foldMemberExpression(std::shared_ptr<MemberExpression> expr) {
-    // オブジェクトとプロパティを再帰的に処理
-    expr->setObject(transform(expr->getObject()));
-    if (expr->isComputed()) {
-        expr->setProperty(transform(expr->getProperty()));
-    }
-    
-    // 現在の実装ではメンバーアクセスは評価しない
-    // 将来的に定数オブジェクトのプロパティアクセスを評価可能
-    
-    return expr;
-}
-
-bool ConstantFoldingTransformer::isConstant(NodePtr node) const {
-    if (!node) {
-        return false;
-    }
-    
-    NodeType type = node->getType();
-    
-    // リテラルは定数
-    if (type == NodeType::Literal) {
-        return true;
-    }
-    
-    // 特定の識別子（true, false, null, undefined）も定数として扱う
-    if (type == NodeType::Identifier) {
-        auto ident = std::static_pointer_cast<Identifier>(node);
-        const std::string& name = ident->getName();
-        return name == "true" || name == "false" || name == "null" || name == "undefined" || 
-               name == "NaN" || name == "Infinity";
-    }
-    
-    return false;
-}
-
-bool ConstantFoldingTransformer::isTruthy(std::shared_ptr<Literal> literal) const {
-    LiteralType type = literal->getLiteralType();
-    
-    switch (type) {
-        case LiteralType::Boolean:
-            return literal->getBooleanValue();
-        case LiteralType::Number:
-            return literal->getNumberValue() != 0.0 && 
-                  !std::isnan(literal->getNumberValue());
-        case LiteralType::String:
-            return !literal->getStringValue().empty();
-        case LiteralType::Null:
-        case LiteralType::Undefined:
-            return false;
-        default:
-            return true;  // Object, Regexp など
-    }
-}
-
-NodePtr ConstantFoldingTransformer::evaluateBinaryOperation(
+// 二項演算の評価を行う
+parser::ast::NodePtr EvaluateBinaryOperation(
     BinaryOperator op,
-    std::shared_ptr<Literal> left,
-    std::shared_ptr<Literal> right) {
+    const parser::ast::Literal& left,
+    const parser::ast::Literal& right) {
+  
+  // 数値演算の場合
+  if (left.GetLiteralType() == LiteralType::NUMBER && 
+      right.GetLiteralType() == LiteralType::NUMBER) {
     
-    // 数値演算の場合、キャッシュをチェック
-    if (left->getLiteralType() == LiteralType::Number && 
-        right->getLiteralType() == LiteralType::Number) {
-        
-        BinaryOperationCacheKey key = {
-            op,
-            left->getNumberValue(),
-            right->getNumberValue()
-        };
-        
-        auto& cache = getCache();
-        auto it = cache.binaryCache.find(key);
-        if (it != cache.binaryCache.end()) {
-            return it->second;
-        }
-    }
-    
-    ast::ASTNodeFactory factory;
-    
-    // 数値演算
-    if (left->getLiteralType() == LiteralType::Number && 
-        right->getLiteralType() == LiteralType::Number) {
-        
-        double leftVal = left->getNumberValue();
-        double rightVal = right->getNumberValue();
-        double result = 0.0;
-        
-        switch (op) {
-            case BinaryOperator::Plus:
-                result = leftVal + rightVal;
-                break;
-            case BinaryOperator::Minus:
-                result = leftVal - rightVal;
-                break;
-            case BinaryOperator::Multiply:
-                result = leftVal * rightVal;
-                break;
-            case BinaryOperator::Divide:
-                // ゼロ除算のチェック
-                if (rightVal == 0.0) {
-                    if (leftVal == 0.0) {
-                        return factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-                    } else if (leftVal > 0.0) {
-                        return factory.createLiteral(std::numeric_limits<double>::infinity());
-                    } else {
-                        return factory.createLiteral(-std::numeric_limits<double>::infinity());
-                    }
-                }
-                result = leftVal / rightVal;
-                break;
-            case BinaryOperator::Modulo:
-                // ゼロ除算のチェック
-                if (rightVal == 0.0) {
-                    return factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-                }
-                result = std::fmod(leftVal, rightVal);
-                break;
-            case BinaryOperator::Exponentiation:
-                result = std::pow(leftVal, rightVal);
-                break;
-            case BinaryOperator::BitwiseAnd:
-                result = static_cast<double>(static_cast<int32_t>(leftVal) & static_cast<int32_t>(rightVal));
-                break;
-            case BinaryOperator::BitwiseOr:
-                result = static_cast<double>(static_cast<int32_t>(leftVal) | static_cast<int32_t>(rightVal));
-                break;
-            case BinaryOperator::BitwiseXor:
-                result = static_cast<double>(static_cast<int32_t>(leftVal) ^ static_cast<int32_t>(rightVal));
-                break;
-            case BinaryOperator::LeftShift:
-                result = static_cast<double>(static_cast<int32_t>(leftVal) << (static_cast<int32_t>(rightVal) & 0x1F));
-                break;
-            case BinaryOperator::RightShift:
-                result = static_cast<double>(static_cast<int32_t>(leftVal) >> (static_cast<int32_t>(rightVal) & 0x1F));
-                break;
-            case BinaryOperator::UnsignedRightShift: {
-                uint32_t uLeftVal = static_cast<uint32_t>(static_cast<int32_t>(leftVal));
-                result = static_cast<double>(uLeftVal >> (static_cast<int32_t>(rightVal) & 0x1F));
-                break;
-            }
-            case BinaryOperator::Equal:
-                return factory.createLiteral(leftVal == rightVal);
-            case BinaryOperator::NotEqual:
-                return factory.createLiteral(leftVal != rightVal);
-            case BinaryOperator::StrictEqual:
-                return factory.createLiteral(leftVal == rightVal);
-            case BinaryOperator::StrictNotEqual:
-                return factory.createLiteral(leftVal != rightVal);
-            case BinaryOperator::LessThan:
-                return factory.createLiteral(leftVal < rightVal);
-            case BinaryOperator::LessThanOrEqual:
-                return factory.createLiteral(leftVal <= rightVal);
-            case BinaryOperator::GreaterThan:
-                return factory.createLiteral(leftVal > rightVal);
-            case BinaryOperator::GreaterThanOrEqual:
-                return factory.createLiteral(leftVal >= rightVal);
-            default:
-                return nullptr;
-        }
-        
-        // キャッシュに結果を保存（数値演算の場合）
-        if (left->getLiteralType() == LiteralType::Number && 
-            right->getLiteralType() == LiteralType::Number) {
-            
-            BinaryOperationCacheKey key = {
-                op,
-                left->getNumberValue(),
-                right->getNumberValue()
-            };
-            
-            auto& cache = getCache();
-            cache.binaryCache[key] = factory.createLiteral(result);
-        }
-        
-        return factory.createLiteral(result);
-    }
-    
-    // 文字列の連結（+演算子）
-    if (op == BinaryOperator::Plus) {
-        std::string leftStr = literalToString(left);
-        std::string rightStr = literalToString(right);
-        return factory.createLiteral(leftStr + rightStr);
-    }
-    
-    // 比較演算子
-    if (op == BinaryOperator::Equal || op == BinaryOperator::NotEqual ||
-        op == BinaryOperator::StrictEqual || op == BinaryOperator::StrictNotEqual) {
-        
-        // 型が異なる場合の厳密等価演算子
-        if ((op == BinaryOperator::StrictEqual || op == BinaryOperator::StrictNotEqual) &&
-            left->getLiteralType() != right->getLiteralType()) {
-            return factory.createLiteral(op == BinaryOperator::StrictNotEqual);
-        }
-        
-        // 値の比較
-        bool result = false;
-        
-        switch (left->getLiteralType()) {
-            case LiteralType::Boolean:
-                result = left->getBooleanValue() == (right->getLiteralType() == LiteralType::Boolean ? 
-                         right->getBooleanValue() : isTruthy(right));
-                break;
-            case LiteralType::Number:
-                if (right->getLiteralType() == LiteralType::Number) {
-                    result = left->getNumberValue() == right->getNumberValue();
-                } else if (right->getLiteralType() == LiteralType::String) {
-                    // 文字列を数値に変換して比較
-                    try {
-                        double rightVal = std::stod(right->getStringValue());
-                        result = left->getNumberValue() == rightVal;
-                    } catch (...) {
-                        result = false;
-                    }
-                } else if (right->getLiteralType() == LiteralType::Boolean) {
-                    result = left->getNumberValue() == (right->getBooleanValue() ? 1.0 : 0.0);
-                } else if (right->getLiteralType() == LiteralType::Null) {
-                    result = false;  // 数値とnullは常に等しくない
-                } else {
-                    result = false;
-                }
-                break;
-            case LiteralType::String:
-                if (right->getLiteralType() == LiteralType::String) {
-                    result = left->getStringValue() == right->getStringValue();
-                } else if (right->getLiteralType() == LiteralType::Number) {
-                    // 文字列を数値に変換して比較
-                    try {
-                        double leftVal = std::stod(left->getStringValue());
-                        result = leftVal == right->getNumberValue();
-                    } catch (...) {
-                        result = false;
-                    }
-                } else {
-                    result = false;
-                }
-                break;
-            case LiteralType::Null:
-            case LiteralType::Undefined:
-                result = right->getLiteralType() == LiteralType::Null || 
-                         right->getLiteralType() == LiteralType::Undefined;
-                break;
-            default:
-                return nullptr;  // 複雑なケースは評価しない
-        }
-        
-        if (op == BinaryOperator::NotEqual || op == BinaryOperator::StrictNotEqual) {
-            result = !result;
-        }
-        
-        return factory.createLiteral(result);
-    }
-    
-    // より複雑な比較演算
-    if (op == BinaryOperator::LessThan || op == BinaryOperator::LessThanOrEqual ||
-        op == BinaryOperator::GreaterThan || op == BinaryOperator::GreaterThanOrEqual) {
-        
-        double leftVal = 0.0;
-        double rightVal = 0.0;
-        
-        // 左辺の値を数値に変換
-        if (left->getLiteralType() == LiteralType::Number) {
-            leftVal = left->getNumberValue();
-        } else if (left->getLiteralType() == LiteralType::String) {
-            try {
-                leftVal = std::stod(left->getStringValue());
-            } catch (...) {
-                return nullptr;  // 変換できない場合は評価しない
-            }
-        } else if (left->getLiteralType() == LiteralType::Boolean) {
-            leftVal = left->getBooleanValue() ? 1.0 : 0.0;
-        } else {
-            return nullptr;  // 他の型は評価しない
-        }
-        
-        // 右辺の値を数値に変換
-        if (right->getLiteralType() == LiteralType::Number) {
-            rightVal = right->getNumberValue();
-        } else if (right->getLiteralType() == LiteralType::String) {
-            try {
-                rightVal = std::stod(right->getStringValue());
-            } catch (...) {
-                return nullptr;  // 変換できない場合は評価しない
-            }
-        } else if (right->getLiteralType() == LiteralType::Boolean) {
-            rightVal = right->getBooleanValue() ? 1.0 : 0.0;
-        } else {
-            return nullptr;  // 他の型は評価しない
-        }
-        
-        // 比較演算子による評価
-        bool result = false;
-        switch (op) {
-            case BinaryOperator::LessThan:
-                result = leftVal < rightVal;
-                break;
-            case BinaryOperator::LessThanOrEqual:
-                result = leftVal <= rightVal;
-                break;
-            case BinaryOperator::GreaterThan:
-                result = leftVal > rightVal;
-                break;
-            case BinaryOperator::GreaterThanOrEqual:
-                result = leftVal >= rightVal;
-                break;
-            default:
-                return nullptr;
-        }
-        
-        return factory.createLiteral(result);
-    }
-    
-    // その他の演算は現在サポートしていない
-    return nullptr;
-}
-
-NodePtr ConstantFoldingTransformer::evaluateUnaryOperation(
-    UnaryOperator op,
-    std::shared_ptr<Literal> arg) {
+    double leftVal = left.GetNumberValue();
+    double rightVal = right.GetNumberValue();
     
     // キャッシュをチェック
-    UnaryOperationCacheKey key;
-    key.op = op;
-    key.type = arg->getLiteralType();
-    
-    switch (key.type) {
-        case LiteralType::Number:
-            key.numValue = arg->getNumberValue();
-            break;
-        case LiteralType::Boolean:
-            key.boolValue = arg->getBooleanValue();
-            break;
-        case LiteralType::String:
-            key.strValue = arg->getStringValue();
-            break;
-        default:
-            break;
+    BinaryOperationCacheKey key{op, leftVal, rightVal};
+    auto& cache = GetCacheInstance().m_binaryCache;
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
     }
     
-    auto& cache = getCache();
-    auto it = cache.unaryCache.find(key);
-    if (it != cache.unaryCache.end()) {
-        return it->second;
-    }
-    
-    ast::ASTNodeFactory factory;
-    
-    NodePtr result = nullptr;
+    double result = 0.0;
+    bool validOperation = true;
     
     switch (op) {
-        case UnaryOperator::Plus: {
-            // 数値への変換
-            if (arg->getLiteralType() == LiteralType::Number) {
-                result = arg;  // 数値はそのまま
-            } else if (arg->getLiteralType() == LiteralType::String) {
-                try {
-                    double val = std::stod(arg->getStringValue());
-                    result = factory.createLiteral(val);
-                } catch (...) {
-                    result = factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-                }
-            } else if (arg->getLiteralType() == LiteralType::Boolean) {
-                result = factory.createLiteral(arg->getBooleanValue() ? 1.0 : 0.0);
-            } else if (arg->getLiteralType() == LiteralType::Null) {
-                result = factory.createLiteral(0.0);
-            } else if (arg->getLiteralType() == LiteralType::Undefined) {
-                result = factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-            }
-            break;
+      case BinaryOperator::ADDITION:
+        result = leftVal + rightVal;
+        break;
+      case BinaryOperator::SUBTRACTION:
+        result = leftVal - rightVal;
+        break;
+      case BinaryOperator::MULTIPLICATION:
+        result = leftVal * rightVal;
+        break;
+      case BinaryOperator::DIVISION:
+        if (rightVal == 0.0) {
+          result = leftVal > 0 ? std::numeric_limits<double>::infinity() :
+                  leftVal < 0 ? -std::numeric_limits<double>::infinity() :
+                  std::numeric_limits<double>::quiet_NaN();
+        } else {
+          result = leftVal / rightVal;
         }
-        case UnaryOperator::Minus: {
-            // 数値の符号反転
-            if (arg->getLiteralType() == LiteralType::Number) {
-                result = factory.createLiteral(-arg->getNumberValue());
-            } else if (arg->getLiteralType() == LiteralType::String) {
-                try {
-                    double val = std::stod(arg->getStringValue());
-                    result = factory.createLiteral(-val);
-                } catch (...) {
-                    result = factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-                }
-            } else if (arg->getLiteralType() == LiteralType::Boolean) {
-                result = factory.createLiteral(arg->getBooleanValue() ? -1.0 : -0.0);
-            } else if (arg->getLiteralType() == LiteralType::Null) {
-                result = factory.createLiteral(-0.0);
-            } else if (arg->getLiteralType() == LiteralType::Undefined) {
-                result = factory.createLiteral(std::numeric_limits<double>::quiet_NaN());
-            }
-            break;
+        break;
+      case BinaryOperator::REMAINDER:
+        if (rightVal == 0.0) {
+          result = std::numeric_limits<double>::quiet_NaN();
+        } else {
+          result = std::fmod(leftVal, rightVal);
         }
-        case UnaryOperator::LogicalNot:
-            // 論理否定
-            result = factory.createLiteral(!isTruthy(arg));
-            break;
-        case UnaryOperator::BitwiseNot: {
-            // ビット否定
-            if (arg->getLiteralType() == LiteralType::Number) {
-                result = factory.createLiteral(static_cast<double>(~static_cast<int32_t>(arg->getNumberValue())));
-            } else if (arg->getLiteralType() == LiteralType::String) {
-                try {
-                    double val = std::stod(arg->getStringValue());
-                    result = factory.createLiteral(static_cast<double>(~static_cast<int32_t>(val)));
-                } catch (...) {
-                    result = factory.createLiteral(static_cast<double>(~0));
-                }
-            } else if (arg->getLiteralType() == LiteralType::Boolean) {
-                result = factory.createLiteral(static_cast<double>(~(arg->getBooleanValue() ? 1 : 0)));
-            } else if (arg->getLiteralType() == LiteralType::Null) {
-                result = factory.createLiteral(static_cast<double>(~0));
-            } else if (arg->getLiteralType() == LiteralType::Undefined) {
-                result = factory.createLiteral(static_cast<double>(~0));
-            }
-            break;
-        }
-        case UnaryOperator::Typeof: {
-            // typeof演算子
-            switch (arg->getLiteralType()) {
-                case LiteralType::Boolean:
-                    result = factory.createLiteral("boolean");
-                    break;
-                case LiteralType::Number:
-                    result = factory.createLiteral("number");
-                    break;
-                case LiteralType::String:
-                    result = factory.createLiteral("string");
-                    break;
-                case LiteralType::Null:
-                    result = factory.createLiteral("object");
-                    break;
-                case LiteralType::Undefined:
-                    result = factory.createLiteral("undefined");
-                    break;
-                case LiteralType::Object:
-                    result = factory.createLiteral("object");
-                    break;
-                case LiteralType::RegExp:
-                    result = factory.createLiteral("object");
-                    break;
-                default:
-                    result = nullptr;
-            }
-            break;
-        }
-        case UnaryOperator::Void:
-            // void演算子は常にundefinedを返す
-            result = factory.createLiteral(LiteralType::Undefined);
-            break;
-        case UnaryOperator::Delete:
-            // リテラルに対するdeleteは常にtrueを返す
-            result = factory.createLiteral(true);
-            break;
-        default:
-            result = nullptr;
-            break;
+        break;
+      case BinaryOperator::EXPONENTIATION:
+        result = std::pow(leftVal, rightVal);
+        break;
+      case BinaryOperator::BITWISE_AND:
+        result = static_cast<double>(static_cast<int32_t>(leftVal) & static_cast<int32_t>(rightVal));
+        break;
+      case BinaryOperator::BITWISE_OR:
+        result = static_cast<double>(static_cast<int32_t>(leftVal) | static_cast<int32_t>(rightVal));
+        break;
+      case BinaryOperator::BITWISE_XOR:
+        result = static_cast<double>(static_cast<int32_t>(leftVal) ^ static_cast<int32_t>(rightVal));
+        break;
+      case BinaryOperator::LEFT_SHIFT:
+        result = static_cast<double>(static_cast<int32_t>(leftVal) << (static_cast<int32_t>(rightVal) & 0x1F));
+        break;
+      case BinaryOperator::RIGHT_SHIFT:
+        result = static_cast<double>(static_cast<int32_t>(leftVal) >> (static_cast<int32_t>(rightVal) & 0x1F));
+        break;
+      case BinaryOperator::UNSIGNED_RIGHT_SHIFT:
+        result = static_cast<double>(static_cast<uint32_t>(static_cast<int32_t>(leftVal)) >> (static_cast<int32_t>(rightVal) & 0x1F));
+        break;
+      case BinaryOperator::EQUAL:
+        result = leftVal == rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::NOT_EQUAL:
+        result = leftVal != rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::STRICT_EQUAL:
+        result = leftVal == rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::STRICT_NOT_EQUAL:
+        result = leftVal != rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::LESS_THAN:
+        result = leftVal < rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::LESS_THAN_OR_EQUAL:
+        result = leftVal <= rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::GREATER_THAN:
+        result = leftVal > rightVal ? 1.0 : 0.0;
+        break;
+      case BinaryOperator::GREATER_THAN_OR_EQUAL:
+        result = leftVal >= rightVal ? 1.0 : 0.0;
+        break;
+      default:
+        validOperation = false;
+        break;
     }
     
-    // キャッシュに結果を保存
-    if (result) {
-        cache.unaryCache[key] = result;
+    if (validOperation) {
+      auto resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(result);
+      cache[key] = resultNode;
+      return resultNode;
+    }
+  }
+  
+  // 文字列連結の場合
+  if (op == BinaryOperator::ADDITION &&
+      (left.GetLiteralType() == LiteralType::STRING || right.GetLiteralType() == LiteralType::STRING)) {
+    
+    std::string leftStr = left.GetLiteralType() == LiteralType::STRING ? 
+                          left.GetStringValue() : 
+                          left.ToString();
+    
+    std::string rightStr = right.GetLiteralType() == LiteralType::STRING ? 
+                           right.GetStringValue() : 
+                           right.ToString();
+    
+    return parser::ast::ASTNodeFactory::CreateStringLiteral(leftStr + rightStr);
+  }
+  
+  // 比較演算子の場合
+  if ((op == BinaryOperator::EQUAL || op == BinaryOperator::NOT_EQUAL ||
+       op == BinaryOperator::STRICT_EQUAL || op == BinaryOperator::STRICT_NOT_EQUAL) &&
+      (left.GetLiteralType() != LiteralType::NUMBER || right.GetLiteralType() != LiteralType::NUMBER)) {
+    
+    bool result = false;
+    
+    if (op == BinaryOperator::STRICT_EQUAL || op == BinaryOperator::STRICT_NOT_EQUAL) {
+      // 厳密等価の場合は型も一致する必要がある
+      if (left.GetLiteralType() != right.GetLiteralType()) {
+        result = false;
+      } else {
+        switch (left.GetLiteralType()) {
+          case LiteralType::BOOLEAN:
+            result = left.GetBooleanValue() == right.GetBooleanValue();
+            break;
+          case LiteralType::STRING:
+            result = left.GetStringValue() == right.GetStringValue();
+            break;
+          case LiteralType::NULL_TYPE:
+          case LiteralType::UNDEFINED:
+            result = true; // 同じ型なので等しい
+            break;
+          default:
+            return nullptr; // 評価できない
+        }
+      }
+      
+      if (op == BinaryOperator::STRICT_NOT_EQUAL) {
+        result = !result;
+      }
+    } else {
+      // 非厳密等価の場合
+      // JavaScript の型変換ルールに従って比較
+      if (left.GetLiteralType() == LiteralType::NULL_TYPE && right.GetLiteralType() == LiteralType::UNDEFINED ||
+          left.GetLiteralType() == LiteralType::UNDEFINED && right.GetLiteralType() == LiteralType::NULL_TYPE) {
+        result = true;
+      } else if (left.GetLiteralType() == LiteralType::BOOLEAN || right.GetLiteralType() == LiteralType::BOOLEAN) {
+        // 真偽値を数値に変換して比較
+        double leftNum = left.GetLiteralType() == LiteralType::BOOLEAN ? 
+                         (left.GetBooleanValue() ? 1.0 : 0.0) : 
+                         left.GetNumberValue();
+        
+        double rightNum = right.GetLiteralType() == LiteralType::BOOLEAN ? 
+                          (right.GetBooleanValue() ? 1.0 : 0.0) : 
+                          right.GetNumberValue();
+        
+        result = leftNum == rightNum;
+      } else if (left.GetLiteralType() == LiteralType::STRING && right.GetLiteralType() == LiteralType::STRING) {
+        result = left.GetStringValue() == right.GetStringValue();
+      } else {
+        return nullptr; // 評価できない
+      }
+      
+      if (op == BinaryOperator::NOT_EQUAL) {
+        result = !result;
+      }
     }
     
-    return result;
+    return parser::ast::ASTNodeFactory::CreateBooleanLiteral(result);
+  }
+  
+  return nullptr; // 評価できない場合
 }
 
-NodePtr ConstantFoldingTransformer::evaluateLogicalOperation(
-    LogicalOperator op,
-    std::shared_ptr<Literal> left,
-    std::shared_ptr<Literal> right) {
-    
-    // 論理演算子の短絡評価
-    bool leftTruthy = isTruthy(left);
-    
-    switch (op) {
-        case LogicalOperator::And:
-            // leftがfalseの場合、leftを返す
-            if (!leftTruthy) {
-                return left;
-            }
-            // leftがtrueの場合、rightを返す
-            return right;
-        
-        case LogicalOperator::Or:
-            // leftがtrueの場合、leftを返す
-            if (leftTruthy) {
-                return left;
-            }
-            // leftがfalseの場合、rightを返す
-            return right;
-        
-        case LogicalOperator::NullishCoalescing:
-            // leftがnullまたはundefinedの場合、rightを返す
-            if (left->getLiteralType() == LiteralType::Null || 
-                left->getLiteralType() == LiteralType::Undefined) {
-                return right;
-            }
-            // それ以外の場合、leftを返す
-            return left;
-        
+// 単項演算の評価を行う
+parser::ast::NodePtr EvaluateUnaryOperation(
+    UnaryOperator op,
+    const parser::ast::Literal& arg) {
+  
+  // キャッシュキーを作成
+  UnaryOperationCacheKey key;
+  key.m_op = op;
+  
+  // オペランドの値をキャッシュキーに設定
+  switch (arg.GetLiteralType()) {
+    case LiteralType::NUMBER:
+      key.m_operandValue = arg.GetNumberValue();
+      break;
+    case LiteralType::BOOLEAN:
+      key.m_operandValue = arg.GetBooleanValue();
+      break;
+    case LiteralType::STRING:
+      key.m_operandValue = arg.GetStringValue();
+      break;
+    default:
+      return nullptr; // キャッシュ対象外
+  }
+  
+  // キャッシュをチェック
+  auto& cache = GetCacheInstance().m_unaryCache;
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  
+  parser::ast::NodePtr resultNode = nullptr;
+  
+  switch (op) {
+    case UnaryOperator::UNARY_PLUS:
+      if (arg.GetLiteralType() == LiteralType::NUMBER) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(arg.GetNumberValue());
+      } else if (arg.GetLiteralType() == LiteralType::BOOLEAN) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(arg.GetBooleanValue() ? 1.0 : 0.0);
+      } else if (arg.GetLiteralType() == LiteralType::STRING) {
+        try {
+          double value = std::stod(arg.GetStringValue());
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(value);
+        } catch (...) {
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(std::numeric_limits<double>::quiet_NaN());
+        }
+      }
+      break;
+      
+    case UnaryOperator::UNARY_NEGATION:
+      if (arg.GetLiteralType() == LiteralType::NUMBER) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(-arg.GetNumberValue());
+      } else if (arg.GetLiteralType() == LiteralType::BOOLEAN) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(arg.GetBooleanValue() ? -1.0 : -0.0);
+      } else if (arg.GetLiteralType() == LiteralType::STRING) {
+        try {
+          double value = std::stod(arg.GetStringValue());
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(-value);
+        } catch (...) {
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(std::numeric_limits<double>::quiet_NaN());
+        }
+      }
+      break;
+      
+    case UnaryOperator::LOGICAL_NOT:
+      resultNode = parser::ast::ASTNodeFactory::CreateBooleanLiteral(!IsTruthy(arg));
+      break;
+      
+    case UnaryOperator::BITWISE_NOT:
+      if (arg.GetLiteralType() == LiteralType::NUMBER) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(
+            static_cast<double>(~static_cast<int32_t>(arg.GetNumberValue())));
+      } else if (arg.GetLiteralType() == LiteralType::BOOLEAN) {
+        resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(
+            static_cast<double>(~static_cast<int32_t>(arg.GetBooleanValue() ? 1 : 0)));
+      } else if (arg.GetLiteralType() == LiteralType::STRING) {
+        try {
+          double value = std::stod(arg.GetStringValue());
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(
+              static_cast<double>(~static_cast<int32_t>(value)));
+        } catch (...) {
+          resultNode = parser::ast::ASTNodeFactory::CreateNumberLiteral(
+              static_cast<double>(~static_cast<int32_t>(0)));
+        }
+      }
+      break;
+      
+    case UnaryOperator::TYPEOF:
+      switch (arg.GetLiteralType()) {
+        case LiteralType::NUMBER:
+          resultNode = parser::ast::ASTNodeFactory::CreateStringLiteral("number");
+          break;
+        case LiteralType::BOOLEAN:
+          resultNode = parser::ast::ASTNodeFactory::CreateStringLiteral("boolean");
+          break;
+        case LiteralType::STRING:
+          resultNode = parser::ast::ASTNodeFactory::CreateStringLiteral("string");
+          break;
+        case LiteralType::NULL_TYPE:
+          resultNode = parser::ast::ASTNodeFactory::CreateStringLiteral("object");
+          break;
+        case LiteralType::UNDEFINED:
+          resultNode = parser::ast::ASTNodeFactory::CreateStringLiteral("undefined");
+          break;
         default:
-            return nullptr;
-    }
+          break;
+      }
+      break;
+      
+    default:
+      break;
+  }
+  
+  if (resultNode) {
+    cache[key] = resultNode;
+  }
+  
+  return resultNode;
 }
 
-std::string ConstantFoldingTransformer::literalToString(std::shared_ptr<Literal> literal) const {
-    switch (literal->getLiteralType()) {
-        case LiteralType::String:
-            return literal->getStringValue();
-        case LiteralType::Number:
-            return std::to_string(literal->getNumberValue());
-        case LiteralType::Boolean:
-            return literal->getBooleanValue() ? "true" : "false";
-        case LiteralType::Null:
-            return "null";
-        case LiteralType::Undefined:
-            return "undefined";
-        default:
-            return "[object Object]";  // デフォルトのオブジェクト文字列表現
-    }
+// 論理演算の評価を行う
+parser::ast::NodePtr EvaluateLogicalOperation(
+    parser::ast::LogicalOperator op,
+    const parser::ast::Literal& left,
+    const parser::ast::Literal& right) {
+  
+  bool leftTruthy = IsTruthy(left);
+  
+  switch (op) {
+    case parser::ast::LogicalOperator::LOGICAL_AND:
+      return leftTruthy ? parser::ast::ASTNodeFactory::CreateLiteralCopy(right) : 
+                          parser::ast::ASTNodeFactory::CreateLiteralCopy(left);
+      
+    case parser::ast::LogicalOperator::LOGICAL_OR:
+      return leftTruthy ? parser::ast::ASTNodeFactory::CreateLiteralCopy(left) : 
+                          parser::ast::ASTNodeFactory::CreateLiteralCopy(right);
+      
+    case parser::ast::LogicalOperator::NULLISH_COALESCING:
+      return (left.GetLiteralType() == LiteralType::NULL_TYPE || 
+              left.GetLiteralType() == LiteralType::UNDEFINED) ? 
+              parser::ast::ASTNodeFactory::CreateLiteralCopy(right) : 
+              parser::ast::ASTNodeFactory::CreateLiteralCopy(left);
+      
+    default:
+      return nullptr;
+  }
 }
 
-/**
- * @brief 組み込みのMath関数を評価します
- * 
- * @param name 関数名（"Math.sin"など）
- * @param args 数値引数のリスト
- * @param result 計算結果（出力パラメータ）
- * @return 計算に成功した場合はtrue、失敗した場合はfalse
- */
-bool ConstantFoldingTransformer::evaluateBuiltInMathFunction(
-    const std::string& name,
-    const std::vector<double>& args,
-    double& result) {
+// 条件式の評価を行う
+parser::ast::NodePtr EvaluateConditionalExpression(
+    const parser::ast::Literal& test,
+    const parser::ast::NodePtr& consequent,
+    const parser::ast::NodePtr& alternate) {
+  
+  bool testTruthy = IsTruthy(test);
+  
+  if (testTruthy) {
+    return consequent;
+  } else {
+    return alternate;
+  }
+}
+
+// Math関数の評価を行う
+parser::ast::NodePtr EvaluateMathFunction(
+    const std::string& functionName,
+    const std::vector<parser::ast::NodePtr>& args) {
+  
+  // 引数がすべて数値リテラルであることを確認
+  std::vector<double> numArgs;
+  for (const auto& arg : args) {
+    auto literal = std::dynamic_pointer_cast<parser::ast::Literal>(arg);
+    if (!literal || literal->GetLiteralType() != LiteralType::NUMBER) {
+      return nullptr;
+    }
+    numArgs.push_back(literal->GetNumberValue());
+  }
+  
+  double result = 0.0;
+  bool validOperation = true;
+  
+  if (functionName == "abs") {
+    if (numArgs.size() == 1) result = std::abs(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "acos") {
+    if (numArgs.size() == 1) result = std::acos(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "acosh") {
+    if (numArgs.size() == 1) result = std::acosh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "asin") {
+    if (numArgs.size() == 1) result = std::asin(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "asinh") {
+    if (numArgs.size() == 1) result = std::asinh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "atan") {
+    if (numArgs.size() == 1) result = std::atan(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "atanh") {
+    if (numArgs.size() == 1) result = std::atanh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "atan2") {
+    if (numArgs.size() == 2) result = std::atan2(numArgs[0], numArgs[1]);
+    else validOperation = false;
+  } else if (functionName == "cbrt") {
+    if (numArgs.size() == 1) result = std::cbrt(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "ceil") {
+    if (numArgs.size() == 1) result = std::ceil(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "cos") {
+    if (numArgs.size() == 1) result = std::cos(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "cosh") {
+    if (numArgs.size() == 1) result = std::cosh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "exp") {
+    if (numArgs.size() == 1) result = std::exp(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "expm1") {
+    if (numArgs.size() == 1) result = std::expm1(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "floor") {
+    if (numArgs.size() == 1) result = std::floor(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "hypot") {
+    if (!numArgs.empty()) {
+      result = 0.0;
+      for (double arg : numArgs) {
+        result += arg * arg;
+      }
+      result = std::sqrt(result);
+    } else {
+      validOperation = false;
+    }
+  } else if (functionName == "log") {
+    if (numArgs.size() == 1) result = std::log(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "log10") {
+    if (numArgs.size() == 1) result = std::log10(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "log1p") {
+    if (numArgs.size() == 1) result = std::log1p(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "log2") {
+    if (numArgs.size() == 1) result = std::log2(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "max") {
+    if (!numArgs.empty()) {
+      result = *std::max_element(numArgs.begin(), numArgs.end());
+    } else {
+      result = -std::numeric_limits<double>::infinity();
+    }
+  } else if (functionName == "min") {
+    if (!numArgs.empty()) {
+      result = *std::min_element(numArgs.begin(), numArgs.end());
+    } else {
+      result = std::numeric_limits<double>::infinity();
+    }
+  } else if (functionName == "pow") {
+    if (numArgs.size() == 2) result = std::pow(numArgs[0], numArgs[1]);
+    else validOperation = false;
+  } else if (functionName == "round") {
+    if (numArgs.size() == 1) result = std::round(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "sign") {
+    if (numArgs.size() == 1) {
+      if (numArgs[0] > 0) result = 1;
+      else if (numArgs[0] < 0) result = -1;
+      else result = numArgs[0]; // 保存 +0, -0, NaN
+    } else {
+      validOperation = false;
+    }
+  } else if (functionName == "sin") {
+    if (numArgs.size() == 1) result = std::sin(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "sinh") {
+    if (numArgs.size() == 1) result = std::sinh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "sqrt") {
+    if (numArgs.size() == 1) result = std::sqrt(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "tan") {
+    if (numArgs.size() == 1) result = std::tan(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "tanh") {
+    if (numArgs.size() == 1) result = std::tanh(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "trunc") {
+    if (numArgs.size() == 1) result = std::trunc(numArgs[0]);
+    else validOperation = false;
+  } else if (functionName == "clz32") {
+    if (numArgs.size() == 1) {
+      uint32_t n = static_cast<uint32_t>(numArgs[0]);
+      if (n == 0) {
+        result = 32;
+      } else {
+        result = __builtin_clz(n);
+      }
+    } else {
+      validOperation = false;
+    }
+  } else if (functionName == "imul") {
+    if (numArgs.size() == 2) {
+size_t ConstantFoldingTransformer::GetFoldedExpressionsCount() const noexcept {
+  return m_foldedExpressions;
+}
+
+size_t ConstantFoldingTransformer::GetVisitedNodesCount() const noexcept {
+  return m_visitedNodes;
+}
+parser::ast::NodePtr ConstantFoldingTransformer::Transform(parser::ast::NodePtr node) {
+  // VisitNodeを呼び出して変換処理を実行
+  return VisitNode(std::move(node));
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::VisitNode(parser::ast::NodePtr node) {
+  if (!node) {
+    return nullptr;
+  }
+
+  // 統計情報の収集
+  if (m_statisticsEnabled) {
+    m_visitedNodes++;
+  }
+
+  // 子ノードを再帰的に処理
+  if (auto binaryExpr = std::dynamic_pointer_cast<parser::ast::BinaryExpression>(node)) {
+    binaryExpr->SetLeft(VisitNode(binaryExpr->GetLeft()));
+    binaryExpr->SetRight(VisitNode(binaryExpr->GetRight()));
+  } else if (auto unaryExpr = std::dynamic_pointer_cast<parser::ast::UnaryExpression>(node)) {
+    unaryExpr->SetArgument(VisitNode(unaryExpr->GetArgument()));
+  } else if (auto logicalExpr = std::dynamic_pointer_cast<parser::ast::LogicalExpression>(node)) {
+    logicalExpr->SetLeft(VisitNode(logicalExpr->GetLeft()));
+    logicalExpr->SetRight(VisitNode(logicalExpr->GetRight()));
+  } else if (auto condExpr = std::dynamic_pointer_cast<parser::ast::ConditionalExpression>(node)) {
+    condExpr->SetTest(VisitNode(condExpr->GetTest()));
+    condExpr->SetConsequent(VisitNode(condExpr->GetConsequent()));
+    condExpr->SetAlternate(VisitNode(condExpr->GetAlternate()));
+  } else if (auto callExpr = std::dynamic_pointer_cast<parser::ast::CallExpression>(node)) {
+    callExpr->SetCallee(VisitNode(callExpr->GetCallee()));
+    auto& args = callExpr->GetArguments();
+    for (size_t i = 0; i < args.size(); ++i) {
+      args[i] = VisitNode(args[i]);
+    }
+  } else if (auto memberExpr = std::dynamic_pointer_cast<parser::ast::MemberExpression>(node)) {
+    memberExpr->SetObject(VisitNode(memberExpr->GetObject()));
+    if (!memberExpr->IsComputed()) {
+      memberExpr->SetProperty(VisitNode(memberExpr->GetProperty()));
+    }
+  } else if (auto arrayExpr = std::dynamic_pointer_cast<parser::ast::ArrayExpression>(node)) {
+    auto& elements = arrayExpr->GetElements();
+    for (size_t i = 0; i < elements.size(); ++i) {
+      if (elements[i]) {  // スパース配列の場合、nullの要素がある
+        elements[i] = VisitNode(elements[i]);
+      }
+    }
+  } else if (auto objExpr = std::dynamic_pointer_cast<parser::ast::ObjectExpression>(node)) {
+    auto& properties = objExpr->GetProperties();
+    for (auto& prop : properties) {
+      if (prop->GetType() == parser::ast::NodeType::PROPERTY) {
+        auto property = std::static_pointer_cast<parser::ast::Property>(prop);
+        property->SetValue(VisitNode(property->GetValue()));
+        if (property->IsComputed()) {
+          property->SetKey(VisitNode(property->GetKey()));
+        }
+      }
+    }
+  } else if (auto blockStmt = std::dynamic_pointer_cast<parser::ast::BlockStatement>(node)) {
+    auto& body = blockStmt->GetBody();
+    for (size_t i = 0; i < body.size(); ++i) {
+      body[i] = VisitNode(body[i]);
+    }
+  } else if (auto ifStmt = std::dynamic_pointer_cast<parser::ast::IfStatement>(node)) {
+    ifStmt->SetTest(VisitNode(ifStmt->GetTest()));
+    ifStmt->SetConsequent(VisitNode(ifStmt->GetConsequent()));
+    if (ifStmt->GetAlternate()) {
+      ifStmt->SetAlternate(VisitNode(ifStmt->GetAlternate()));
+    }
+  } else if (auto program = std::dynamic_pointer_cast<parser::ast::Program>(node)) {
+    auto& body = program->GetBody();
+    for (size_t i = 0; i < body.size(); ++i) {
+      body[i] = VisitNode(body[i]);
+    }
+  }
+
+  // 現在のノードに対する畳み込み処理
+  parser::ast::NodePtr foldedNode = nullptr;
+
+  switch (node->GetType()) {
+    case parser::ast::NodeType::BINARY_EXPRESSION:
+      foldedNode = FoldBinaryExpression(std::static_pointer_cast<parser::ast::BinaryExpression>(node));
+      break;
+    case parser::ast::NodeType::UNARY_EXPRESSION:
+      foldedNode = FoldUnaryExpression(std::static_pointer_cast<parser::ast::UnaryExpression>(node));
+      break;
+    case parser::ast::NodeType::LOGICAL_EXPRESSION:
+      foldedNode = FoldLogicalExpression(std::static_pointer_cast<parser::ast::LogicalExpression>(node));
+      break;
+    case parser::ast::NodeType::CONDITIONAL_EXPRESSION:
+      foldedNode = FoldConditionalExpression(std::static_pointer_cast<parser::ast::ConditionalExpression>(node));
+      break;
+    case parser::ast::NodeType::CALL_EXPRESSION:
+      foldedNode = FoldCallExpression(std::static_pointer_cast<parser::ast::CallExpression>(node));
+      break;
+    case parser::ast::NodeType::MEMBER_EXPRESSION:
+      foldedNode = FoldMemberExpression(std::static_pointer_cast<parser::ast::MemberExpression>(node));
+      break;
+    default:
+      break;
+  }
+
+  // 畳み込みが行われたかチェック
+  if (foldedNode && foldedNode != node) {
+    if (m_statisticsEnabled) {
+      m_foldedExpressions++;
+    }
+    return foldedNode;
+  } else {
+    return node;
+  }
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::FoldBinaryExpression(const std::shared_ptr<parser::ast::BinaryExpression>& expr) {
+  // オペランドが定数かチェック
+  if (!IsConstant(expr->GetLeft()) || !IsConstant(expr->GetRight())) {
+    return expr;
+  }
+
+  // 定数リテラルを取得
+  auto leftLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(expr->GetLeft());
+  auto rightLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(expr->GetRight());
+
+  if (!leftLiteral || !rightLiteral) {
+    return expr;
+  }
+
+  // 演算を評価
+  parser::ast::NodePtr resultNode = EvaluateBinaryOperation(expr->GetOperator(), *leftLiteral, *rightLiteral);
+
+  return resultNode ? resultNode : expr;
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::FoldUnaryExpression(const std::shared_ptr<parser::ast::UnaryExpression>& expr) {
+  // オペランドが定数かチェック
+  if (!IsConstant(expr->GetArgument())) {
+    return expr;
+  }
+
+  auto argLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(expr->GetArgument());
+  if (!argLiteral) {
+    return expr;
+  }
+
+  // 演算を評価
+  parser::ast::NodePtr resultNode = EvaluateUnaryOperation(expr->GetOperator(), *argLiteral);
+
+  return resultNode ? resultNode : expr;
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::FoldLogicalExpression(const std::shared_ptr<parser::ast::LogicalExpression>& expr) {
+  auto leftOperand = expr->GetLeft();
+  auto op = expr->GetOperator();
+
+  // 左オペランドが定数かチェック
+  if (IsConstant(leftOperand)) {
+    auto leftLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(leftOperand);
+    if (!leftLiteral) {
+      return expr;
+    }
+
+    bool leftIsTruthy = IsTruthy(*leftLiteral);
+
+    // ショートサーキット評価
+    if (op == parser::ast::LogicalOperator::LOGICAL_AND && !leftIsTruthy) {
+      if (m_statisticsEnabled) {
+        m_foldedExpressions++;
+      }
+      return leftOperand;
+    }
+    if (op == parser::ast::LogicalOperator::LOGICAL_OR && leftIsTruthy) {
+      if (m_statisticsEnabled) {
+        m_foldedExpressions++;
+      }
+      return leftOperand;
+    }
+
+    // 右オペランドの評価
+    auto rightOperand = expr->GetRight();
+    if (IsConstant(rightOperand)) {
+      auto rightLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(rightOperand);
+      if (!rightLiteral) {
+        return expr;
+      }
+      parser::ast::NodePtr resultNode = EvaluateLogicalOperation(op, *leftLiteral, *rightLiteral);
+      return resultNode ? resultNode : expr;
+    } else {
+      if ((op == parser::ast::LogicalOperator::LOGICAL_AND && leftIsTruthy) ||
+          (op == parser::ast::LogicalOperator::LOGICAL_OR && !leftIsTruthy)) {
+        if (m_statisticsEnabled) {
+          m_foldedExpressions++;
+        }
+        return rightOperand;
+      }
+    }
+  }
+
+  return expr;
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::FoldConditionalExpression(const std::shared_ptr<parser::ast::ConditionalExpression>& expr) {
+  auto testExpr = expr->GetTest();
+  
+  // 条件式が定数かチェック
+  if (IsConstant(testExpr)) {
+    auto testLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(testExpr);
+    if (!testLiteral) {
+      return expr;
+    }
     
-    // 引数の数をチェック
-    auto checkArgsCount = [&args](size_t expected) -> bool {
-        return args.size() == expected;
-    };
+    bool testIsTruthy = IsTruthy(*testLiteral);
     
-    // NaN引数のチェック
-    auto hasNaN = [&args]() -> bool {
-        for (const auto& arg : args) {
-            if (std::isnan(arg)) {
-                return true;
+    // 条件に基づいて結果を選択
+    if (testIsTruthy) {
+      if (m_statisticsEnabled) {
+        m_foldedExpressions++;
+      }
+      return expr->GetConsequent();
+    } else {
+      if (m_statisticsEnabled) {
+        m_foldedExpressions++;
+      }
+      return expr->GetAlternate();
+    }
+  }
+  
+  return expr;
+}
+
+parser::ast::NodePtr ConstantFoldingTransformer::FoldCallExpression(const std::shared_ptr<parser::ast::CallExpression>& expr) {
+  auto callee = expr->GetCallee();
+  
+  // Math関数の定数畳み込み
+  if (auto memberExpr = std::dynamic_pointer_cast<parser::ast::MemberExpression>(callee)) {
+    auto object = memberExpr->GetObject();
+    auto property = memberExpr->GetProperty();
+    
+    // Math.関数の呼び出しかチェック
+    if (auto identifier = std::dynamic_pointer_cast<parser::ast::Identifier>(object)) {
+      if (identifier->GetName() == "Math") {
+        if (auto propIdentifier = std::dynamic_pointer_cast<parser::ast::Identifier>(property)) {
+          // 引数が全て定数かチェック
+          const auto& args = expr->GetArguments();
+          bool allArgsConstant = true;
+          std::vector<double> numArgs;
+          
+          for (const auto& arg : args) {
+            if (!IsConstant(arg)) {
+              allArgsConstant = false;
+              break;
             }
-        }
-        return false;
-    };
-    
-    // Math.abs（絶対値）
-    if (name == "Math.abs") {
-        if (!checkArgsCount(1)) return false;
-        result = std::abs(args[0]);
-        return true;
-    }
-    
-    // Math.acos（アークコサイン）
-    if (name == "Math.acos") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < -1.0 || args[0] > 1.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::acos(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.acosh（双曲線アークコサイン）
-    if (name == "Math.acosh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < 1.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::acosh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.asin（アークサイン）
-    if (name == "Math.asin") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < -1.0 || args[0] > 1.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::asin(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.asinh（双曲線アークサイン）
-    if (name == "Math.asinh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::asinh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.atan（アークタンジェント）
-    if (name == "Math.atan") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::atan(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.atanh（双曲線アークタンジェント）
-    if (name == "Math.atanh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] <= -1.0 || args[0] >= 1.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::atanh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.atan2（2つの引数を取るアークタンジェント）
-    if (name == "Math.atan2") {
-        if (!checkArgsCount(2)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::atan2(args[0], args[1]);
-        }
-        return true;
-    }
-    
-    // Math.cbrt（立方根）
-    if (name == "Math.cbrt") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::cbrt(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.ceil（天井関数）
-    if (name == "Math.ceil") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::ceil(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.clz32（32ビット整数のリーディングゼロの数）
-    if (name == "Math.clz32") {
-        if (!checkArgsCount(1)) return false;
-        
-        uint32_t x = static_cast<uint32_t>(args[0]);
-        if (x == 0) {
-            result = 32.0;
-        } else {
-            int count = 0;
-            uint32_t mask = 0x80000000;
-            while ((x & mask) == 0) {
-                count++;
-                mask >>= 1;
-            }
-            result = static_cast<double>(count);
-        }
-        return true;
-    }
-    
-    // Math.cos（コサイン）
-    if (name == "Math.cos") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::cos(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.cosh（双曲線コサイン）
-    if (name == "Math.cosh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::cosh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.exp（eの累乗）
-    if (name == "Math.exp") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::exp(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.expm1（e^x - 1）
-    if (name == "Math.expm1") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::expm1(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.floor（床関数）
-    if (name == "Math.floor") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::floor(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.fround（32ビット浮動小数点に丸める）
-    if (name == "Math.fround") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            // 32ビット浮動小数点に変換してから戻す
-            float f = static_cast<float>(args[0]);
-            result = static_cast<double>(f);
-        }
-        return true;
-    }
-    
-    // Math.hypot（引数の二乗和の平方根）
-    if (name == "Math.hypot") {
-        if (args.empty()) {
-            result = 0.0;
-            return true;
-        }
-        
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-            return true;
-        }
-        
-        // 引数が1つの場合は絶対値を返す
-        if (args.size() == 1) {
-            result = std::abs(args[0]);
-            return true;
-        }
-        
-        // 引数が複数の場合はstd::hypotを使用
-        if (args.size() == 2) {
-            result = std::hypot(args[0], args[1]);
-        } else {
-            // 3つ以上の引数の場合は自分で計算
-            double sum = 0.0;
-            for (const auto& arg : args) {
-                sum += arg * arg;
-            }
-            result = std::sqrt(sum);
-        }
-        return true;
-    }
-    
-    // Math.imul（32ビット整数の乗算）
-    if (name == "Math.imul") {
-        if (!checkArgsCount(2)) return false;
-        
-        int32_t a = static_cast<int32_t>(args[0]);
-        int32_t b = static_cast<int32_t>(args[1]);
-        result = static_cast<double>(a * b);
-        return true;
-    }
-    
-    // Math.log（自然対数）
-    if (name == "Math.log") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < 0.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] == 0.0) {
-            result = -std::numeric_limits<double>::infinity();
-        } else {
-            result = std::log(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.log1p（ln(1 + x)）
-    if (name == "Math.log1p") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < -1.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] == -1.0) {
-            result = -std::numeric_limits<double>::infinity();
-        } else {
-            result = std::log1p(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.log10（常用対数）
-    if (name == "Math.log10") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < 0.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] == 0.0) {
-            result = -std::numeric_limits<double>::infinity();
-        } else {
-            result = std::log10(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.log2（2を底とする対数）
-    if (name == "Math.log2") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < 0.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] == 0.0) {
-            result = -std::numeric_limits<double>::infinity();
-        } else {
-            result = std::log2(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.max（最大値）
-    if (name == "Math.max") {
-        if (args.empty()) {
-            result = -std::numeric_limits<double>::infinity();
-            return true;
-        }
-        
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-            return true;
-        }
-        
-        result = *std::max_element(args.begin(), args.end());
-        return true;
-    }
-    
-    // Math.min（最小値）
-    if (name == "Math.min") {
-        if (args.empty()) {
-            result = std::numeric_limits<double>::infinity();
-            return true;
-        }
-        
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-            return true;
-        }
-        
-        result = *std::min_element(args.begin(), args.end());
-        return true;
-    }
-    
-    // Math.pow（累乗）
-    if (name == "Math.pow") {
-        if (!checkArgsCount(2)) return false;
-        
-        // 特殊なケースの処理
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] == 1.0) {
-            result = 1.0;  // 1^(任意の値) = 1
-        } else if (args[0] == -1.0 && std::isinf(args[1])) {
-            result = 1.0;  // (-1)^(無限大) = 1
-        } else if (args[0] == 0.0 && args[1] < 0.0) {
-            if (std::signbit(args[0])) {
-                // -0^(負の数) = 符号付き無限大（奇数の場合は負、偶数の場合は正）
-                if (std::fmod(std::abs(args[1]), 2.0) == 1.0) {
-                    result = -std::numeric_limits<double>::infinity();
-                } else {
-                    result = std::numeric_limits<double>::infinity();
-                }
-            } else {
-                // +0^(負の数) = 無限大
-                result = std::numeric_limits<double>::infinity();
-            }
-        } else if (args[0] == 0.0 && args[1] > 0.0) {
-            // 0^(正の数) = 0
-            result = 0.0;
-        } else if (std::abs(args[0]) > 1.0 && std::isinf(args[1]) && args[1] > 0.0) {
-            // |x| > 1, x^(+無限大) = +無限大
-            result = std::numeric_limits<double>::infinity();
-        } else if (std::abs(args[0]) > 1.0 && std::isinf(args[1]) && args[1] < 0.0) {
-            // |x| > 1, x^(-無限大) = 0
-            result = 0.0;
-        } else if (std::abs(args[0]) < 1.0 && std::isinf(args[1]) && args[1] > 0.0) {
-            // |x| < 1, x^(+無限大) = 0
-            result = 0.0;
-        } else if (std::abs(args[0]) < 1.0 && std::isinf(args[1]) && args[1] < 0.0) {
-            // |x| < 1, x^(-無限大) = +無限大
-            result = std::numeric_limits<double>::infinity();
-        } else if (std::isinf(args[0]) && args[1] > 0.0) {
-            // x = 無限大, x^(正の数) = +無限大
-            if (args[0] < 0.0 && std::fmod(args[1], 2.0) == 1.0) {
-                result = -std::numeric_limits<double>::infinity();
-            } else {
-                result = std::numeric_limits<double>::infinity();
-            }
-        } else if (std::isinf(args[0]) && args[1] < 0.0) {
-            // x = 無限大, x^(負の数) = 0
-            result = 0.0;
-        } else {
-            // 通常の計算
-            result = std::pow(args[0], args[1]);
-        }
-        
-        return true;
-    }
-    
-    // Math.round（四捨五入）
-    if (name == "Math.round") {
-        if (!checkArgsCount(1)) return false;
-        
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            // JavaScriptの丸め処理（0.5は切り上げ）
-            result = std::floor(args[0] + 0.5);
             
-            // 特殊なケース: -0.5は-0.0に丸める
-            if (args[0] == -0.5) {
-                result = -0.0;
+            auto literal = std::dynamic_pointer_cast<parser::ast::Literal>(arg);
+            if (!literal || !IsNumber(*literal)) {
+              allArgsConstant = false;
+              break;
             }
+            
+            numArgs.push_back(GetNumberValue(*literal));
+          }
+          
+          if (allArgsConstant) {
+            parser::ast::NodePtr resultNode = EvaluateMathFunction(propIdentifier->GetName(), numArgs);
+            if (resultNode) {
+              if (m_statisticsEnabled) {
+                m_foldedExpressions++;
+              }
+              return resultNode;
+            }
+          }
         }
-        
-        return true;
+      }
     }
-    
-    // Math.sign（符号関数）
-    if (name == "Math.sign") {
-        if (!checkArgsCount(1)) return false;
-        
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else if (args[0] > 0.0) {
-            result = 1.0;
-        } else if (args[0] < 0.0) {
-            result = -1.0;
-        } else {
-            // 0または-0の場合
-            result = args[0];  // 符号を保存
-        }
-        
-        return true;
-    }
-    
-    // Math.sin（サイン）
-    if (name == "Math.sin") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::sin(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.sinh（双曲線サイン）
-    if (name == "Math.sinh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::sinh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.sqrt（平方根）
-    if (name == "Math.sqrt") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN() || args[0] < 0.0) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::sqrt(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.tan（タンジェント）
-    if (name == "Math.tan") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::tan(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.tanh（双曲線タンジェント）
-    if (name == "Math.tanh") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            result = std::tanh(args[0]);
-        }
-        return true;
-    }
-    
-    // Math.trunc（整数部分）
-    if (name == "Math.trunc") {
-        if (!checkArgsCount(1)) return false;
-        if (hasNaN()) {
-            result = std::numeric_limits<double>::quiet_NaN();
-        } else {
-            // 整数部分のみを取得（小数点以下を切り捨て）
-            result = args[0] < 0.0 ? std::ceil(args[0]) : std::floor(args[0]);
-        }
-        return true;
-    }
-    
-    // Number関連の関数
-    if (name == "Number.isFinite") {
-        if (!checkArgsCount(1)) return false;
-        result = std::isfinite(args[0]) ? 1.0 : 0.0;
-        return true;
-    }
-    
-    if (name == "Number.isInteger") {
-        if (!checkArgsCount(1)) return false;
-        result = (std::isfinite(args[0]) && args[0] == std::floor(args[0])) ? 1.0 : 0.0;
-        return true;
-    }
-    
-    if (name == "Number.isNaN") {
-        if (!checkArgsCount(1)) return false;
-        result = std::isnan(args[0]) ? 1.0 : 0.0;
-        return true;
-    }
-    
-    if (name == "Number.isSafeInteger") {
-        if (!checkArgsCount(1)) return false;
-        const double MAX_SAFE_INTEGER = 9007199254740991.0;  // 2^53 - 1
-        bool isSafe = std::isfinite(args[0]) && 
-                      args[0] == std::floor(args[0]) && 
-                      std::abs(args[0]) <= MAX_SAFE_INTEGER;
-        result = isSafe ? 1.0 : 0.0;
-        return true;
-    }
-    
-    // String関連の関数
-    if (name == "String.fromCharCode" || name == "String.fromCodePoint") {
-        // これらの関数は文字列を返すため、定数畳み込みでは数値結果として評価できない
-        return false;
-    }
-    
-    // サポートされていない関数
-    return false;
+  }
+  
+  return expr;
 }
 
-} // namespace transformers
-} // namespace aero 
+parser::ast::NodePtr ConstantFoldingTransformer::FoldMemberExpression(const std::shared_ptr<parser::ast::MemberExpression>& expr) {
+  auto object = expr->GetObject();
+  
+  // 配列やオブジェクトリテラルのプロパティアクセスを畳み込む
+  if (expr->IsComputed() && IsConstant(expr->GetProperty())) {
+    if (auto arrayExpr = std::dynamic_pointer_cast<parser::ast::ArrayExpression>(object)) {
+      auto property = std::dynamic_pointer_cast<parser::ast::Literal>(expr->GetProperty());
+      if (property && IsNumber(*property)) {
+        int index = static_cast<int>(GetNumberValue(*property));
+        const auto& elements = arrayExpr->GetElements();
+        
+        if (index >= 0 && index < static_cast<int>(elements.size()) && elements[index] && IsConstant(elements[index])) {
+          if (m_statisticsEnabled) {
+            m_foldedExpressions++;
+          }
+          return elements[index];
+        }
+      }
+    } else if (auto objExpr = std::dynamic_pointer_cast<parser::ast::ObjectExpression>(object)) {
+      auto property = std::dynamic_pointer_cast<parser::ast::Literal>(expr->GetProperty());
+      if (property) {
+        std::string key;
+        if (IsString(*property)) {
+          key = GetStringValue(*property);
+        } else if (IsNumber(*property)) {
+          key = std::to_string(static_cast<int>(GetNumberValue(*property)));
+        }
+        
+        if (!key.empty()) {
+          const auto& properties = objExpr->GetProperties();
+          for (const auto& prop : properties) {
+            if (auto objProp = std::dynamic_pointer_cast<parser::ast::Property>(prop)) {
+              if (!objProp->IsComputed()) {
+                if (auto keyIdentifier = std::dynamic_pointer_cast<parser::ast::Identifier>(objProp->GetKey())) {
+                  if (keyIdentifier->GetName() == key && IsConstant(objProp->GetValue())) {
+                    if (m_statisticsEnabled) {
+                      m_foldedExpressions++;
+                    }
+                    return objProp->GetValue();
+                  }
+                } else if (auto keyLiteral = std::dynamic_pointer_cast<parser::ast::Literal>(objProp->GetKey())) {
+                  std::string propKey;
+                  if (IsString(*keyLiteral)) {
+                    propKey = GetStringValue(*keyLiteral);
+                  } else if (IsNumber(*keyLiteral)) {
+                    propKey = std::to_string(static_cast<int>(GetNumberValue(*keyLiteral)));
+                  }
+                  
+                  if (propKey == key && IsConstant(objProp->GetValue())) {
+                    if (m_statisticsEnabled) {
+                      m_foldedExpressions++;
+                    }
+                    return objProp->GetValue();
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return expr;
+}
+
+}  // namespace aerojs::core::transformers

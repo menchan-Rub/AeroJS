@@ -1,0 +1,5 @@
+if(EXISTS "/home/menchan/Programming/Javascript-Engine/build/tests/jit_tests[1]_tests.cmake")
+  include("/home/menchan/Programming/Javascript-Engine/build/tests/jit_tests[1]_tests.cmake")
+else()
+  add_test(jit_tests_NOT_BUILT jit_tests_NOT_BUILT)
+endif()

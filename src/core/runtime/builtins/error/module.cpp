@@ -5,23 +5,23 @@
  * @license MIT License
  */
 
-#include "error.h"
-#include "core/runtime/global_object.h"
 #include "core/runtime/execution_context.h"
+#include "core/runtime/global_object.h"
+#include "error.h"
 
 namespace aero {
 
 /**
  * @brief エラーモジュールをグローバルオブジェクトに登録します
- * 
+ *
  * @param global グローバルオブジェクト
  */
 void registerErrorModule(GlobalObject* global) {
   // 実行コンテキストを取得
   auto* ctx = ExecutionContext::current();
-  
+
   // エラー関連の組み込みオブジェクトを登録
   registerErrorObjects(ctx, global);
 }
 
-} // namespace aero 
+}  // namespace aero

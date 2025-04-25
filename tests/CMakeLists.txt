@@ -15,6 +15,12 @@ add_executable(
   core/runtime/values/symbol_test.cpp
 )
 
+# JITコンパイラテスト
+add_executable(
+  jit_tests
+  jit/jit_compiler_test.cpp
+)
+
 # リンクするライブラリを指定
 target_link_libraries(
   symbol_tests
@@ -22,9 +28,16 @@ target_link_libraries(
   AeroJSCore  # AeroJSのメインプロジェクトのライブラリ名（実際のプロジェクト設定に合わせて変更してください）
 )
 
+target_link_libraries(
+  jit_tests
+  GTest::gtest_main
+  AeroJSJIT
+)
+
 # テストを自動的に登録
 include(GoogleTest)
 gtest_discover_tests(symbol_tests)
+gtest_discover_tests(jit_tests)
 
 # テスト実行時のオプション
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)

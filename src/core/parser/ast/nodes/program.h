@@ -1,26 +1,30 @@
 /**
  * @file program.h
  * @brief AeroJS AST のプログラムノードクラス定義
- * @author AeroJS Developers
+ * @author AeroJS開発チーム
  * @copyright Copyright (c) 2024 AeroJS Project
- * @license MIT License
- *
- * @details
- * このファイルは、JavaScriptプログラム全体 (スクリプトまたはモジュール) を
- * 表すASTノード `Program` を定義します。
- * `Program` は、トップレベルの文のリストを保持します。
- *
- * コーディング規約: AeroJS コーディング規約 version 1.2
+ * @license Apache License 2.0
  */
 
-#ifndef AEROJS_PARSER_AST_NODES_PROGRAM_H
-#define AEROJS_PARSER_AST_NODES_PROGRAM_H
+#pragma once
 
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
-#include <memory> // For std::vector<NodePtr>
 
+#include "nlohmann/json_fwd.hpp"
 #include "node.h"
-#include "../visitors/ast_visitor.h" // For AstVisitor and ConstAstVisitor
+
+// 前方宣言
+namespace aerojs::core::parser::visitors {
+class AstVisitor;
+class ConstAstVisitor;
+}
 
 namespace aerojs {
 namespace core {
@@ -29,127 +33,113 @@ namespace ast {
 
 /**
  * @enum ProgramType
- * @brief プログラムの種類（スクリプトまたはモジュール）を示す列挙型。
+ * @brief JavaScriptプログラムの種類を示す列挙型
  */
-enum class ProgramType {
-    Script,  ///< 通常のスクリプト
-    Module   ///< ES6 モジュール
+enum class ProgramType : uint8_t {
+  Script,  ///< 通常のJavaScriptスクリプト
+  Module   ///< ECMAScriptモジュール（常にstrict mode）
 };
 
 /**
+ * @brief ProgramTypeを文字列表現に変換
+ * @param type 変換対象のProgramType値
+ * @return 対応する文字列
+ */
+[[nodiscard]] inline const char* programTypeToString(ProgramType type) noexcept {
+  switch (type) {
+    case ProgramType::Script:
+      return "Script";
+    case ProgramType::Module:
+      return "Module";
+    default:
+      assert(false && "無効なProgramType値です");
+      return "Unknown";
+  }
+}
+
+/**
  * @class Program
- * @brief ASTのルートノードであり、JavaScriptプログラム全体を表すクラス。
- *
- * @details
- * このクラスは、ソースコードからパースされたJavaScriptプログラムの
- * トップレベル構造を表します。プログラムは、トップレベルの文 (Statement) の
- * シーケンスで構成されます。また、プログラムが通常のスクリプトか
- * ES6モジュールであるかの情報も保持します。
- *
- * メンバ:
- * - `m_body`: プログラムのトップレベル文を含む `std::vector<NodePtr>`。
- * - `m_programType`: プログラムの種類 (`ProgramType`)。
- *
- * メモリ管理:
- * `m_body` 内の `NodePtr` (`std::unique_ptr<Node>`) が子ノードの所有権を管理します。
- *
- * スレッド安全性:
- * `Node` クラスと同様に、`Program` オブジェクト自体はスレッドセーフではありません。
+ * @brief AST（抽象構文木）のルートノード
+ * 
+ * JavaScriptプログラム全体を表現するノードで、トップレベルの文やディレクティブの
+ * リストを保持し、プログラムの種類（ScriptまたはModule）を区別します。
+ * ESTree仕様のProgramノードに対応します。
  */
 class Program final : public Node {
-public:
-    /**
-     * @brief Programノードのコンストラクタ。
-     * @param location ソースコード内のこのノードの位置情報。
-     * @param body プログラム本体を構成するトップレベル文のリスト (ムーブされる)。
-     * @param type プログラムの種類 (Script または Module)。
-     * @param parent 親ノード (通常はnullptr)。
-     */
-    explicit Program(const SourceLocation& location,
-                     std::vector<NodePtr>&& body,
-                     ProgramType type,
-                     Node* parent = nullptr);
+ public:
+  /**
+   * @brief Programノードを構築
+   * @param location ソースコード上の位置情報
+   * @param body プログラムのトップレベル文のリスト
+   * @param type プログラムの種類
+   * @param parent 親ノードへのポインタ（通常はnullptr）
+   */
+  explicit Program(const SourceLocation& location,
+                   std::vector<NodePtr>&& body,
+                   ProgramType type,
+                   Node* parent = nullptr) noexcept;
 
-    /**
-     * @brief デストラクタ (デフォルト)。
-     */
-    ~Program() override = default;
+  /**
+   * @brief デストラクタ
+   */
+  ~Program() override = default;
 
-    // コピーとムーブのコンストラクタ/代入演算子はデフォルトを使用
-    Program(const Program&) = delete; // コピー禁止
-    Program& operator=(const Program&) = delete; // コピー代入禁止
-    Program(Program&&) noexcept = default; // ムーブ許可
-    Program& operator=(Program&&) noexcept = default; // ムーブ代入許可
+  // コピー禁止、ムーブ許可
+  Program(const Program&) = delete;
+  Program& operator=(const Program&) = delete;
+  Program(Program&& other) noexcept = default;
+  Program& operator=(Program&& other) noexcept = default;
 
-    /**
-     * @brief ノードタイプを取得します。
-     * @return `NodeType::Program`。
-     */
-    NodeType getType() const noexcept override final { return NodeType::Program; }
+  // Node インターフェースのオーバーライド
+  [[nodiscard]] NodeType getType() const noexcept override final {
+    return NodeType::Program;
+  }
 
-    /**
-     * @brief プログラムの種類を取得します。
-     * @return `ProgramType::Script` または `ProgramType::Module`。
-     */
-    ProgramType getProgramType() const noexcept;
+  void accept(visitors::AstVisitor* visitor) override final;
+  void accept(visitors::ConstAstVisitor* visitor) const override final;
+  [[nodiscard]] std::vector<Node*> getChildren() override final;
+  [[nodiscard]] std::vector<const Node*> getChildren() const override final;
+  [[nodiscard]] nlohmann::json toJson(bool pretty = false) const override final;
+  [[nodiscard]] std::string toString() const override final;
 
-    /**
-     * @brief プログラム本体の文リストを取得します (非const版)。
-     * @return トップレベル文のリストへの参照 (`std::vector<NodePtr>&`)。
-     */
-    std::vector<NodePtr>& getBody() noexcept;
+  // Program固有のメソッド
+  [[nodiscard]] ProgramType getProgramType() const noexcept {
+    return m_programType;
+  }
 
-    /**
-     * @brief プログラム本体の文リストを取得します (const版)。
-     * @return トップレベル文のリストへのconst参照 (`const std::vector<NodePtr>&`)。
-     */
-    const std::vector<NodePtr>& getBody() const noexcept;
+  [[nodiscard]] std::vector<NodePtr>& getBody() noexcept {
+    return m_body;
+  }
 
-    /**
-     * @brief ビジターを受け入れます (非const版)。
-     * @param visitor 訪問するビジター。
-     */
-    void accept(AstVisitor* visitor) override final;
+  [[nodiscard]] const std::vector<NodePtr>& getBody() const noexcept {
+    return m_body;
+  }
 
-    /**
-     * @brief ビジターを受け入れます (const版)。
-     * @param visitor 訪問するconstビジター。
-     */
-    void accept(ConstAstVisitor* visitor) const override final;
+ private:
+  /** プログラム本体（トップレベル文のリスト） */
+  std::vector<NodePtr> m_body;
 
-    /**
-     * @brief 子ノードのリストを取得します。
-     * @return プログラム本体の文への非所有ポインタのベクター。
-     */
-    std::vector<Node*> getChildren() override final;
-
-    /**
-     * @brief 子ノードのリストを取得します (const版)。
-     * @return プログラム本体の文へのconst非所有ポインタのベクター。
-     */
-    std::vector<const Node*> getChildren() const override final;
-
-    /**
-     * @brief このノードをJSON表現に変換します。
-     * @param pretty フォーマットするかどうか。
-     * @return ノードを表すJSONオブジェクト。
-     */
-    nlohmann::json toJson(bool pretty = false) const override final;
-
-    /**
-     * @brief このノードを文字列表現に変換します。
-     * @return "Program[type=...]" 形式の文字列。
-     */
-    std::string toString() const override final;
-
-private:
-    std::vector<NodePtr> m_body;        ///< プログラムのトップレベル文
-    ProgramType m_programType;          ///< プログラムの種類 (Script/Module)
+  /** プログラムの種類（ScriptまたはModule） */
+  ProgramType m_programType;
 };
 
-} // namespace ast
-} // namespace parser
-} // namespace core
-} // namespace aerojs
+// コンストラクタの実装
+inline Program::Program(const SourceLocation& location,
+                        std::vector<NodePtr>&& body,
+                        ProgramType type,
+                        Node* parent) noexcept
+    : Node(NodeType::Program, location, parent),
+      m_body(std::move(body)),
+      m_programType(type) {
+  // 子ノードの親ポインタを設定
+  for (const auto& node_ptr : m_body) {
+    if (node_ptr) {
+      node_ptr->setParent(this);
+    }
+  }
+}
 
-#endif // AEROJS_PARSER_AST_NODES_PROGRAM_H 
+}  // namespace ast
+}  // namespace parser
+}  // namespace core
+}  // namespace aerojs

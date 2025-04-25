@@ -1,494 +1,693 @@
-/**
- * @file inline_functions.cpp
+/*******************************************************************************
+ * @file src/core/transformers/inline_functions.cpp
  * @version 1.0.0
- * @copyright Copyright (c) 2023 AeroJS Project
+ * @copyright Copyright (c) 2024 AeroJS Project
  * @license MIT License
- * @brief 関数インライン化を行うトランスフォーマーの実装
- */
+ * @brief 関数インライン化を行うトランスフォーマーの実装ファイル。
+ ******************************************************************************/
 
-#include "inline_functions.h"
-#include "core/ast/visitor.h"
-#include "core/ast/node_factory.h"
-#include "core/ast/ast_node_types.h"
-#include <algorithm>
-#include <sstream>
-#include <stack>
-#include <cassert>
+#include "src/core/transformers/inline_functions.h"  // 対応ヘッダーを最初にインクルード
 
-namespace aero {
-namespace transformers {
+#include <algorithm>  // std::find_if など (副作用チェックで使用)
+#include <cassert>    // assert (デバッグビルド用)
+#include <memory>     // std::dynamic_pointer_cast, std::make_shared など
+#include <sstream>    // std::ostringstream (一意な名前生成で使用)
+#include <stack>      // スコープスタックとして使用 (ただし現在は vector)
+#include <utility>    // std::move
 
-using namespace ast;
+// AST関連
+#include "src/core/common/logger.h"                // ロギング用
+#include "src/core/parser/ast/ast_node_factory.h"  // ノード生成用
+#include "src/core/parser/ast/ast_node_types.h"
+#include "src/core/parser/ast/nodes/all_nodes.h"       // AST ノードクラス
+#include "src/core/parser/ast/visitor/ast_cloner.h"    // ノードのディープコピー用
+#include "src/core/parser/ast/visitor/ast_replacer.h"  // ノード置換用 (インライン化で使用)
 
-// コンストラクタ
+namespace aerojs::core::transformers {
+
+// 必要な型のみ using 宣言
+using aerojs::parser::ast::ArrowFunctionExpression;
+using aerojs::parser::ast::BlockStatement;
+using aerojs::parser::ast::CallExpression;
+using aerojs::parser::ast::Expression;
+using aerojs::parser::ast::FunctionDeclaration;
+using aerojs::parser::ast::FunctionExpression;
+using aerojs::parser::ast::Identifier;
+using aerojs::parser::ast::Node;
+using aerojs::parser::ast::NodePtr;
+using aerojs::parser::ast::NodeType;
+using aerojs::parser::ast::Program;
+using aerojs::parser::ast::ReturnStatement;
+using aerojs::parser::ast::Statement;
+using aerojs::parser::ast::VariableDeclaration;
+using aerojs::parser::ast::VariableDeclarator;
+using aerojs::parser::ast::visitor::ASTCloner;
+using aerojs::parser::ast::visitor::ASTReplacer;
+using aerojs::parser::ast::ASTNodeFactory;
+
+// === コンストラクタ ===
+
 InlineFunctionsTransformer::InlineFunctionsTransformer(
     size_t maxInlineSize,
     size_t maxRecursionDepth,
-    bool enableStatistics
-)
-    : Transformer("InlineFunctions", "関数インライン化を行うトランスフォーマー")
-    , m_maxInlineSize(maxInlineSize)
-    , m_maxRecursionDepth(maxRecursionDepth)
-    , m_currentRecursionDepth(0)
-    , m_statisticsEnabled(enableStatistics)
-    , m_inlinedFunctionsCount(0)
-    , m_inlinedCallsCount(0)
-    , m_visitedNodesCount(0)
-    , m_nextUniqueId(0)
-{
+    bool enableStatistics)
+    : Transformer("InlineFunctionsTransformer", "Performs function inlining optimization.")  // 基底クラスコンストラクタ呼び出し
+      ,
+      m_maxInlineSize(maxInlineSize),
+      m_maxRecursionDepth(maxRecursionDepth),
+      m_currentRecursionDepth(0),
+      m_statisticsEnabled(enableStatistics),
+      m_inlinedFunctionsCount(0),
+      m_inlinedCallsCount(0),
+      m_visitedNodesCount(0),
+      m_nextUniqueId(0) {
+  // 基底クラスのコンストラクタで Visitor の設定などが行われる想定
 }
 
-void InlineFunctionsTransformer::reset() {
-    m_functionMap.clear();
-    m_anonymousFunctions.clear();
-    m_scopeStack.clear();
-    m_currentRecursionDepth = 0;
-    m_inlinedFunctionsCount = 0;
-    m_inlinedCallsCount = 0;
-    m_visitedNodesCount = 0;
-    m_nextUniqueId = 0;
+// === 状態リセット・統計 ===
+
+void InlineFunctionsTransformer::Reset() {
+  m_functionMap.clear();
+  m_anonymousFunctions.clear();
+  m_scopeStack.clear();
+  m_currentRecursionDepth = 0;
+  m_inlinedFunctionsCount = 0;
+  m_inlinedCallsCount = 0;
+  m_visitedNodesCount = 0;
+  m_nextUniqueId = 0;
+  // 基底クラスのリセットも呼び出す
+  Transformer::Reset();
 }
 
-void InlineFunctionsTransformer::enableStatistics(bool enable) {
-    m_statisticsEnabled = enable;
+void InlineFunctionsTransformer::EnableStatistics(bool enable) {
+  m_statisticsEnabled = enable;
 }
 
-size_t InlineFunctionsTransformer::getInlinedFunctionsCount() const {
-    return m_inlinedFunctionsCount;
+size_t InlineFunctionsTransformer::GetInlinedFunctionsCount() const noexcept {
+  return m_inlinedFunctionsCount;
 }
 
-size_t InlineFunctionsTransformer::getInlinedCallsCount() const {
-    return m_inlinedCallsCount;
+size_t InlineFunctionsTransformer::GetInlinedCallsCount() const noexcept {
+  return m_inlinedCallsCount;
 }
 
-size_t InlineFunctionsTransformer::getVisitedNodesCount() const {
-    return m_visitedNodesCount;
+size_t InlineFunctionsTransformer::GetVisitedNodesCount() const noexcept {
+  return m_visitedNodesCount;
 }
 
-// AST訪問メソッド
+// === AST Visitor メソッドの実装 ===
 
-void InlineFunctionsTransformer::visitProgram(Program* node) {
-    if (m_statisticsEnabled) {
-        m_visitedNodesCount++;
+void InlineFunctionsTransformer::VisitProgram(Program* node) {
+  if (m_statisticsEnabled) {
+    m_visitedNodesCount++;
+  }
+
+  // グローバルスコープを開始
+  EnterScope();
+
+  // 1st パス: 関数宣言を収集し、情報を登録
+  for (const auto& stmt : node->GetBody()) {
+    if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+      // 関数名をグローバルスコープに登録
+      if (funcDecl->GetId()) {
+        DeclareVariableInCurrentScope(funcDecl->GetId()->GetName());
+        CollectFunctionInfo(stmt, funcDecl->GetId()->GetName());
+      }
+    } else if (auto* varDecl = dynamic_cast<VariableDeclaration*>(stmt.get())) {
+      // 変数宣言内の関数式も収集
+      for (const auto& declarator : varDecl->GetDeclarations()) {
+        if (auto* funcExpr = dynamic_cast<FunctionExpression*>(declarator->GetInit().get())) {
+          if (auto* id = dynamic_cast<Identifier*>(declarator->GetId().get())) {
+            DeclareVariableInCurrentScope(id->GetName());
+            CollectFunctionInfo(funcExpr->shared_from_this(), id->GetName());
+          }
+        }
+      }
     }
-    
-    // トップレベルスコープを作成
-    m_scopeStack.push_back({});
-    
-    // まず関数宣言を収集
-    for (auto& stmt : node->body) {
-        if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
-            FunctionInfo info;
-            info.functionNode = stmt;
-            info.name = funcDecl->id->name;
-            info.size = calculateFunctionSize(stmt);
-            info.hasSideEffects = checkForSideEffects(stmt);
-            
-            // パラメータと本体を保存
-            for (auto& param : funcDecl->params) {
-                info.parameters.push_back(param);
+  }
+
+  // 再帰フラグとインライン化可能性を更新
+  for (auto& [name, info] : m_functionMap) {
+    info.m_isRecursive = IsRecursiveFunction(info);
+    info.m_hasMultipleReturns = CheckForMultipleReturns(info.m_body);
+    info.m_isEligibleForInlining = !info.m_hasMultipleReturns && 
+                                   info.m_size <= m_maxInlineSize && 
+                                   !info.m_hasSideEffects;
+  }
+
+  // 2nd パス: ステートメントを変換 (インライン化を実行)
+  Transformer::VisitProgram(node);
+
+  // グローバルスコープを終了
+  LeaveScope();
+}
+
+void InlineFunctionsTransformer::VisitFunctionDeclaration(FunctionDeclaration* node) {
+  if (m_statisticsEnabled) {
+    m_visitedNodesCount++;
+  }
+
+  // 関数スコープを開始
+  EnterScope();
+
+  // パラメータを現在のスコープに登録
+  for (const auto& param : node->GetParams()) {
+    if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
+      DeclareVariableInCurrentScope(identifier->GetName());
+    } else {
+      // パターン (ArrayPattern, ObjectPattern) の場合
+      RegisterPatternVariables(param);
+    }
+  }
+  // 関数名自体もスコープに追加 (再帰呼び出しのため)
+  if (node->GetId()) {
+    DeclareVariableInCurrentScope(node->GetId()->GetName());
+  }
+
+  // 関数本体を訪問
+  Transformer::VisitFunctionDeclaration(node);
+
+  // 関数スコープを終了
+  LeaveScope();
+}
+
+void InlineFunctionsTransformer::VisitFunctionExpression(FunctionExpression* node) {
+  if (m_statisticsEnabled) {
+    m_visitedNodesCount++;
+  }
+
+  // 関数式を収集
+  std::string name = node->GetId() ? node->GetId()->GetName() : "";
+  CollectFunctionInfo(node->shared_from_this(), name);
+
+  // 関数スコープを開始
+  EnterScope();
+
+  // パラメータと関数名 (あれば) をスコープに追加
+  if (!name.empty()) {
+    DeclareVariableInCurrentScope(name);
+  }
+  for (const auto& param : node->GetParams()) {
+    if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
+      DeclareVariableInCurrentScope(identifier->GetName());
+    } else {
+      // パターン (ArrayPattern, ObjectPattern) の場合
+      RegisterPatternVariables(param);
+    }
+  }
+
+  // 関数本体を訪問
+  Transformer::VisitFunctionExpression(node);
+
+  // 関数スコープを終了
+  LeaveScope();
+}
+
+void InlineFunctionsTransformer::VisitArrowFunctionExpression(ArrowFunctionExpression* node) {
+  if (m_statisticsEnabled) {
+    m_visitedNodesCount++;
+  }
+
+  // アロー関数を収集
+  CollectFunctionInfo(node->shared_from_this(), "");  // アロー関数は常に匿名
+
+  // 関数スコープを開始
+  EnterScope();
+
+  // パラメータをスコープに追加
+  for (const auto& param : node->GetParams()) {
+    if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
+      DeclareVariableInCurrentScope(identifier->GetName());
+    } else {
+      // パターン (ArrayPattern, ObjectPattern) の場合
+      RegisterPatternVariables(param);
+    }
+  }
+
+  // 関数本体を訪問
+  Transformer::VisitArrowFunctionExpression(node);
+
+  // 関数スコープを終了
+  LeaveScope();
+}
+
+void InlineFunctionsTransformer::VisitCallExpression(CallExpression* node) {
+  if (m_statisticsEnabled) {
+    m_visitedNodesCount++;
+  }
+
+  // まず子ノード (callee, arguments) を訪問する
+  Transformer::VisitCallExpression(node);
+
+  // インライン化の試行
+  // 呼び出し対象 (callee) が単純な識別子の場合のみ考慮
+  if (auto* calleeIdent = dynamic_cast<Identifier*>(node->GetCallee().get())) {
+    const std::string& funcName = calleeIdent->GetName();
+
+    // 関数マップに関数情報が存在するか確認
+    auto it = m_functionMap.find(funcName);
+    if (it != m_functionMap.end()) {
+      const FunctionInfo& funcInfo = it->second;
+
+      // インライン化可能かチェック
+      if (IsFunctionInlinable(funcInfo, node)) {
+        // 再帰深度チェック
+        if (m_currentRecursionDepth < m_maxRecursionDepth) {
+          m_currentRecursionDepth++;  // 再帰深度をインクリメント
+
+          // インライン化を実行
+          NodePtr inlinedNode = InlineCall(node, funcInfo);
+
+          m_currentRecursionDepth--;  // 再帰深度をデクリメント
+
+          if (inlinedNode) {
+            // インライン化成功
+            if (m_statisticsEnabled) {
+              m_inlinedCallsCount++;
             }
-            info.body = funcDecl->body;
-            
-            // 仮に非再帰としてマークし、後で更新
-            info.isRecursive = false;
-            info.hasMultipleReturns = false;  // TODO: 実際にはreturn文をカウントする必要がある
-            
-            // インライン化可能かどうかを判断（後で更新される）
-            info.isEligibleForInlining = false;
-            
-            // 関数マップに追加
-            m_functionMap[info.name] = info;
-            
-            // スコープに関数名を追加
-            m_scopeStack.back().insert(info.name);
-        }
-    }
-    
-    // 再帰関数をマーク
-    for (auto& [name, info] : m_functionMap) {
-        info.isRecursive = isRecursiveFunction(info);
-        info.isEligibleForInlining = isFunctionInlinable(info);
-    }
-    
-    // すべてのステートメントを変換
-    bool localChanged = false;
-    for (size_t i = 0; i < node->body.size(); ++i) {
-        auto result = transformNode(node->body[i]);
-        if (result.changed) {
-            localChanged = true;
-            node->body[i] = std::move(result.node);
-        }
-    }
-    
-    // スコープをポップ
-    m_scopeStack.pop_back();
-    
-    m_changed = localChanged;
-}
+            common::Logger::Debug("関数 '{}' の呼び出しをインライン化しました", funcName);
 
-void InlineFunctionsTransformer::visitFunctionDeclaration(FunctionDeclaration* node) {
-    if (m_statisticsEnabled) {
-        m_visitedNodesCount++;
-    }
-    
-    // 関数スコープを作成
-    m_scopeStack.push_back({});
-    
-    // パラメータ名をスコープに追加
-    for (auto& param : node->params) {
-        if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
-            m_scopeStack.back().insert(identifier->name);
-        }
-    }
-    
-    // 関数本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        m_changed = true;
-        node->body = std::dynamic_pointer_cast<BlockStatement>(bodyResult.node);
-    }
-    
-    // スコープをポップ
-    m_scopeStack.pop_back();
-}
-
-void InlineFunctionsTransformer::visitFunctionExpression(FunctionExpression* node) {
-    if (m_statisticsEnabled) {
-        m_visitedNodesCount++;
-    }
-    
-    // 匿名関数情報を作成
-    FunctionInfo info;
-    info.functionNode = nullptr;  // 保持する必要はない
-    info.name = node->id ? node->id->name : "";
-    info.size = calculateFunctionSize(NodePtr(node));
-    info.hasSideEffects = checkForSideEffects(NodePtr(node));
-    
-    // パラメータと本体を保存
-    for (auto& param : node->params) {
-        info.parameters.push_back(param);
-    }
-    info.body = node->body;
-    
-    // その他の情報を設定
-    info.isRecursive = !info.name.empty() && isRecursiveFunction(info);
-    info.hasMultipleReturns = false;  // TODO: 実際にはreturn文をカウントする必要がある
-    info.isEligibleForInlining = isFunctionInlinable(info);
-    
-    // 匿名関数リストに追加
-    if (info.isEligibleForInlining) {
-        m_anonymousFunctions.push_back(info);
-    }
-    
-    // 関数スコープを作成
-    m_scopeStack.push_back({});
-    
-    // 関数名が存在すれば自身の名前をスコープに追加（再帰用）
-    if (node->id) {
-        m_scopeStack.back().insert(node->id->name);
-    }
-    
-    // パラメータ名をスコープに追加
-    for (auto& param : node->params) {
-        if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
-            m_scopeStack.back().insert(identifier->name);
-        }
-    }
-    
-    // 関数本体を変換
-    auto bodyResult = transformNode(node->body);
-    if (bodyResult.changed) {
-        m_changed = true;
-        node->body = std::dynamic_pointer_cast<BlockStatement>(bodyResult.node);
-    }
-    
-    // スコープをポップ
-    m_scopeStack.pop_back();
-}
-
-void InlineFunctionsTransformer::visitArrowFunctionExpression(ArrowFunctionExpression* node) {
-    if (m_statisticsEnabled) {
-        m_visitedNodesCount++;
-    }
-    
-    // アロー関数情報を作成
-    FunctionInfo info;
-    info.functionNode = nullptr;  // 保持する必要はない
-    info.name = "";  // アロー関数は名前を持たない
-    info.size = calculateFunctionSize(NodePtr(node));
-    info.hasSideEffects = checkForSideEffects(NodePtr(node));
-    
-    // パラメータと本体を保存
-    for (auto& param : node->params) {
-        info.parameters.push_back(param);
-    }
-    info.body = node->body;
-    
-    // その他の情報を設定
-    info.isRecursive = false;  // アロー関数は名前を持たないので直接的な再帰はない
-    info.hasMultipleReturns = false;  // TODO: 実際にはreturn文をカウントする必要がある
-    info.isEligibleForInlining = isFunctionInlinable(info);
-    
-    // 匿名関数リストに追加
-    if (info.isEligibleForInlining) {
-        m_anonymousFunctions.push_back(info);
-    }
-    
-    // 関数スコープを作成
-    m_scopeStack.push_back({});
-    
-    // パラメータ名をスコープに追加
-    for (auto& param : node->params) {
-        if (auto* identifier = dynamic_cast<Identifier*>(param.get())) {
-            m_scopeStack.back().insert(identifier->name);
-        }
-    }
-    
-    // 関数本体を変換
-    if (node->body && node->expression) {
-        // 式本体の場合
-        auto exprResult = transformNode(node->body);
-        if (exprResult.changed) {
-            m_changed = true;
-            node->body = exprResult.node;
-        }
-    } else if (node->body) {
-        // ブロック本体の場合
-        auto bodyResult = transformNode(node->body);
-        if (bodyResult.changed) {
-            m_changed = true;
-            node->body = bodyResult.node;
-        }
-    }
-    
-    // スコープをポップ
-    m_scopeStack.pop_back();
-}
-
-void InlineFunctionsTransformer::visitCallExpression(CallExpression* node) {
-    if (m_statisticsEnabled) {
-        m_visitedNodesCount++;
-    }
-    
-    // まずは引数を変換
-    bool argsChanged = false;
-    for (size_t i = 0; i < node->arguments.size(); ++i) {
-        auto argResult = transformNode(node->arguments[i]);
-        if (argResult.changed) {
-            argsChanged = true;
-            node->arguments[i] = argResult.node;
-        }
-    }
-    
-    // 名前付き関数の呼び出しかどうかをチェック
-    std::string funcName;
-    if (auto* callee = dynamic_cast<Identifier*>(node->callee.get())) {
-        funcName = callee->name;
-        
-        // 関数マップに存在するかチェック
-        auto it = m_functionMap.find(funcName);
-        if (it != m_functionMap.end() && it->second.isEligibleForInlining) {
-            // 再帰的な呼び出しの場合は深度をチェック
-            if (it->second.isRecursive) {
-                if (m_currentRecursionDepth >= m_maxRecursionDepth) {
-                    m_changed = argsChanged;
-                    return;  // 最大再帰深度に達した場合はインライン化しない
-                }
-                m_currentRecursionDepth++;
-            }
-            
-            // 関数呼び出しをインライン化
-            NodePtr inlined = inlineCall(node, it->second);
-            if (inlined) {
-                m_result = inlined;
-                m_changed = true;
-                
-                if (m_statisticsEnabled) {
-                    m_inlinedCallsCount++;
-                }
-                
-                // 再帰カウンタをデクリメント
-                if (it->second.isRecursive) {
-                    m_currentRecursionDepth--;
-                }
-                
-                return;
-            }
-            
-            // 再帰カウンタをデクリメント
-            if (it->second.isRecursive) {
-                m_currentRecursionDepth--;
-            }
-        }
-    }
-    
-    // 匿名関数/アロー関数の呼び出しをチェック
-    // メンバー式や複雑な呼び出しパターンは現在サポートしていない
-    
-    m_changed = argsChanged;
-}
-
-// ヘルパーメソッド
-
-bool InlineFunctionsTransformer::isFunctionInlinable(const FunctionInfo& functionInfo) const {
-    // サイズが大きすぎる場合はインライン化しない
-    if (functionInfo.size > m_maxInlineSize) {
-        return false;
-    }
-    
-    // 複数のリターン文がある場合はインライン化が複雑になる
-    if (functionInfo.hasMultipleReturns) {
-        return false;
-    }
-    
-    // 再帰関数は制限付きでインライン化
-    if (functionInfo.isRecursive && m_maxRecursionDepth == 0) {
-        return false;
-    }
-    
-    // 副作用を持つ関数は慎重にインライン化
-    // ここでは単純化のため、副作用の有無は関数の大きさに関連付ける
-    if (functionInfo.hasSideEffects && functionInfo.size > m_maxInlineSize / 2) {
-        return false;
-    }
-    
-    return true;
-}
-
-NodePtr InlineFunctionsTransformer::inlineCall(CallExpression* callExpr, const FunctionInfo& funcInfo) {
-    // パラメータと引数の数をチェック
-    if (funcInfo.parameters.size() != callExpr->arguments.size()) {
-        // 引数の数が一致しない場合はインライン化しない
-        return nullptr;
-    }
-    
-    // 関数本体がブロック文でない場合（アロー関数の式本体など）
-    if (!funcInfo.body || !dynamic_cast<BlockStatement*>(funcInfo.body.get())) {
-        // 現在は単純なケースのみサポート
-        return nullptr;
-    }
-    
-    // インライン化用の新しいブロック文を作成
-    auto inlinedBlock = std::make_shared<BlockStatement>();
-    
-    // パラメータ/引数のマッピングを作成
-    // 単純なケースでは引数を直接使用できるが、複雑な場合は一時変数が必要
-    std::unordered_map<std::string, NodePtr> paramArgMap;
-    
-    for (size_t i = 0; i < funcInfo.parameters.size(); ++i) {
-        if (auto* param = dynamic_cast<Identifier*>(funcInfo.parameters[i].get())) {
-            // 単純な識別子パラメータの場合
-            
-            // 引数が単純な場合は直接マッピング
-            bool isSimpleArg = dynamic_cast<Identifier*>(callExpr->arguments[i].get()) ||
-                               dynamic_cast<Literal*>(callExpr->arguments[i].get());
-            
-            if (isSimpleArg) {
-                paramArgMap[param->name] = callExpr->arguments[i];
-            } else {
-                // 複雑な引数は一時変数に格納
-                auto tempVarName = generateUniqueVarName(param->name);
-                auto tempVar = std::make_shared<Identifier>();
-                tempVar->name = tempVarName;
-                
-                // 一時変数の宣言を作成
-                auto varDecl = std::make_shared<VariableDeclaration>();
-                varDecl->kind = "const";
-                
-                auto declarator = std::make_shared<VariableDeclarator>();
-                declarator->id = std::make_shared<Identifier>();
-                static_cast<Identifier*>(declarator->id.get())->name = tempVarName;
-                declarator->init = callExpr->arguments[i];
-                
-                varDecl->declarations.push_back(declarator);
-                
-                // インラインブロックに変数宣言を追加
-                inlinedBlock->body.push_back(varDecl);
-                
-                // マッピングに一時変数を追加
-                paramArgMap[param->name] = tempVar;
-            }
+            // 現在処理中のノードをインライン化後のノードで置き換える
+            ReplaceCurrentNode(std::move(inlinedNode));
+            m_changed = true;  // 変更フラグを立てる
+            return;
+          }
         } else {
-            // パターンマッチングパラメータなど複雑なケースはまだサポートしていない
-            return nullptr;
+          common::Logger::Debug("関数 '{}' の最大再帰深度に達しました", funcName);
         }
+      } else {
+        common::Logger::Debug("関数 '{}' はこの呼び出し箇所ではインライン化できません", funcName);
+      }
+    } else {
+      // 匿名関数/関数式のインライン化を試みる
+      for (const auto& anonFunc : m_anonymousFunctions) {
+        if (IsFunctionInlinable(anonFunc, node)) {
+          NodePtr inlinedNode = InlineCall(node, anonFunc);
+          if (inlinedNode) {
+            if (m_statisticsEnabled) {
+              m_inlinedCallsCount++;
+            }
+            common::Logger::Debug("匿名関数の呼び出しをインライン化しました");
+            ReplaceCurrentNode(std::move(inlinedNode));
+            m_changed = true;
+            return;
+          }
+        }
+      }
     }
-    
-    // 関数本体をクローンしてパラメータを引数に置き換える
-    auto functionBody = std::dynamic_pointer_cast<BlockStatement>(funcInfo.body);
-    for (auto& stmt : functionBody->body) {
-        // 文をクローンして引数で置き換え
-        // TODO: 実際には深いクローンが必要で、すべての識別子を確認する必要がある
-        // 現在はプレースホルダー実装
-        inlinedBlock->body.push_back(stmt->clone());
-    }
-    
-    // インライン化したブロックを返す
-    return inlinedBlock;
+  }
 }
 
-size_t InlineFunctionsTransformer::calculateFunctionSize(NodePtr node) const {
-    // 関数のステートメント数を計算
-    // 単純な実装では、関数本体のステートメント数のみをカウント
-    size_t size = 0;
-    
-    if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(node.get())) {
-        if (auto* body = dynamic_cast<BlockStatement*>(funcDecl->body.get())) {
-            size = body->body.size();
-        }
-    } else if (auto* funcExpr = dynamic_cast<FunctionExpression*>(node.get())) {
-        if (auto* body = dynamic_cast<BlockStatement*>(funcExpr->body.get())) {
-            size = body->body.size();
-        }
-    } else if (auto* arrowFunc = dynamic_cast<ArrowFunctionExpression*>(node.get())) {
-        if (arrowFunc->expression) {
-            // 式本体の場合は1とカウント
-            size = 1;
-        } else if (auto* body = dynamic_cast<BlockStatement*>(arrowFunc->body.get())) {
-            size = body->body.size();
-        }
+// === ヘルパーメソッド ===
+
+void InlineFunctionsTransformer::CollectFunctionInfo(NodePtr funcNode, const std::string& name) {
+  FunctionInfo info;
+  info.m_functionNode = funcNode;
+  info.m_name = name;
+
+  if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(funcNode.get())) {
+    info.m_body = funcDecl->GetBody();
+    for (const auto& param : funcDecl->GetParams()) info.m_parameters.push_back(param);
+  } else if (auto* funcExpr = dynamic_cast<FunctionExpression*>(funcNode.get())) {
+    info.m_body = funcExpr->GetBody();
+    for (const auto& param : funcExpr->GetParams()) info.m_parameters.push_back(param);
+  } else if (auto* arrowFunc = dynamic_cast<ArrowFunctionExpression*>(funcNode.get())) {
+    info.m_body = arrowFunc->GetBody();
+    for (const auto& param : arrowFunc->GetParams()) info.m_parameters.push_back(param);
+  } else {
+    common::Logger::Warning("CollectFunctionInfo: サポートされていない関数ノードタイプです");
+    return;
+  }
+
+  if (!info.m_body) return;  // 本体がない場合は無視
+
+  info.m_size = CalculateFunctionSize(info.m_body);
+  info.m_hasSideEffects = CheckForSideEffects(info.m_body);
+  info.m_hasMultipleReturns = CheckForMultipleReturns(info.m_body);
+  info.m_isRecursive = false;  // IsRecursiveFunction で後で設定
+  info.m_isEligibleForInlining = (info.m_size <= m_maxInlineSize && !info.m_hasSideEffects && !info.m_hasMultipleReturns);
+
+  if (!name.empty()) {
+    // 名前付き関数の場合、マップに登録 (または更新)
+    m_functionMap[name] = std::move(info);
+    if (m_statisticsEnabled) {
+      m_inlinedFunctionsCount++;
     }
-    
-    return size;
+  } else {
+    // 匿名関数の場合
+    m_anonymousFunctions.push_back(std::move(info));
+  }
 }
 
-bool InlineFunctionsTransformer::checkForSideEffects(NodePtr node) const {
-    // TODO: 本来は再帰的にノードを解析して副作用をチェックする必要があるが、
-    // 簡易版では関数サイズに基づいて判断
-    size_t size = calculateFunctionSize(node);
-    return size > 5;  // 5行以上の関数は副作用があると仮定
+void InlineFunctionsTransformer::EnterScope() {
+  m_scopeStack.push_back({});
 }
 
-bool InlineFunctionsTransformer::isRecursiveFunction(const FunctionInfo& funcInfo) const {
-    // 関数が自分自身を呼び出すかどうかをチェック
-    // 本来は関数本体を解析して、自分自身を呼び出すコードがあるかをチェックする
-    
-    // 名前のない関数は再帰できない
-    if (funcInfo.name.empty()) {
-        return false;
+void InlineFunctionsTransformer::LeaveScope() {
+  if (!m_scopeStack.empty()) {
+    m_scopeStack.pop_back();
+  }
+}
+
+void InlineFunctionsTransformer::DeclareVariableInCurrentScope(const std::string& name) {
+  if (!m_scopeStack.empty()) {
+    m_scopeStack.back().insert(name);
+  }
+}
+
+void InlineFunctionsTransformer::RegisterPatternVariables(const NodePtr& pattern) {
+  // パターン内の識別子をすべて登録する
+  class PatternVisitor : public parser::ast::visitor::ASTVisitor {
+  public:
+    PatternVisitor(InlineFunctionsTransformer& transformer) : m_transformer(transformer) {}
+
+    void VisitIdentifier(Identifier* node) override {
+      m_transformer.DeclareVariableInCurrentScope(node->GetName());
     }
-    
-    // TODO: 正確には関数本体内で自分自身を参照する呼び出しがあるかチェックする必要がある
-    // 現在はプレースホルダー実装
+
+  private:
+    InlineFunctionsTransformer& m_transformer;
+  };
+
+  PatternVisitor visitor(*this);
+  pattern->Accept(visitor);
+}
+
+bool InlineFunctionsTransformer::IsFunctionInlinable(
+    const FunctionInfo& funcInfo,
+    const CallExpression* callNode) const {
+  // 基本的な条件チェック
+  if (!funcInfo.m_isEligibleForInlining) return false;
+  if (funcInfo.m_hasSideEffects) return false;
+  if (funcInfo.m_hasMultipleReturns) return false;
+  if (funcInfo.m_isRecursive && m_currentRecursionDepth >= m_maxRecursionDepth) return false;
+
+  // 引数の数チェック
+  if (callNode && callNode->GetArguments().size() != funcInfo.m_parameters.size()) {
     return false;
-}
+  }
 
-bool InlineFunctionsTransformer::isIdentifierInScope(const std::string& name) const {
-    // スコープスタックを上から順に検索
-    for (auto it = m_scopeStack.rbegin(); it != m_scopeStack.rend(); ++it) {
-        if (it->find(name) != it->end()) {
-            return true;
-        }
+  // 引数の副作用チェック
+  if (callNode) {
+    for (const auto& arg : callNode->GetArguments()) {
+      if (CheckForSideEffects(arg)) {
+        return false;  // 引数に副作用がある場合はインライン化を避ける
+      }
     }
-    return false;
+  }
+
+  // スコープ競合チェック
+  // 関数内で使用される変数と現在のスコープの変数が衝突しないか確認
+  class VariableCollector : public parser::ast::visitor::ASTVisitor {
+  public:
+    std::set<std::string> variables;
+
+    void VisitIdentifier(Identifier* node) override {
+      variables.insert(node->GetName());
+    }
+  };
+
+  VariableCollector collector;
+  if (funcInfo.m_body) {
+    funcInfo.m_body->Accept(collector);
+  }
+
+  // 現在のスコープスタック内の変数と衝突するか確認
+  for (const auto& varName : collector.variables) {
+    if (IsIdentifierInScope(varName)) {
+      // 衝突する場合でも、一意な名前に変更できるので問題ない
+      // ただし、変数名の変更が必要なことを記録しておく
+    }
+  }
+
+  return true;
 }
 
-std::string InlineFunctionsTransformer::generateUniqueVarName(const std::string& baseName) {
-    std::stringstream ss;
-    ss << "$" << baseName << "_" << m_nextUniqueId++;
-    return ss.str();
+NodePtr InlineFunctionsTransformer::InlineCall(
+    CallExpression* callExpr,
+    const FunctionInfo& funcInfo) {
+  // 1. 関数本体をディープコピー
+  ASTCloner cloner;
+  NodePtr bodyCopy;
+  
+  if (auto* blockStmt = dynamic_cast<BlockStatement*>(funcInfo.m_body.get())) {
+    bodyCopy = cloner.Clone(blockStmt);
+  } else {
+    // アロー関数の場合、本体が式の場合がある
+    // その場合は式を return 文でラップする
+    auto returnStmt = std::make_shared<ReturnStatement>();
+    returnStmt->SetArgument(cloner.Clone(funcInfo.m_body));
+    
+    auto blockStmt = std::make_shared<BlockStatement>();
+    std::vector<NodePtr> statements;
+    statements.push_back(returnStmt);
+    blockStmt->SetBody(std::move(statements));
+    
+    bodyCopy = blockStmt;
+  }
+  
+  auto* blockBody = dynamic_cast<BlockStatement*>(bodyCopy.get());
+  if (!blockBody) {
+    common::Logger::Error("インライン化中にブロック文への変換に失敗しました");
+    return nullptr;
+  }
+
+  // 2. 引数の置き換え
+  std::map<std::string, NodePtr> paramMap;
+  for (size_t i = 0; i < funcInfo.m_parameters.size(); ++i) {
+    if (i < callExpr->GetArguments().size()) {
+      if (auto* paramId = dynamic_cast<Identifier*>(funcInfo.m_parameters[i].get())) {
+        // 単純な識別子パラメータの場合
+        paramMap[paramId->GetName()] = cloner.Clone(callExpr->GetArguments()[i]);
+      } else {
+        // パターンパラメータの場合は複雑なので、現時点ではインライン化を避ける
+        common::Logger::Warning("パターンパラメータを持つ関数のインライン化はサポートされていません");
+        return nullptr;
+      }
+    }
+  }
+
+  // 3. 変数名の衝突を解決
+  std::map<std::string, std::string> renameMap;
+  class VariableRenamer : public parser::ast::visitor::ASTVisitor {
+  public:
+    VariableRenamer(
+        InlineFunctionsTransformer& transformer,
+        std::map<std::string, std::string>& renameMap)
+        : m_transformer(transformer), m_renameMap(renameMap) {}
+
+    void VisitIdentifier(Identifier* node) override {
+      const std::string& name = node->GetName();
+      if (m_transformer.IsIdentifierInScope(name) && m_renameMap.find(name) == m_renameMap.end()) {
+        // 衝突する変数名を一意な名前に変更
+        m_renameMap[name] = m_transformer.GenerateUniqueVarName(name);
+      }
+    }
+
+  private:
+    InlineFunctionsTransformer& m_transformer;
+    std::map<std::string, std::string>& m_renameMap;
+  };
+
+  VariableRenamer renamer(*this, renameMap);
+  bodyCopy->Accept(renamer);
+
+  // 変数名の置き換えを実行
+  for (const auto& [oldName, newName] : renameMap) {
+    class IdentifierReplacer : public ASTReplacer {
+    public:
+      IdentifierReplacer(const std::string& oldName, const std::string& newName)
+          : m_oldName(oldName), m_newName(newName) {}
+
+      NodePtr ReplaceIdentifier(Identifier* node) override {
+        if (node->GetName() == m_oldName) {
+          auto newId = std::make_shared<Identifier>();
+          newId->SetName(m_newName);
+          return newId;
+        }
+        return nullptr;
+      }
+
+    private:
+      std::string m_oldName;
+      std::string m_newName;
+    };
+
+    IdentifierReplacer replacer(oldName, newName);
+    bodyCopy = replacer.Replace(bodyCopy);
+  }
+
+  // 4. パラメータを実引数で置き換え
+  for (const auto& [paramName, argNode] : paramMap) {
+    class ParamReplacer : public ASTReplacer {
+    public:
+      ParamReplacer(const std::string& paramName, const NodePtr& argNode)
+          : m_paramName(paramName), m_argNode(argNode) {}
+
+      NodePtr ReplaceIdentifier(Identifier* node) override {
+        if (node->GetName() == m_paramName) {
+          return m_argNode->Clone();
+        }
+        return nullptr;
+      }
+
+    private:
+      std::string m_paramName;
+      NodePtr m_argNode;
+    };
+
+    ParamReplacer replacer(paramName, argNode);
+    bodyCopy = replacer.Replace(bodyCopy);
+  }
+
+  // 5. return 文を適切な式に変換
+  // 単一の return 文を持つ関数の場合、return の式を直接返す
+  auto* blockStmt = dynamic_cast<BlockStatement*>(bodyCopy.get());
+  if (blockStmt && blockStmt->GetBody().size() == 1) {
+    if (auto* returnStmt = dynamic_cast<ReturnStatement*>(blockStmt->GetBody()[0].get())) {
+      return returnStmt->GetArgument();
+    }
+  }
+
+  // 複数のステートメントを持つ場合は、IIFE (即時実行関数式) を使用
+  // (function() { ... インライン化された本体 ... })()
+  auto factory = ASTNodeFactory::GetInstance();
+  auto iife = factory->CreateImmediatelyInvokedFunctionExpression(bodyCopy);
+  
+  return iife;
 }
 
-} // namespace transformers
-} // namespace aero 
+size_t InlineFunctionsTransformer::CalculateFunctionSize(const NodePtr& node) const {
+  if (!node) return 0;
+  
+  // ノード数をカウントする訪問者
+  class NodeCounter : public parser::ast::visitor::ASTVisitor {
+  public:
+    size_t count = 0;
+    
+    void Visit(Node* node) override {
+      count++;
+      ASTVisitor::Visit(node);
+    }
+  };
+  
+  NodeCounter counter;
+  node->Accept(counter);
+  return counter.count;
+}
+
+bool InlineFunctionsTransformer::CheckForSideEffects(const NodePtr& node) const {
+  if (!node) return false;
+  
+  // 副作用をチェックする訪問者
+  class SideEffectChecker : public parser::ast::visitor::ASTVisitor {
+  public:
+    bool hasSideEffects = false;
+    
+    void Visit(Node* node) override {
+      if (hasSideEffects) return;  // 既に副作用が見つかっていれば早期リターン
+      
+      // 副作用を持つ可能性のある構文を検出
+      switch (node->GetType()) {
+        case NodeType::AssignmentExpression:
+        case NodeType::UpdateExpression:  // ++, --
+        case NodeType::AwaitExpression:
+        case NodeType::YieldExpression:
+        case NodeType::ThrowStatement:
+          hasSideEffects = true;
+          return;
+          
+        case NodeType::CallExpression:
+          // 関数呼び出しは副作用を持つ可能性が高い
+          // 純粋関数のホワイトリストがあれば例外にできる
+          hasSideEffects = true;
+          return;
+          
+        default:
+          break;
+      }
+      
+      ASTVisitor::Visit(node);
+    }
+  };
+  
+  SideEffectChecker checker;
+  node->Accept(checker);
+  return checker.hasSideEffects;
+}
+
+bool InlineFunctionsTransformer::CheckForMultipleReturns(const NodePtr& node) const {
+  if (!node) return false;
+  
+  // 複数のreturn文をチェックする訪問者
+  class MultipleReturnChecker : public parser::ast::visitor::ASTVisitor {
+  public:
+    int returnCount = 0;
+    
+    void VisitReturnStatement(ReturnStatement* node) override {
+      returnCount++;
+      ASTVisitor::VisitReturnStatement(node);
+    }
+  };
+  
+  MultipleReturnChecker checker;
+  node->Accept(checker);
+  return checker.returnCount > 1;
+}
+
+bool InlineFunctionsTransformer::IsRecursiveFunction(const FunctionInfo& funcInfo) const {
+  if (funcInfo.m_name.empty()) return false;  // 匿名関数は再帰的でない
+  
+  // 再帰呼び出しをチェックする訪問者
+  class RecursionChecker : public parser::ast::visitor::ASTVisitor {
+  public:
+    RecursionChecker(const std::string& funcName) : m_funcName(funcName), m_isRecursive(false) {}
+    
+    bool IsRecursive() const { return m_isRecursive; }
+    
+    void VisitCallExpression(CallExpression* node) override {
+      if (m_isRecursive) return;  // 既に再帰が見つかっていれば早期リターン
+      
+      if (auto* callee = dynamic_cast<Identifier*>(node->GetCallee().get())) {
+        if (callee->GetName() == m_funcName) {
+          m_isRecursive = true;
+          return;
+        }
+      }
+      
+      ASTVisitor::VisitCallExpression(node);
+    }
+    
+  private:
+    std::string m_funcName;
+    bool m_isRecursive;
+  };
+  
+  RecursionChecker checker(funcInfo.m_name);
+  if (funcInfo.m_body) {
+    funcInfo.m_body->Accept(checker);
+  }
+  
+  return checker.IsRecursive();
+}
+
+bool InlineFunctionsTransformer::IsIdentifierInScope(const std::string& name) const {
+  for (auto it = m_scopeStack.rbegin(); it != m_scopeStack.rend(); ++it) {
+    if (it->count(name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string InlineFunctionsTransformer::GenerateUniqueVarName(const std::string& baseName) {
+  std::string newName;
+  do {
+    std::ostringstream oss;
+    oss << baseName << "$" << m_nextUniqueId++;
+    newName = oss.str();
+  } while (IsIdentifierInScope(newName));
+  return newName;
+}
+
+}  // namespace aerojs::core::transformers

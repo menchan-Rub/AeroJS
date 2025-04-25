@@ -7,9 +7,10 @@
 #ifndef AERO_BOOLEAN_H
 #define AERO_BOOLEAN_H
 
+#include <vector>
+
 #include "core/runtime/object.h"
 #include "core/runtime/value.h"
-#include <vector>
 
 namespace aero {
 
@@ -20,38 +21,38 @@ class GlobalObject;
 /**
  * @class BooleanObject
  * @brief JavaScriptのBooleanオブジェクトを表すクラス
- * 
+ *
  * BooleanObjectはプリミティブなbool値をラップし、オブジェクトとしてのメソッドと
  * プロパティにアクセスできるようにします。ECMAScript仕様に準拠して実装されています。
  */
 class BooleanObject : public Object {
-public:
-    /**
-     * @brief コンストラクタ
-     * @param value ラップするブール値
-     */
-    explicit BooleanObject(bool value);
+ public:
+  /**
+   * @brief コンストラクタ
+   * @param value ラップするブール値
+   */
+  explicit BooleanObject(bool value);
 
-    /**
-     * @brief デストラクタ
-     */
-    ~BooleanObject() override;
+  /**
+   * @brief デストラクタ
+   */
+  ~BooleanObject() override;
 
-    /**
-     * @brief 内部のブール値を取得
-     * @return ラップされているブール値
-     */
-    bool value() const;
+  /**
+   * @brief 内部のブール値を取得
+   * @return ラップされているブール値
+   */
+  bool value() const;
 
-    /**
-     * @brief BooleanオブジェクトのプロトタイプとBooleanコンストラクタを初期化
-     * @param context 現在の実行コンテキスト
-     * @return BooleanコンストラクタのValue
-     */
-    static Value initializePrototype(Context* context);
+  /**
+   * @brief BooleanオブジェクトのプロトタイプとBooleanコンストラクタを初期化
+   * @param context 現在の実行コンテキスト
+   * @return BooleanコンストラクタのValue
+   */
+  static Value initializePrototype(Context* context);
 
-private:
-    bool m_value; // ラップされたプリミティブなブール値
+ private:
+  bool m_value;  // ラップされたプリミティブなブール値
 };
 
 /**
@@ -94,6 +95,6 @@ Value initializeBoolean(Context* context);
  */
 void registerBooleanBuiltin(GlobalObject* global);
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_BOOLEAN_H 
+#endif  // AERO_BOOLEAN_H

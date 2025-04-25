@@ -1,14 +1,15 @@
 /**
  * @file bytecode_instruction.cpp
  * @brief バイトコード命令の実装
- * 
+ *
  * このファイルはバイトコード命令の実装を提供します。
  * 特にオペコード名の文字列表現やデバッグ情報の生成などを実装します。
  */
 
 #include "bytecode_instruction.h"
-#include <sstream>
+
 #include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -16,8 +17,8 @@ namespace aerojs {
 namespace core {
 
 namespace {
-  // オペコード名のマッピング
-  const std::unordered_map<Opcode, std::string> kOpcodeNames = {
+// オペコード名のマッピング
+const std::unordered_map<Opcode, std::string> kOpcodeNames = {
     // スタック操作
     {Opcode::kPush, "PUSH"},
     {Opcode::kPop, "POP"},
@@ -117,39 +118,38 @@ namespace {
     {Opcode::kVoid, "VOID"},
     {Opcode::kDelete, "DELETE"},
     {Opcode::kImport, "IMPORT"},
-    {Opcode::kExport, "EXPORT"}
-  };
+    {Opcode::kExport, "EXPORT"}};
 
-  /**
-   * @brief オペコードの名前を取得
-   * 
-   * @param opcode 取得するオペコード
-   * @return std::string オペコードの文字列表現
-   */
-  std::string getOpcodeName(Opcode opcode) {
-    auto it = kOpcodeNames.find(opcode);
-    if (it != kOpcodeNames.end()) {
-      return it->second;
-    }
-    return "UNKNOWN(" + std::to_string(static_cast<int>(opcode)) + ")";
+/**
+ * @brief オペコードの名前を取得
+ *
+ * @param opcode 取得するオペコード
+ * @return std::string オペコードの文字列表現
+ */
+std::string getOpcodeName(Opcode opcode) {
+  auto it = kOpcodeNames.find(opcode);
+  if (it != kOpcodeNames.end()) {
+    return it->second;
   }
+  return "UNKNOWN(" + std::to_string(static_cast<int>(opcode)) + ")";
 }
+}  // namespace
 
 /**
  * @brief 命令の文字列表現を取得
- * 
+ *
  * @return std::string 命令の文字列表現
  */
 std::string BytecodeInstruction::toString() const {
   std::ostringstream oss;
-  
+
   // オペコード名を取得
   Opcode opcode = getOpcode();
   std::string opcodeName = getOpcodeName(opcode);
-  
+
   // オペコード名を出力
   oss << std::left << std::setw(25) << opcodeName;
-  
+
   // オペランドがあれば出力
   if (m_operandCount > 0) {
     oss << " ";
@@ -160,7 +160,7 @@ std::string BytecodeInstruction::toString() const {
       oss << m_operands[i];
     }
   }
-  
+
   // ソース位置情報を出力（デバッグ情報）
   if (m_sourceLine > 0) {
     oss << " // Line " << m_sourceLine;
@@ -168,9 +168,9 @@ std::string BytecodeInstruction::toString() const {
       oss << ", Column " << m_sourceColumn;
     }
   }
-  
+
   return oss.str();
 }
 
-} // namespace core
-} // namespace aerojs 
+}  // namespace core
+}  // namespace aerojs

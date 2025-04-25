@@ -15,13 +15,16 @@
 #ifndef AEROJS_PARSER_AST_NODES_DECLARATIONS_VARIABLE_DECLARATION_H
 #define AEROJS_PARSER_AST_NODES_DECLARATIONS_VARIABLE_DECLARATION_H
 
-#include <vector>
 #include <memory>
-#include <string>
 #include <optional>
+#include <string>
+#include <vector>
 
-#include "../node.h"
 #include "../../visitors/ast_visitor.h"
+#include "../node.h"
+#include "src/core/parser/ast/nodes/declaration_node.h"
+#include "src/core/parser/ast/nodes/patterns/pattern_node.h"
+#include "src/core/parser/common.h"
 
 namespace aerojs {
 namespace core {
@@ -37,64 +40,66 @@ namespace ast {
  * 宣言される変数名 (またはパターン) と、オプションの初期化式を持ちます。
  */
 class VariableDeclarator final : public Node {
-public:
-    /**
-     * @brief VariableDeclaratorノードのコンストラクタ。
-     * @param location ソースコード内のこのノードの位置情報。
-     * @param id 宣言される変数名またはパターン (Identifier または Pattern)。ムーブされる。
-     * @param init 初期化式 (オプション)。ムーブされる。
-     * @param parent 親ノード (オプション)。
-     */
-    explicit VariableDeclarator(const SourceLocation& location,
-                                NodePtr&& id,
-                                NodePtr&& init, // Optional, can be nullptr
-                                Node* parent = nullptr);
+ public:
+  /**
+   * @brief VariableDeclaratorノードのコンストラクタ。
+   * @param location ソースコード内のこのノードの位置情報。
+   * @param id 宣言される変数名またはパターン (Identifier または Pattern)。ムーブされる。
+   * @param init 初期化式 (オプション)。ムーブされる。
+   * @param parent 親ノード (オプション)。
+   */
+  explicit VariableDeclarator(const SourceLocation& location,
+                              NodePtr&& id,
+                              NodePtr&& init,  // オプション、nullptr の場合あり
+                              Node* parent = nullptr);
 
-    ~VariableDeclarator() override = default;
+  ~VariableDeclarator() override = default;
 
-    VariableDeclarator(const VariableDeclarator&) = delete;
-    VariableDeclarator& operator=(const VariableDeclarator&) = delete;
-    VariableDeclarator(VariableDeclarator&&) noexcept = default;
-    VariableDeclarator& operator=(VariableDeclarator&&) noexcept = default;
+  VariableDeclarator(const VariableDeclarator&) = delete;
+  VariableDeclarator& operator=(const VariableDeclarator&) = delete;
+  VariableDeclarator(VariableDeclarator&&) noexcept = default;
+  VariableDeclarator& operator=(VariableDeclarator&&) noexcept = default;
 
-    NodeType getType() const noexcept override final { return NodeType::VariableDeclarator; }
+  NodeType getType() const noexcept override final {
+    return NodeType::VariableDeclarator;
+  }
 
-    /**
-     * @brief 宣言される変数/パターンを取得します (非const版)。
-     * @return 識別子またはパターンノードへの参照 (`NodePtr&`)。
-     */
-    NodePtr& getId() noexcept;
+  /**
+   * @brief 宣言される変数/パターンを取得します (非const版)。
+   * @return 識別子またはパターンノードへの参照 (`NodePtr&`)。
+   */
+  NodePtr& getId() noexcept;
 
-    /**
-     * @brief 宣言される変数/パターンを取得します (const版)。
-     * @return 識別子またはパターンノードへのconst参照 (`const NodePtr&`)。
-     */
-    const NodePtr& getId() const noexcept;
+  /**
+   * @brief 宣言される変数/パターンを取得します (const版)。
+   * @return 識別子またはパターンノードへのconst参照 (`const NodePtr&`)。
+   */
+  const NodePtr& getId() const noexcept;
 
-    /**
-     * @brief 初期化式を取得します (非const版)。
-     * @return 初期化式ノードへの参照 (`NodePtr&`)。初期化子がない場合はnullを指すunique_ptr。
-     */
-    NodePtr& getInit() noexcept;
+  /**
+   * @brief 初期化式を取得します (非const版)。
+   * @return 初期化式ノードへの参照 (`NodePtr&`)。初期化子がない場合はnullを指すunique_ptr。
+   */
+  NodePtr& getInit() noexcept;
 
-    /**
-     * @brief 初期化式を取得します (const版)。
-     * @return 初期化式ノードへのconst参照 (`const NodePtr&`)。初期化子がない場合はnullを指すunique_ptr。
-     */
-    const NodePtr& getInit() const noexcept;
+  /**
+   * @brief 初期化式を取得します (const版)。
+   * @return 初期化式ノードへのconst参照 (`const NodePtr&`)。初期化子がない場合はnullを指すunique_ptr。
+   */
+  const NodePtr& getInit() const noexcept;
 
-    void accept(AstVisitor* visitor) override final;
-    void accept(ConstAstVisitor* visitor) const override final;
+  void accept(AstVisitor* visitor) override final;
+  void accept(ConstAstVisitor* visitor) const override final;
 
-    std::vector<Node*> getChildren() override final;
-    std::vector<const Node*> getChildren() const override final;
+  std::vector<Node*> getChildren() override final;
+  std::vector<const Node*> getChildren() const override final;
 
-    nlohmann::json toJson(bool pretty = false) const override final;
-    std::string toString() const override final;
+  nlohmann::json toJson(bool pretty = false) const override final;
+  std::string toString() const override final;
 
-private:
-    NodePtr m_id;   ///< 宣言される変数/パターン (Identifier or Pattern)
-    NodePtr m_init; ///< 初期化式 (Expression or null)
+ private:
+  NodePtr m_id;    ///< 宣言される変数/パターン (Identifier or Pattern)
+  NodePtr m_init;  ///< 初期化式 (Expression or null)
 };
 
 /**
@@ -102,13 +107,16 @@ private:
  * @brief 変数宣言の種類 (`var`, `let`, `const`)。
  */
 enum class VariableDeclarationKind {
-    Var,
-    Let,
-    Const
+  Var,
+  Let,
+  Const
 };
 
 /**
  * @brief VariableDeclarationKind を文字列に変換します。
+ * @param kind 変換する宣言の種類。
+ * @return 対応する文字列 ("var", "let", "const")。
+ * @throws std::out_of_range 無効な kind が指定された場合。
  */
 const char* variableDeclarationKindToString(VariableDeclarationKind kind);
 
@@ -119,64 +127,66 @@ const char* variableDeclarationKindToString(VariableDeclarationKind kind);
  * @details
  * 1つ以上の `VariableDeclarator` を含みます。
  */
-class VariableDeclaration final : public Node { // Note: Inherits from Node, not Statement directly
-public:
-    /**
-     * @brief VariableDeclarationノードのコンストラクタ。
-     * @param location ソースコード内のこのノードの位置情報。
-     * @param declarations この宣言に含まれる宣言子のリスト (ムーブされる)。
-     * @param kind 宣言の種類 (`var`, `let`, `const`)。
-     * @param parent 親ノード (オプション)。
-     */
-    explicit VariableDeclaration(const SourceLocation& location,
+class VariableDeclaration final : public Node {  // 注意: StatementNode ではなく Node を直接継承
+ public:
+  /**
+   * @brief VariableDeclarationノードのコンストラクタ。
+   * @param location ソースコード内のこのノードの位置情報。
+   * @param declarations この宣言に含まれる宣言子のリスト (ムーブされる)。
+   * @param kind 宣言の種類 (`var`, `let`, `const`)。
+   * @param parent 親ノード (オプション)。
+   */
+  explicit VariableDeclaration(const SourceLocation& location,
                                std::vector<NodePtr>&& declarations,
                                VariableDeclarationKind kind,
                                Node* parent = nullptr);
 
-    ~VariableDeclaration() override = default;
+  ~VariableDeclaration() override = default;
 
-    VariableDeclaration(const VariableDeclaration&) = delete;
-    VariableDeclaration& operator=(const VariableDeclaration&) = delete;
-    VariableDeclaration(VariableDeclaration&&) noexcept = default;
-    VariableDeclaration& operator=(VariableDeclaration&&) noexcept = default;
+  VariableDeclaration(const VariableDeclaration&) = delete;
+  VariableDeclaration& operator=(const VariableDeclaration&) = delete;
+  VariableDeclaration(VariableDeclaration&&) noexcept = default;
+  VariableDeclaration& operator=(VariableDeclaration&&) noexcept = default;
 
-    NodeType getType() const noexcept override final { return NodeType::VariableDeclaration; }
+  NodeType getType() const noexcept override final {
+    return NodeType::VariableDeclaration;
+  }
 
-    /**
-     * @brief 宣言子のリストを取得します (非const版)。
-     * @return 宣言子ノードのリストへの参照 (`std::vector<NodePtr>&`)。
-     */
-    std::vector<NodePtr>& getDeclarations() noexcept;
+  /**
+   * @brief 宣言子のリストを取得します (非const版)。
+   * @return 宣言子ノードのリストへの参照 (`std::vector<NodePtr>&`)。
+   */
+  std::vector<NodePtr>& getDeclarations() noexcept;
 
-    /**
-     * @brief 宣言子のリストを取得します (const版)。
-     * @return 宣言子ノードのリストへのconst参照 (`const std::vector<NodePtr>&`)。
-     */
-    const std::vector<NodePtr>& getDeclarations() const noexcept;
+  /**
+   * @brief 宣言子のリストを取得します (const版)。
+   * @return 宣言子ノードのリストへのconst参照 (`const std::vector<NodePtr>&`)。
+   */
+  const std::vector<NodePtr>& getDeclarations() const noexcept;
 
-    /**
-     * @brief 宣言の種類 (`var`, `let`, `const`) を取得します。
-     * @return 宣言の種類 (`VariableDeclarationKind`)。
-     */
-    VariableDeclarationKind getKind() const noexcept;
+  /**
+   * @brief 宣言の種類 (`var`, `let`, `const`) を取得します。
+   * @return 宣言の種類 (`VariableDeclarationKind`)。
+   */
+  VariableDeclarationKind getKind() const noexcept;
 
-    void accept(AstVisitor* visitor) override final;
-    void accept(ConstAstVisitor* visitor) const override final;
+  void accept(AstVisitor* visitor) override final;
+  void accept(ConstAstVisitor* visitor) const override final;
 
-    std::vector<Node*> getChildren() override final;
-    std::vector<const Node*> getChildren() const override final;
+  std::vector<Node*> getChildren() override final;
+  std::vector<const Node*> getChildren() const override final;
 
-    nlohmann::json toJson(bool pretty = false) const override final;
-    std::string toString() const override final;
+  nlohmann::json toJson(bool pretty = false) const override final;
+  std::string toString() const override final;
 
-private:
-    std::vector<NodePtr> m_declarations; ///< 宣言子のリスト
-    VariableDeclarationKind m_kind;      ///< 宣言の種類 (var, let, const)
+ private:
+  std::vector<NodePtr> m_declarations;  ///< 宣言子のリスト
+  VariableDeclarationKind m_kind;       ///< 宣言の種類 (var, let, const)
 };
 
-} // namespace ast
-} // namespace parser
-} // namespace core
-} // namespace aerojs
+}  // namespace ast
+}  // namespace parser
+}  // namespace core
+}  // namespace aerojs
 
-#endif // AEROJS_PARSER_AST_NODES_DECLARATIONS_VARIABLE_DECLARATION_H 
+#endif  // AEROJS_PARSER_AST_NODES_DECLARATIONS_VARIABLE_DECLARATION_H

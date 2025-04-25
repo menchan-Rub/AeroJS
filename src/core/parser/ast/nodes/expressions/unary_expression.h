@@ -15,9 +15,10 @@
 #ifndef AEROJS_PARSER_AST_NODES_EXPRESSIONS_UNARY_EXPRESSION_H
 #define AEROJS_PARSER_AST_NODES_EXPRESSIONS_UNARY_EXPRESSION_H
 
-#include "../node.h"
 #include <memory>
 #include <string>
+
+#include "../node.h"
 
 namespace aerojs {
 namespace core {
@@ -32,13 +33,13 @@ class ExpressionNode;
  * @brief 単項演算子の種類
  */
 enum class UnaryOperator {
-    Minus,      // -
-    Plus,       // +
-    LogicalNot, // !
-    BitwiseNot, // ~
-    TypeOf,     // typeof
-    Void,       // void
-    Delete      // delete
+  Minus,       // -
+  Plus,        // +
+  LogicalNot,  // !
+  BitwiseNot,  // ~
+  TypeOf,      // typeof
+  Void,        // void
+  Delete       // delete
 };
 
 const char* unaryOperatorToString(UnaryOperator op);
@@ -48,43 +49,43 @@ const char* unaryOperatorToString(UnaryOperator op);
  * @brief 単項演算を表す AST ノード
  */
 class UnaryExpression final : public ExpressionNode {
-public:
-    /**
-     * @brief UnaryExpression ノードのコンストラクタ
-     * @param op 単項演算子
-     * @param argument 演算対象の式
-     * @param location ソースコード上の位置情報
-     * @param parent 親ノード (オプション)
-     */
-    UnaryExpression(UnaryOperator op,
-                    std::unique_ptr<ExpressionNode> argument,
-                    const SourceLocation& location,
-                    Node* parent = nullptr);
+ public:
+  /**
+   * @brief UnaryExpression ノードのコンストラクタ
+   * @param op 単項演算子
+   * @param argument 演算対象の式
+   * @param location ソースコード上の位置情報
+   * @param parent 親ノード (オプション)
+   */
+  UnaryExpression(UnaryOperator op,
+                  std::unique_ptr<ExpressionNode> argument,
+                  const SourceLocation& location,
+                  Node* parent = nullptr);
 
-    ~UnaryExpression() override = default;
+  ~UnaryExpression() override = default;
 
-    // --- Getters ---
-    UnaryOperator getOperator() const noexcept;
-    const ExpressionNode& getArgument() const;
-    ExpressionNode& getArgument();
+  // --- Getters ---
+  UnaryOperator getOperator() const noexcept;
+  const ExpressionNode& getArgument() const;
+  ExpressionNode& getArgument();
 
-    // Visitor パターンを受け入れる
-    void accept(AstVisitor& visitor) override;
-    void accept(ConstAstVisitor& visitor) const override;
+  // Visitor パターンを受け入れる
+  void accept(AstVisitor& visitor) override;
+  void accept(ConstAstVisitor& visitor) const override;
 
-    // 子ノードを取得 (argument)
-    std::vector<Node*> getChildren() override;
-    std::vector<const Node*> getChildren() const override;
+  // 子ノードを取得 (argument)
+  std::vector<Node*> getChildren() override;
+  std::vector<const Node*> getChildren() const override;
 
-    // JSON 表現を生成
-    nlohmann::json toJson(bool pretty = false) const override;
+  // JSON 表現を生成
+  nlohmann::json toJson(bool pretty = false) const override;
 
-    // 文字列表現を生成 (デバッグ用)
-    std::string toString() const override;
+  // 文字列表現を生成 (デバッグ用)
+  std::string toString() const override;
 
-private:
-    UnaryOperator m_operator;
-    std::unique_ptr<ExpressionNode> m_argument;
+ private:
+  UnaryOperator m_operator;
+  std::unique_ptr<ExpressionNode> m_argument;
 };
 
 /**
@@ -92,8 +93,8 @@ private:
  * @brief 更新演算子の種類
  */
 enum class UpdateOperator {
-    Increment, // ++
-    Decrement  // --
+  Increment,  // ++
+  Decrement   // --
 };
 
 const char* updateOperatorToString(UpdateOperator op);
@@ -103,52 +104,52 @@ const char* updateOperatorToString(UpdateOperator op);
  * @brief 更新演算 (インクリメント/デクリメント) を表す AST ノード
  */
 class UpdateExpression final : public ExpressionNode {
-public:
-    /**
-     * @brief UpdateExpression ノードのコンストラクタ
-     * @param op 更新演算子 (++ or --)
-     * @param argument 演算対象の式 (通常は Identifier or MemberExpression)
-     * @param prefix 演算子が前方にあるか (例: `++x` なら true, `x++` なら false)
-     * @param location ソースコード上の位置情報
-     * @param parent 親ノード (オプション)
-     */
-    UpdateExpression(UpdateOperator op,
-                     std::unique_ptr<ExpressionNode> argument,
-                     bool prefix,
-                     const SourceLocation& location,
-                     Node* parent = nullptr);
+ public:
+  /**
+   * @brief UpdateExpression ノードのコンストラクタ
+   * @param op 更新演算子 (++ or --)
+   * @param argument 演算対象の式 (通常は Identifier or MemberExpression)
+   * @param prefix 演算子が前方にあるか (例: `++x` なら true, `x++` なら false)
+   * @param location ソースコード上の位置情報
+   * @param parent 親ノード (オプション)
+   */
+  UpdateExpression(UpdateOperator op,
+                   std::unique_ptr<ExpressionNode> argument,
+                   bool prefix,
+                   const SourceLocation& location,
+                   Node* parent = nullptr);
 
-    ~UpdateExpression() override = default;
+  ~UpdateExpression() override = default;
 
-    // --- Getters ---
-    UpdateOperator getOperator() const noexcept;
-    const ExpressionNode& getArgument() const;
-    ExpressionNode& getArgument();
-    bool isPrefix() const noexcept;
+  // --- Getters ---
+  UpdateOperator getOperator() const noexcept;
+  const ExpressionNode& getArgument() const;
+  ExpressionNode& getArgument();
+  bool isPrefix() const noexcept;
 
-    // Visitor パターンを受け入れる
-    void accept(AstVisitor& visitor) override;
-    void accept(ConstAstVisitor& visitor) const override;
+  // Visitor パターンを受け入れる
+  void accept(AstVisitor& visitor) override;
+  void accept(ConstAstVisitor& visitor) const override;
 
-    // 子ノードを取得 (argument)
-    std::vector<Node*> getChildren() override;
-    std::vector<const Node*> getChildren() const override;
+  // 子ノードを取得 (argument)
+  std::vector<Node*> getChildren() override;
+  std::vector<const Node*> getChildren() const override;
 
-    // JSON 表現を生成
-    nlohmann::json toJson(bool pretty = false) const override;
+  // JSON 表現を生成
+  nlohmann::json toJson(bool pretty = false) const override;
 
-    // 文字列表現を生成 (デバッグ用)
-    std::string toString() const override;
+  // 文字列表現を生成 (デバッグ用)
+  std::string toString() const override;
 
-private:
-    UpdateOperator m_operator;
-    std::unique_ptr<ExpressionNode> m_argument;
-    bool m_prefix;
+ private:
+  UpdateOperator m_operator;
+  std::unique_ptr<ExpressionNode> m_argument;
+  bool m_prefix;
 };
 
-} // namespace ast
-} // namespace parser
-} // namespace core
-} // namespace aerojs
+}  // namespace ast
+}  // namespace parser
+}  // namespace core
+}  // namespace aerojs
 
-#endif // AEROJS_PARSER_AST_NODES_EXPRESSIONS_UNARY_EXPRESSION_H 
+#endif  // AEROJS_PARSER_AST_NODES_EXPRESSIONS_UNARY_EXPRESSION_H

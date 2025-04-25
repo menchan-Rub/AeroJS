@@ -19,12 +19,12 @@ extern "C" {
  * @brief コンテキスト作成オプション
  */
 typedef struct {
-  AerojsSize maxStackSize;          /* 最大スタックサイズ（バイト単位） */
-  AerojsBool enableExceptions;      /* 例外処理を有効にするかどうか */
-  AerojsBool strictMode;            /* 厳格モードを有効にするかどうか */
-  AerojsBool enableDebugger;        /* デバッガを有効にするかどうか */
-  const char* timezone;             /* タイムゾーン設定 */
-  const char* locale;               /* ロケール設定 */
+  AerojsSize maxStackSize;     /* 最大スタックサイズ（バイト単位） */
+  AerojsBool enableExceptions; /* 例外処理を有効にするかどうか */
+  AerojsBool strictMode;       /* 厳格モードを有効にするかどうか */
+  AerojsBool enableDebugger;   /* デバッガを有効にするかどうか */
+  const char* timezone;        /* タイムゾーン設定 */
+  const char* locale;          /* ロケール設定 */
 } AerojsContextOptions;
 
 /**
@@ -46,8 +46,8 @@ AEROJS_EXPORT AerojsContext* AerojsCreateContext(AerojsEngine* engine);
  * @param options コンテキストオプション
  * @return 新しいコンテキストへのポインタ
  */
-AEROJS_EXPORT AerojsContext* AerojsCreateContextWithOptions(AerojsEngine* engine, 
-                                                          const AerojsContextOptions* options);
+AEROJS_EXPORT AerojsContext* AerojsCreateContextWithOptions(AerojsEngine* engine,
+                                                            const AerojsContextOptions* options);
 
 /**
  * @brief コンテキストを破棄
@@ -57,9 +57,9 @@ AEROJS_EXPORT void AerojsDestroyContext(AerojsContext* ctx);
 
 /**
  * @brief コンテキストをリセット
- * 
+ *
  * コンテキスト内のすべての変数と状態をクリアしますが、グローバルオブジェクトと組み込みオブジェクトは維持されます。
- * 
+ *
  * @param ctx コンテキスト
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
@@ -101,19 +101,19 @@ AEROJS_EXPORT void AerojsSetErrorException(AerojsContext* ctx, const char* error
 
 /**
  * @brief コールバック関数型
- * 
+ *
  * JavaScriptから呼び出されるネイティブ関数の型定義
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisObject 'this'オブジェクト
  * @param arguments 引数の配列
  * @param argumentCount 引数の数
  * @return 戻り値
  */
-typedef AerojsValueRef (*AerojsNativeFunction)(AerojsContext* ctx, 
-                                             AerojsValueRef thisObject,
-                                             const AerojsValueRef* arguments,
-                                             AerojsSize argumentCount);
+typedef AerojsValueRef (*AerojsNativeFunction)(AerojsContext* ctx,
+                                               AerojsValueRef thisObject,
+                                               const AerojsValueRef* arguments,
+                                               AerojsSize argumentCount);
 
 /**
  * @brief ネイティブ関数を作成
@@ -124,9 +124,9 @@ typedef AerojsValueRef (*AerojsNativeFunction)(AerojsContext* ctx,
  * @return JavaScript関数オブジェクト
  */
 AEROJS_EXPORT AerojsValueRef AerojsCreateFunction(AerojsContext* ctx,
-                                                const char* name,
-                                                AerojsNativeFunction function,
-                                                AerojsInt32 argumentCount);
+                                                  const char* name,
+                                                  AerojsNativeFunction function,
+                                                  AerojsInt32 argumentCount);
 
 /**
  * @brief グローバルオブジェクトにネイティブ関数を登録
@@ -137,9 +137,9 @@ AEROJS_EXPORT AerojsValueRef AerojsCreateFunction(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsRegisterGlobalFunction(AerojsContext* ctx,
-                                                      const char* name,
-                                                      AerojsNativeFunction function,
-                                                      AerojsInt32 argumentCount);
+                                                        const char* name,
+                                                        AerojsNativeFunction function,
+                                                        AerojsInt32 argumentCount);
 
 /**
  * @brief グローバルオブジェクトに値を登録
@@ -149,8 +149,8 @@ AEROJS_EXPORT AerojsStatus AerojsRegisterGlobalFunction(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsRegisterGlobalValue(AerojsContext* ctx,
-                                                   const char* name,
-                                                   AerojsValueRef value);
+                                                     const char* name,
+                                                     AerojsValueRef value);
 
 /**
  * @brief 文字列をJavaScriptとして評価
@@ -162,10 +162,10 @@ AEROJS_EXPORT AerojsStatus AerojsRegisterGlobalValue(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsEvaluateScript(AerojsContext* ctx,
-                                              const char* script,
-                                              const char* sourceURL,
-                                              AerojsInt32 startLine,
-                                              AerojsValueRef* resultValue);
+                                                const char* script,
+                                                const char* sourceURL,
+                                                AerojsInt32 startLine,
+                                                AerojsValueRef* resultValue);
 
 /**
  * @brief ファイルをJavaScriptとして評価
@@ -175,8 +175,8 @@ AEROJS_EXPORT AerojsStatus AerojsEvaluateScript(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsEvaluateScriptFile(AerojsContext* ctx,
-                                                  const char* filePath,
-                                                  AerojsValueRef* resultValue);
+                                                    const char* filePath,
+                                                    AerojsValueRef* resultValue);
 
 /**
  * @brief JavaScript関数を呼び出す
@@ -189,11 +189,11 @@ AEROJS_EXPORT AerojsStatus AerojsEvaluateScriptFile(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsCallFunction(AerojsContext* ctx,
-                                            AerojsValueRef function,
-                                            AerojsValueRef thisObject,
-                                            const AerojsValueRef* arguments,
-                                            AerojsSize argumentCount,
-                                            AerojsValueRef* resultValue);
+                                              AerojsValueRef function,
+                                              AerojsValueRef thisObject,
+                                              const AerojsValueRef* arguments,
+                                              AerojsSize argumentCount,
+                                              AerojsValueRef* resultValue);
 
 /**
  * @brief オブジェクトのメソッドを呼び出す
@@ -206,11 +206,11 @@ AEROJS_EXPORT AerojsStatus AerojsCallFunction(AerojsContext* ctx,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsCallMethod(AerojsContext* ctx,
-                                          AerojsValueRef object,
-                                          const char* methodName,
-                                          const AerojsValueRef* arguments,
-                                          AerojsSize argumentCount,
-                                          AerojsValueRef* resultValue);
+                                            AerojsValueRef object,
+                                            const char* methodName,
+                                            const AerojsValueRef* arguments,
+                                            AerojsSize argumentCount,
+                                            AerojsValueRef* resultValue);
 
 /**
  * @brief コンテキストのGCを実行
@@ -227,9 +227,9 @@ AEROJS_EXPORT void AerojsCollectGarbage(AerojsContext* ctx);
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsSetContextData(AerojsContext* ctx,
-                                              const char* key,
-                                              void* data,
-                                              void (*destructor)(void*));
+                                                const char* key,
+                                                void* data,
+                                                void (*destructor)(void*));
 
 /**
  * @brief コンテキストからカスタムデータを取得
@@ -251,4 +251,4 @@ AEROJS_EXPORT AerojsBool AerojsRemoveContextData(AerojsContext* ctx, const char*
 }
 #endif
 
-#endif /* AEROJS_CONTEXT_H */ 
+#endif /* AEROJS_CONTEXT_H */

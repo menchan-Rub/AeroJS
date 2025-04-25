@@ -9,10 +9,11 @@
 #define AERO_CORE_RUNTIME_TYPES_H
 
 #include <cstdint>
-#include <string>
 #include <memory>
-#include "value_type.h"
+#include <string>
+
 #include "../context/context.h"
+#include "value_type.h"
 
 namespace aero {
 
@@ -20,10 +21,10 @@ namespace aero {
  * @brief 値の型を判定するユーティリティ関数
  */
 class TypeChecking {
-public:
+ public:
   /**
    * @brief 値がundefinedかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return undefinedの場合はtrue、それ以外の場合はfalse
@@ -32,7 +33,7 @@ public:
 
   /**
    * @brief 値がnullかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return nullの場合はtrue、それ以外の場合はfalse
@@ -41,7 +42,7 @@ public:
 
   /**
    * @brief 値がnullまたはundefinedかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return nullまたはundefinedの場合はtrue、それ以外の場合はfalse
@@ -50,7 +51,7 @@ public:
 
   /**
    * @brief 値がブール値かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return ブール値の場合はtrue、それ以外の場合はfalse
@@ -59,7 +60,7 @@ public:
 
   /**
    * @brief 値が数値かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 数値の場合はtrue、それ以外の場合はfalse
@@ -68,7 +69,7 @@ public:
 
   /**
    * @brief 値が整数かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 整数の場合はtrue、それ以外の場合はfalse
@@ -77,7 +78,7 @@ public:
 
   /**
    * @brief 値が文字列かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 文字列の場合はtrue、それ以外の場合はfalse
@@ -86,7 +87,7 @@ public:
 
   /**
    * @brief 値がシンボルかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return シンボルの場合はtrue、それ以外の場合はfalse
@@ -95,7 +96,7 @@ public:
 
   /**
    * @brief 値がBigIntかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return BigIntの場合はtrue、それ以外の場合はfalse
@@ -104,7 +105,7 @@ public:
 
   /**
    * @brief 値がオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return オブジェクトの場合はtrue、それ以外の場合はfalse
@@ -113,7 +114,7 @@ public:
 
   /**
    * @brief 値が関数かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 関数の場合はtrue、それ以外の場合はfalse
@@ -122,7 +123,7 @@ public:
 
   /**
    * @brief 値が配列かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 配列の場合はtrue、それ以外の場合はfalse
@@ -131,7 +132,7 @@ public:
 
   /**
    * @brief 値が日付オブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 日付オブジェクトの場合はtrue、それ以外の場合はfalse
@@ -140,7 +141,7 @@ public:
 
   /**
    * @brief 値が正規表現オブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 正規表現オブジェクトの場合はtrue、それ以外の場合はfalse
@@ -149,7 +150,7 @@ public:
 
   /**
    * @brief 値がエラーオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return エラーオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -158,7 +159,7 @@ public:
 
   /**
    * @brief 値がMapオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return Mapオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -167,7 +168,7 @@ public:
 
   /**
    * @brief 値がSetオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return Setオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -176,7 +177,7 @@ public:
 
   /**
    * @brief 値がWeakMapオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return WeakMapオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -185,7 +186,7 @@ public:
 
   /**
    * @brief 値がWeakSetオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return WeakSetオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -194,7 +195,7 @@ public:
 
   /**
    * @brief 値がArrayBufferオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return ArrayBufferオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -203,7 +204,7 @@ public:
 
   /**
    * @brief 値がSharedArrayBufferオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return SharedArrayBufferオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -212,7 +213,7 @@ public:
 
   /**
    * @brief 値がDataViewオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return DataViewオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -221,7 +222,7 @@ public:
 
   /**
    * @brief 値がTypedArrayオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return TypedArrayオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -230,7 +231,7 @@ public:
 
   /**
    * @brief 値がPromiseオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return Promiseオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -239,7 +240,7 @@ public:
 
   /**
    * @brief 値がProxyオブジェクトかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return Proxyオブジェクトの場合はtrue、それ以外の場合はfalse
@@ -248,7 +249,7 @@ public:
 
   /**
    * @brief 値がコンストラクタかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return コンストラクタの場合はtrue、それ以外の場合はfalse
@@ -257,7 +258,7 @@ public:
 
   /**
    * @brief 値が原始型（プリミティブ）かどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 原始型の場合はtrue、それ以外の場合はfalse
@@ -266,7 +267,7 @@ public:
 
   /**
    * @brief 値がイテレーブルかどうか判定
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return イテレーブルの場合はtrue、それ以外の場合はfalse
@@ -278,12 +279,12 @@ public:
  * @brief 型変換ユーティリティ関数
  */
 class TypeConversion {
-public:
+ public:
   /**
    * @brief 値をブール値に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後のブール値
@@ -292,9 +293,9 @@ public:
 
   /**
    * @brief 値を数値に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の数値
@@ -303,9 +304,9 @@ public:
 
   /**
    * @brief 値を整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の整数
@@ -314,9 +315,9 @@ public:
 
   /**
    * @brief 値を32ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の32ビット整数
@@ -325,9 +326,9 @@ public:
 
   /**
    * @brief 値を符号なし32ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の符号なし32ビット整数
@@ -336,9 +337,9 @@ public:
 
   /**
    * @brief 値を16ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の16ビット整数
@@ -347,9 +348,9 @@ public:
 
   /**
    * @brief 値を符号なし16ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の符号なし16ビット整数
@@ -358,9 +359,9 @@ public:
 
   /**
    * @brief 値を8ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の8ビット整数
@@ -369,9 +370,9 @@ public:
 
   /**
    * @brief 値を符号なし8ビット整数に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の符号なし8ビット整数
@@ -380,10 +381,10 @@ public:
 
   /**
    * @brief 値を符号なし8ビット整数（クランプ処理）に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
    * 結果が0未満の場合は0、255より大きい場合は255に丸められます。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の符号なし8ビット整数（クランプ処理）
@@ -392,9 +393,9 @@ public:
 
   /**
    * @brief 値を文字列に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の文字列
@@ -403,10 +404,10 @@ public:
 
   /**
    * @brief 値をオブジェクトに変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
    * nullまたはundefinedの場合は例外をスローします。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後のオブジェクト
@@ -415,11 +416,11 @@ public:
 
   /**
    * @brief 値を原始型（プリミティブ）に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
    * 既に原始型の場合はそのまま返します。
    * オブジェクトの場合はToPrimitiveアルゴリズムに従って変換します。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @param preferredType 変換の優先型ヒント（"default", "number", "string"）
@@ -429,9 +430,9 @@ public:
 
   /**
    * @brief 値をBigIntに変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後のBigInt
@@ -440,9 +441,9 @@ public:
 
   /**
    * @brief 値をBigInt64に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の64ビットBigInt
@@ -451,9 +452,9 @@ public:
 
   /**
    * @brief 値をBigUint64に変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の符号なし64ビットBigInt
@@ -462,9 +463,9 @@ public:
 
   /**
    * @brief 値をプロパティキーに変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後のプロパティキー
@@ -473,9 +474,9 @@ public:
 
   /**
    * @brief 値を長さに変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の長さ値
@@ -484,9 +485,9 @@ public:
 
   /**
    * @brief 値を配列インデックスに変換
-   * 
+   *
    * ECMAScript仕様に従った型変換を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param value 対象の値
    * @return 変換後の配列インデックス
@@ -498,12 +499,12 @@ public:
  * @brief 型比較ユーティリティ関数
  */
 class TypeComparison {
-public:
+ public:
   /**
    * @brief 値の等価性を比較（==演算子）
-   * 
+   *
    * ECMAScript仕様に従った緩い等価性比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -513,9 +514,9 @@ public:
 
   /**
    * @brief 値の厳密等価性を比較（===演算子）
-   * 
+   *
    * ECMAScript仕様に従った厳密等価性比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -525,10 +526,10 @@ public:
 
   /**
    * @brief SameValue比較
-   * 
+   *
    * ECMAScript仕様に従ったSameValue比較を行います。
    * Object.is()メソッドの実装に使用されます。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -538,10 +539,10 @@ public:
 
   /**
    * @brief SameValueZero比較
-   * 
+   *
    * ECMAScript仕様に従ったSameValueZero比較を行います。
    * Mapなどのキー比較に使用されます。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -551,9 +552,9 @@ public:
 
   /**
    * @brief 値の大小を比較（<演算子）
-   * 
+   *
    * ECMAScript仕様に従った比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -563,9 +564,9 @@ public:
 
   /**
    * @brief 値の大小を比較（<=演算子）
-   * 
+   *
    * ECMAScript仕様に従った比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -575,9 +576,9 @@ public:
 
   /**
    * @brief 値の大小を比較（>演算子）
-   * 
+   *
    * ECMAScript仕様に従った比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -587,9 +588,9 @@ public:
 
   /**
    * @brief 値の大小を比較（>=演算子）
-   * 
+   *
    * ECMAScript仕様に従った比較を行います。
-   * 
+   *
    * @param ctx 実行コンテキスト
    * @param x 比較対象の値1
    * @param y 比較対象の値2
@@ -600,12 +601,12 @@ public:
 
 /**
  * @brief 型システム初期化
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param globalObj グローバルオブジェクト
  */
 void initializeTypeSystem(ExecutionContext* ctx, Object* globalObj);
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_CORE_RUNTIME_TYPES_H 
+#endif  // AERO_CORE_RUNTIME_TYPES_H

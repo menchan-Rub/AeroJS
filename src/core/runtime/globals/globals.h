@@ -8,20 +8,21 @@
 #ifndef AERO_RUNTIME_GLOBALS_H
 #define AERO_RUNTIME_GLOBALS_H
 
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
+
 #include "../context/context.h"
-#include "../values/value.h"
 #include "../object.h"
+#include "../values/value.h"
 
 namespace aero {
 
 /**
  * @brief @globalsオブジェクトを取得
- * 
+ *
  * 指定された実行コンテキストの@globalsオブジェクトを取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @return @globalsオブジェクト
  */
@@ -30,9 +31,9 @@ GlobalsObject* getGlobalsObject(ExecutionContext* ctx);
 
 /**
  * @brief グローバル関数の初期化
- * 
+ *
  * JavaScriptのグローバルスコープに存在する関数を初期化します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param globalObj グローバルオブジェクト
  */
@@ -40,9 +41,9 @@ void initializeGlobalFunctions(ExecutionContext* ctx, Object* globalObj);
 
 /**
  * @brief eval関数の実装
- * 
+ *
  * 文字列として渡されたJavaScriptコードを評価し、その結果を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (code: string)
@@ -52,9 +53,9 @@ Value globalEval(ExecutionContext* ctx, Value thisValue, const std::vector<Value
 
 /**
  * @brief isFinite関数の実装
- * 
+ *
  * 値が有限数かどうかを判定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (value)
@@ -64,9 +65,9 @@ Value globalIsFinite(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief isNaN関数の実装
- * 
+ *
  * 値がNaNかどうかを判定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (value)
@@ -76,9 +77,9 @@ Value globalIsNaN(ExecutionContext* ctx, Value thisValue, const std::vector<Valu
 
 /**
  * @brief parseInt関数の実装
- * 
+ *
  * 文字列を指定された基数の整数に変換します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (string, radix = 10)
@@ -88,9 +89,9 @@ Value globalParseInt(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief parseFloat関数の実装
- * 
+ *
  * 文字列を浮動小数点数に変換します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (string)
@@ -100,9 +101,9 @@ Value globalParseFloat(ExecutionContext* ctx, Value thisValue, const std::vector
 
 /**
  * @brief encodeURI関数の実装
- * 
+ *
  * URIをエンコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (uri: string)
@@ -112,9 +113,9 @@ Value globalEncodeURI(ExecutionContext* ctx, Value thisValue, const std::vector<
 
 /**
  * @brief decodeURI関数の実装
- * 
+ *
  * エンコードされたURIをデコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (encodedURI: string)
@@ -124,9 +125,9 @@ Value globalDecodeURI(ExecutionContext* ctx, Value thisValue, const std::vector<
 
 /**
  * @brief encodeURIComponent関数の実装
- * 
+ *
  * URI構成要素をエンコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (component: string)
@@ -136,9 +137,9 @@ Value globalEncodeURIComponent(ExecutionContext* ctx, Value thisValue, const std
 
 /**
  * @brief decodeURIComponent関数の実装
- * 
+ *
  * エンコードされたURI構成要素をデコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (encodedComponent: string)
@@ -148,9 +149,9 @@ Value globalDecodeURIComponent(ExecutionContext* ctx, Value thisValue, const std
 
 /**
  * @brief escape関数の実装 (非推奨)
- * 
+ *
  * 文字列をURLエンコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (string: string)
@@ -160,9 +161,9 @@ Value globalEscape(ExecutionContext* ctx, Value thisValue, const std::vector<Val
 
 /**
  * @brief unescape関数の実装 (非推奨)
- * 
+ *
  * URLエンコードされた文字列をデコードします。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (string: string)
@@ -172,16 +173,16 @@ Value globalUnescape(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief JSON名前空間
- * 
+ *
  * JSON操作のためのオブジェクトとメソッドを提供します。
  */
 namespace json {
 
 /**
  * @brief JSONオブジェクトを初期化
- * 
+ *
  * グローバルオブジェクトにJSONオブジェクトを追加します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param globalObj グローバルオブジェクト
  * @return JSONオブジェクト
@@ -190,9 +191,9 @@ Object* initialize(ExecutionContext* ctx, Object* globalObj);
 
 /**
  * @brief JSON.parse関数の実装
- * 
+ *
  * JSON文字列をパースし、JavaScript値に変換します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (text: string, reviver?: function)
@@ -202,9 +203,9 @@ Value parse(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& ar
 
 /**
  * @brief JSON.stringify関数の実装
- * 
+ *
  * JavaScript値をJSON文字列に変換します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (value, replacer?: function|array, space?: number|string)
@@ -212,20 +213,20 @@ Value parse(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& ar
  */
 Value stringify(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args);
 
-} // namespace json
+}  // namespace json
 
 /**
  * @brief Math名前空間
- * 
+ *
  * 数学関数と定数を提供します。
  */
 namespace math {
 
 /**
  * @brief Mathオブジェクトを初期化
- * 
+ *
  * グローバルオブジェクトにMathオブジェクトを追加します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param globalObj グローバルオブジェクト
  * @return Mathオブジェクト
@@ -234,9 +235,9 @@ Object* initialize(ExecutionContext* ctx, Object* globalObj);
 
 /**
  * @brief Math.abs関数の実装
- * 
+ *
  * 数値の絶対値を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (x: number)
@@ -246,9 +247,9 @@ Value abs(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Math.random関数の実装
- * 
+ *
  * 0以上1未満の疑似乱数を生成します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (未使用)
@@ -258,9 +259,9 @@ Value random(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& a
 
 /**
  * @brief Math.max関数の実装
- * 
+ *
  * 指定された値の中で最大の値を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (...values)
@@ -270,9 +271,9 @@ Value max(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Math.min関数の実装
- * 
+ *
  * 指定された値の中で最小の値を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (...values)
@@ -282,9 +283,9 @@ Value min(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Math.floor関数の実装
- * 
+ *
  * 指定された数値以下の最大の整数を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (x: number)
@@ -294,9 +295,9 @@ Value floor(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& ar
 
 /**
  * @brief Math.ceil関数の実装
- * 
+ *
  * 指定された数値以上の最小の整数を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (x: number)
@@ -306,9 +307,9 @@ Value ceil(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& arg
 
 /**
  * @brief Math.round関数の実装
- * 
+ *
  * 指定された数値を最も近い整数に丸めます。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (x: number)
@@ -318,9 +319,9 @@ Value round(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& ar
 
 /**
  * @brief Math.pow関数の実装
- * 
+ *
  * 基数を指定された指数で累乗した値を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (base: number, exponent: number)
@@ -330,9 +331,9 @@ Value pow(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Math.sqrt関数の実装
- * 
+ *
  * 数値の平方根を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (x: number)
@@ -340,20 +341,20 @@ Value pow(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
  */
 Value sqrt(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args);
 
-} // namespace math
+}  // namespace math
 
 /**
  * @brief Reflect名前空間
- * 
+ *
  * オブジェクトの操作に使用するメソッドを提供します。
  */
 namespace reflect {
 
 /**
  * @brief Reflectオブジェクトを初期化
- * 
+ *
  * グローバルオブジェクトにReflectオブジェクトを追加します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param globalObj グローバルオブジェクト
  * @return Reflectオブジェクト
@@ -362,9 +363,9 @@ Object* initialize(ExecutionContext* ctx, Object* globalObj);
 
 /**
  * @brief Reflect.apply関数の実装
- * 
+ *
  * 指定された引数リストで関数を呼び出します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: function, thisArg, args: array)
@@ -374,9 +375,9 @@ Value apply(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& ar
 
 /**
  * @brief Reflect.construct関数の実装
- * 
+ *
  * 指定されたコンストラクタ関数と引数リストで新しいオブジェクトを作成します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: function, args: array, newTarget?: function)
@@ -386,9 +387,9 @@ Value construct(ExecutionContext* ctx, Value thisValue, const std::vector<Value>
 
 /**
  * @brief Reflect.defineProperty関数の実装
- * 
+ *
  * オブジェクトにプロパティを定義または変更します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol, attributes: object)
@@ -398,9 +399,9 @@ Value defineProperty(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief Reflect.deleteProperty関数の実装
- * 
+ *
  * オブジェクトからプロパティを削除します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol)
@@ -410,9 +411,9 @@ Value deleteProperty(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief Reflect.get関数の実装
- * 
+ *
  * オブジェクトのプロパティの値を取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol, receiver?: object)
@@ -422,9 +423,9 @@ Value get(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Reflect.getOwnPropertyDescriptor関数の実装
- * 
+ *
  * オブジェクトの指定されたプロパティの記述子を取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol)
@@ -434,9 +435,9 @@ Value getOwnPropertyDescriptor(ExecutionContext* ctx, Value thisValue, const std
 
 /**
  * @brief Reflect.has関数の実装
- * 
+ *
  * 指定されたプロパティがオブジェクトに存在するかどうかを確認します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol)
@@ -446,9 +447,9 @@ Value has(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Reflect.ownKeys関数の実装
- * 
+ *
  * オブジェクトの全ての直接プロパティのキーの配列を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object)
@@ -458,9 +459,9 @@ Value ownKeys(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& 
 
 /**
  * @brief Reflect.preventExtensions関数の実装
- * 
+ *
  * オブジェクトに新しいプロパティが追加されるのを防ぎます。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object)
@@ -470,9 +471,9 @@ Value preventExtensions(ExecutionContext* ctx, Value thisValue, const std::vecto
 
 /**
  * @brief Reflect.set関数の実装
- * 
+ *
  * オブジェクトのプロパティに値を設定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, propertyKey: string|symbol, value, receiver?: object)
@@ -482,9 +483,9 @@ Value set(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
 
 /**
  * @brief Reflect.setPrototypeOf関数の実装
- * 
+ *
  * オブジェクトのプロトタイプを変更します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値
  * @param args 引数リスト (target: object, prototype: object|null)
@@ -492,8 +493,8 @@ Value set(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args
  */
 Value setPrototypeOf(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args);
 
-} // namespace reflect
+}  // namespace reflect
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_RUNTIME_GLOBALS_H 
+#endif  // AERO_RUNTIME_GLOBALS_H

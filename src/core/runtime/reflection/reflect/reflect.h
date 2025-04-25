@@ -8,8 +8,9 @@
 #ifndef AERO_REFLECT_H
 #define AERO_REFLECT_H
 
-#include "core/runtime/object.h"
 #include <vector>
+
+#include "core/runtime/object.h"
 
 namespace aero {
 
@@ -19,9 +20,9 @@ class Value;
 
 /**
  * @brief Reflect.apply メソッド
- * 
+ *
  * 指定した引数で、指定したthisを使用して関数を呼び出します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, thisArg, argumentsList]
@@ -31,9 +32,9 @@ Value reflectApply(ExecutionContext* ctx, Value thisValue, const std::vector<Val
 
 /**
  * @brief Reflect.construct メソッド
- * 
+ *
  * 指定した引数と、オプションのnewTargetでコンストラクタを呼び出します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, argumentsList, [newTarget]]
@@ -43,9 +44,9 @@ Value reflectConstruct(ExecutionContext* ctx, Value thisValue, const std::vector
 
 /**
  * @brief Reflect.defineProperty メソッド
- * 
+ *
  * オブジェクトにプロパティを定義します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey, attributes]
@@ -55,9 +56,9 @@ Value reflectDefineProperty(ExecutionContext* ctx, Value thisValue, const std::v
 
 /**
  * @brief Reflect.deleteProperty メソッド
- * 
+ *
  * オブジェクトから指定したプロパティを削除します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey]
@@ -67,9 +68,9 @@ Value reflectDeleteProperty(ExecutionContext* ctx, Value thisValue, const std::v
 
 /**
  * @brief Reflect.get メソッド
- * 
+ *
  * オブジェクトのプロパティを取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey, [receiver]]
@@ -79,9 +80,9 @@ Value reflectGet(ExecutionContext* ctx, Value thisValue, const std::vector<Value
 
 /**
  * @brief Reflect.getOwnPropertyDescriptor メソッド
- * 
+ *
  * オブジェクトの自身のプロパティディスクリプタを取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey]
@@ -91,9 +92,9 @@ Value reflectGetOwnPropertyDescriptor(ExecutionContext* ctx, Value thisValue, co
 
 /**
  * @brief Reflect.getPrototypeOf メソッド
- * 
+ *
  * オブジェクトのプロトタイプを取得します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target]
@@ -103,9 +104,9 @@ Value reflectGetPrototypeOf(ExecutionContext* ctx, Value thisValue, const std::v
 
 /**
  * @brief Reflect.has メソッド
- * 
+ *
  * オブジェクトが指定したプロパティを持つかどうかを判定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey]
@@ -115,9 +116,9 @@ Value reflectHas(ExecutionContext* ctx, Value thisValue, const std::vector<Value
 
 /**
  * @brief Reflect.isExtensible メソッド
- * 
+ *
  * オブジェクトが拡張可能かどうかを判定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target]
@@ -127,9 +128,9 @@ Value reflectIsExtensible(ExecutionContext* ctx, Value thisValue, const std::vec
 
 /**
  * @brief Reflect.ownKeys メソッド
- * 
+ *
  * オブジェクトの自身のプロパティキーの配列を返します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target]
@@ -139,9 +140,9 @@ Value reflectOwnKeys(ExecutionContext* ctx, Value thisValue, const std::vector<V
 
 /**
  * @brief Reflect.preventExtensions メソッド
- * 
+ *
  * オブジェクトの拡張を禁止します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target]
@@ -151,9 +152,9 @@ Value reflectPreventExtensions(ExecutionContext* ctx, Value thisValue, const std
 
 /**
  * @brief Reflect.set メソッド
- * 
+ *
  * オブジェクトのプロパティを設定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, propertyKey, value, [receiver]]
@@ -163,9 +164,9 @@ Value reflectSet(ExecutionContext* ctx, Value thisValue, const std::vector<Value
 
 /**
  * @brief Reflect.setPrototypeOf メソッド
- * 
+ *
  * オブジェクトのプロトタイプを設定します。
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param thisValue thisの値（無視される）
  * @param args 引数リスト [target, prototype]
@@ -175,12 +176,12 @@ Value reflectSetPrototypeOf(ExecutionContext* ctx, Value thisValue, const std::v
 
 /**
  * @brief Reflectオブジェクトをグローバルオブジェクトに登録します
- * 
+ *
  * @param ctx 実行コンテキスト
  * @param global グローバルオブジェクト
  */
 void registerReflectObject(ExecutionContext* ctx, Object* global);
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_REFLECT_H 
+#endif  // AERO_REFLECT_H

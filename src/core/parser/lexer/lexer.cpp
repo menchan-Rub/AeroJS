@@ -1,964 +1,1260 @@
-/**
- * @file lexer.cpp
- * @brief JavaScript用の字句解析器（Lexer）の実装
- * 
- * このファイルはJavaScriptのソースコードを解析してトークン列に変換する
- * 字句解析器の実装を提供します。
- */
+/*******************************************************************************
+ * @file src/core/parser/lexer/lexer.cpp
+ * @brief 高性能JavaScriptレキサー（字句解析器）の実装
+ * @version 2.1.0
+ * @copyright Copyright (c) 2024 AeroJS Project
+ * @license MIT License
+ ******************************************************************************/
 
+// 対応するヘッダーを最初にインクルード
 #include "lexer.h"
-#include "../parser_error.h"
-#include <cctype>
+
+// 必要な標準ライブラリ
+#include <atomic>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <shared_mutex>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
+
+// 依存する他のモジュール
+#include "character_stream.h"
+#include "comment.h"
+#include "lexer_options.h"
+#include "lexer_state_manager.h"
+#include "lexer_stats.h"
+#include "src/core/sourcemap/source_location.h"
+#include "token.h"
+#include "token_cache.h"
+#include "token_lookup_table.h"
+#include "src/core/parser/parser_error.h"
+#include "src/utils/logger.h"
+#include "src/utils/memory/arena_allocator.h"
+#include "src/utils/thread/thread_pool.h"
+#include "src/utils/metrics/metrics_collector.h"
 
 namespace aerojs {
 namespace core {
+namespace parser {
+namespace lexer {
 
-// キーワードマップの初期化
-const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
-  // JavaScript予約語
-  {"break", TokenType::BREAK},
-  {"case", TokenType::CASE},
-  {"catch", TokenType::CATCH},
-  {"class", TokenType::CLASS},
-  {"const", TokenType::CONST},
-  {"continue", TokenType::CONTINUE},
-  {"debugger", TokenType::DEBUGGER},
-  {"default", TokenType::DEFAULT},
-  {"delete", TokenType::DELETE},
-  {"do", TokenType::DO},
-  {"else", TokenType::ELSE},
-  {"enum", TokenType::ENUM},
-  {"export", TokenType::EXPORT},
-  {"extends", TokenType::EXTENDS},
-  {"false", TokenType::FALSE},
-  {"finally", TokenType::FINALLY},
-  {"for", TokenType::FOR},
-  {"function", TokenType::FUNCTION},
-  {"if", TokenType::IF},
-  {"import", TokenType::IMPORT},
-  {"in", TokenType::IN},
-  {"instanceof", TokenType::INSTANCEOF},
-  {"new", TokenType::NEW},
-  {"null", TokenType::NULL_LITERAL},
-  {"return", TokenType::RETURN},
-  {"super", TokenType::SUPER},
-  {"switch", TokenType::SWITCH},
-  {"this", TokenType::THIS},
-  {"throw", TokenType::THROW},
-  {"true", TokenType::TRUE},
-  {"try", TokenType::TRY},
-  {"typeof", TokenType::TYPEOF},
-  {"var", TokenType::VAR},
-  {"void", TokenType::VOID},
-  {"while", TokenType::WHILE},
-  {"with", TokenType::WITH},
+/**
+ * @brief Lexerクラスの実装
+ * 
+ * JavaScriptソースコードを字句解析し、トークン列に変換する
+ */
+Lexer::Lexer(std::unique_ptr<CharacterStream> stream, const LexerOptions& options)
+    : stream_(std::move(stream)),
+      options_(options),
+      current_token_(),
+      lookup_table_(std::make_unique<TokenLookupTable>()),
+      token_cache_(std::make_unique<TokenCache>(options.token_cache_size)),
+      state_manager_(std::make_unique<LexerStateManager>()),
+      stats_(std::make_unique<LexerStats>()),
+      logger_(nullptr),
+      allocator_(nullptr),
+      thread_pool_(nullptr),
+      metrics_(nullptr) {
   
-  // ECMAScript 2015+ (ES6+)
-  {"yield", TokenType::YIELD},
-  {"let", TokenType::LET},
-  {"static", TokenType::STATIC},
-  {"await", TokenType::AWAIT},
-  {"async", TokenType::ASYNC},
-  {"of", TokenType::OF},
+  // キーワードテーブルの初期化
+  lookup_table_->InitializeKeywords();
   
-  // 将来の予約語
-  {"implements", TokenType::IMPLEMENTS},
-  {"interface", TokenType::INTERFACE},
-  {"package", TokenType::PACKAGE},
-  {"private", TokenType::PRIVATE},
-  {"protected", TokenType::PROTECTED},
-  {"public", TokenType::PUBLIC}
-};
-
-Lexer::Lexer(const std::string& source, const std::string& filename)
-  : source_(source), filename_(filename), start_(0), current_(0), line_(1), column_(1) {
+  // 最初のトークンを読み込む
+  Advance();
 }
 
 Lexer::~Lexer() = default;
 
-Token Lexer::scanToken() {
-  if (!savedTokens_.empty()) {
-    Token token = savedTokens_.front();
-    savedTokens_.erase(savedTokens_.begin());
-    return token;
+void Lexer::SetLogger(std::shared_ptr<utils::Logger> logger) {
+  logger_ = std::move(logger);
+}
+
+void Lexer::SetAllocator(std::shared_ptr<utils::memory::ArenaAllocator> allocator) {
+  allocator_ = std::move(allocator);
+}
+
+void Lexer::SetThreadPool(std::shared_ptr<utils::thread::ThreadPool> thread_pool) {
+  thread_pool_ = std::move(thread_pool);
+}
+
+void Lexer::SetMetricsCollector(std::shared_ptr<utils::metrics::MetricsCollector> metrics) {
+  metrics_ = std::move(metrics);
+}
+
+Token Lexer::CurrentToken() const {
+  return current_token_;
+}
+
+Token Lexer::NextToken() {
+  Advance();
+  return current_token_;
+}
+
+Token Lexer::PeekToken() {
+  // 現在位置を保存
+  size_t current_pos = stream_->Position();
+  
+  // 現在のトークンを保存
+  Token current = current_token_;
+  
+  // 次のトークンを取得
+  Advance();
+  Token next = current_token_;
+  
+  // 状態を元に戻す
+  current_token_ = current;
+  stream_->SetPosition(current_pos);
+  
+  return next;
+}
+
+void Lexer::Advance() {
+  // 空白文字とコメントをスキップ
+  SkipWhitespaceAndComments();
+  
+  // ファイルの終端に達した場合
+  if (stream_->IsAtEnd()) {
+    current_token_ = Token(TokenType::EOF_TOKEN, "", SourceLocation(stream_->Position(), stream_->Position()));
+    return;
   }
   
-  skipWhitespace();
+  // トークンの開始位置を記録
+  size_t start_pos = stream_->Position();
   
-  start_ = current_;
+  // 現在の文字を取得
+  char c = stream_->Current();
   
-  if (isAtEnd()) {
-    return Token(TokenType::END_OF_FILE, "", nullptr, createSourceLocation());
+  // 文字の種類に応じてトークンを識別
+  if (IsDigit(c)) {
+    ScanNumber();
+  } else if (IsIdentifierStart(c)) {
+    ScanIdentifier();
+  } else if (c == '"' || c == '\'') {
+    ScanString();
+  } else if (c == '`') {
+    ScanTemplate();
+  } else if (c == '/') {
+    // 正規表現リテラルかどうかを判断
+    if (IsRegExpStart()) {
+      ScanRegExp();
+    } else {
+      ScanOperator();
+    }
+  } else {
+    ScanOperator();
   }
   
-  char c = advance();
+  // 統計情報の更新
+  stats_->IncrementTokenCount();
   
-  // 識別子
-  if (isalpha(c) || c == '_' || c == '$') {
-    return scanIdentifier();
+  // メトリクス収集
+  if (metrics_) {
+    metrics_->RecordTokenProcessed(current_token_.Type());
   }
+}
+
+void Lexer::SkipWhitespaceAndComments() {
+  bool skipped = true;
   
-  // 数値
-  if (isdigit(c)) {
-    return scanNumber();
-  }
-  
-  // 特殊文字とトークンのマッピング
-  switch (c) {
-    // 一文字トークン
-    case '(': return Token(TokenType::LEFT_PAREN, "(", nullptr, createSourceLocation());
-    case ')': return Token(TokenType::RIGHT_PAREN, ")", nullptr, createSourceLocation());
-    case '{': return Token(TokenType::LEFT_BRACE, "{", nullptr, createSourceLocation());
-    case '}': return Token(TokenType::RIGHT_BRACE, "}", nullptr, createSourceLocation());
-    case '[': return Token(TokenType::LEFT_BRACKET, "[", nullptr, createSourceLocation());
-    case ']': return Token(TokenType::RIGHT_BRACKET, "]", nullptr, createSourceLocation());
-    case ';': return Token(TokenType::SEMICOLON, ";", nullptr, createSourceLocation());
-    case ',': return Token(TokenType::COMMA, ",", nullptr, createSourceLocation());
-    case '.': {
-      // 数値リテラル（.123形式）か、ドット演算子かを判断
-      if (isdigit(peek())) {
-        return scanNumber();
-      } 
-      // スプレッド演算子 (...)
-      else if (peek() == '.' && peekNext() == '.') {
-        advance(); // 2つ目の.
-        advance(); // 3つ目の.
-        return Token(TokenType::DOT_DOT_DOT, "...", nullptr, createSourceLocation());
-      }
-      // 通常のドット
-      return Token(TokenType::DOT, ".", nullptr, createSourceLocation());
+  while (skipped && !stream_->IsAtEnd()) {
+    skipped = false;
+    
+    // 空白文字のスキップ
+    while (!stream_->IsAtEnd() && IsWhitespace(stream_->Current())) {
+      stream_->Advance();
+      skipped = true;
     }
     
-    // 二文字トークン
-    case '!': 
-      return Token(
-        match('=') ? (match('=') ? TokenType::BANG_EQUAL_EQUAL : TokenType::BANG_EQUAL) : TokenType::BANG, 
-        source_.substr(start_, current_ - start_), 
-        nullptr,
-        createSourceLocation()
-      );
-    case '=': 
-      if (match('=')) {
-        if (match('=')) {
-          return Token(TokenType::EQUAL_EQUAL_EQUAL, "===", nullptr, createSourceLocation());
-        }
-        return Token(TokenType::EQUAL_EQUAL, "==", nullptr, createSourceLocation());
-      } else if (match('>')) {
-        return Token(TokenType::ARROW, "=>", nullptr, createSourceLocation());
+    // コメントのスキップ
+    if (!stream_->IsAtEnd() && stream_->Current() == '/') {
+      if (stream_->Peek(1) == '/') {
+        // 単一行コメント
+        SkipLineComment();
+        skipped = true;
+      } else if (stream_->Peek(1) == '*') {
+        // 複数行コメント
+        SkipBlockComment();
+        skipped = true;
       }
-      return Token(TokenType::EQUAL, "=", nullptr, createSourceLocation());
-    case '<': 
-      if (match('=')) {
-        return Token(TokenType::LESS_EQUAL, "<=", nullptr, createSourceLocation());
-      } else if (match('<')) {
-        if (match('=')) {
-          return Token(TokenType::LESS_LESS_EQUAL, "<<=", nullptr, createSourceLocation());
-        }
-        return Token(TokenType::LESS_LESS, "<<", nullptr, createSourceLocation());
+    }
+  }
+}
+
+void Lexer::SkipLineComment() {
+  // '//'をスキップ
+  stream_->Advance();
+  stream_->Advance();
+  
+  // 行末または入力終端までスキップ
+  while (!stream_->IsAtEnd() && !IsLineTerminator(stream_->Current())) {
+    stream_->Advance();
+  }
+}
+
+void Lexer::SkipBlockComment() {
+  // '/*'をスキップ
+  stream_->Advance();
+  stream_->Advance();
+  
+  // '*/'が見つかるまでスキップ
+  while (!stream_->IsAtEnd()) {
+    if (stream_->Current() == '*' && stream_->Peek(1) == '/') {
+      // '*/'をスキップ
+      stream_->Advance();
+      stream_->Advance();
+      return;
+    }
+    stream_->Advance();
+  }
+  
+  // 閉じられていないブロックコメントはエラー
+  if (logger_) {
+    logger_->Warn("閉じられていないブロックコメントがあります");
+  }
+}
+
+void Lexer::ScanNumber() {
+  size_t start_pos = stream_->Position();
+  bool is_float = false;
+  bool is_hex = false;
+  bool is_binary = false;
+  bool is_octal = false;
+  
+  // 0xなどの接頭辞をチェック
+  if (stream_->Current() == '0') {
+    stream_->Advance();
+    
+    if (!stream_->IsAtEnd()) {
+      char next = stream_->Current();
+      if (next == 'x' || next == 'X') {
+        // 16進数
+        is_hex = true;
+        stream_->Advance();
+        ScanHexDigits();
+      } else if (next == 'b' || next == 'B') {
+        // 2進数
+        is_binary = true;
+        stream_->Advance();
+        ScanBinaryDigits();
+      } else if (next == 'o' || next == 'O') {
+        // 8進数
+        is_octal = true;
+        stream_->Advance();
+        ScanOctalDigits();
+      } else if (IsDigit(next)) {
+        // 旧式の8進数または10進数
+        ScanDigits();
       }
-      return Token(TokenType::LESS, "<", nullptr, createSourceLocation());
-    case '>': 
-      if (match('=')) {
-        return Token(TokenType::GREATER_EQUAL, ">=", nullptr, createSourceLocation());
-      } else if (match('>')) {
-        if (match('>')) {
-          if (match('=')) {
-            return Token(TokenType::GREATER_GREATER_GREATER_EQUAL, ">>>=", nullptr, createSourceLocation());
+    }
+  } else {
+    // 通常の10進数
+    ScanDigits();
+  }
+  
+  // 小数部分
+  if (!is_hex && !is_binary && !is_octal && !stream_->IsAtEnd() && stream_->Current() == '.') {
+    is_float = true;
+    stream_->Advance();
+    ScanDigits();
+  }
+  
+  // 指数部分
+  if (!is_binary && !is_octal && !stream_->IsAtEnd() && 
+      (stream_->Current() == 'e' || stream_->Current() == 'E')) {
+    is_float = true;
+    stream_->Advance();
+    
+    // 符号
+    if (!stream_->IsAtEnd() && (stream_->Current() == '+' || stream_->Current() == '-')) {
+      stream_->Advance();
+    }
+    
+    // 指数の数字部分
+    if (!stream_->IsAtEnd() && IsDigit(stream_->Current())) {
+      ScanDigits();
+    } else {
+      // 指数の後に数字がない場合はエラー
+      if (logger_) {
+        logger_->Error("数値リテラルの指数部分に数字がありません");
+      }
+    }
+  }
+  
+  // BigInt
+  bool is_bigint = false;
+  if (!is_float && !stream_->IsAtEnd() && stream_->Current() == 'n') {
+    is_bigint = true;
+    stream_->Advance();
+  }
+  
+  // トークンの作成
+  size_t end_pos = stream_->Position();
+  std::string_view lexeme = stream_->Substring(start_pos, end_pos);
+  
+  TokenType type = is_float ? TokenType::FLOAT_LITERAL : 
+                   is_bigint ? TokenType::BIGINT_LITERAL : 
+                   TokenType::INTEGER_LITERAL;
+  
+  current_token_ = Token(type, std::string(lexeme), SourceLocation(start_pos, end_pos));
+}
+
+void Lexer::ScanDigits() {
+  while (!stream_->IsAtEnd() && IsDigit(stream_->Current())) {
+    stream_->Advance();
+  }
+}
+
+void Lexer::ScanHexDigits() {
+  while (!stream_->IsAtEnd() && IsHexDigit(stream_->Current())) {
+    stream_->Advance();
+  }
+}
+
+void Lexer::ScanBinaryDigits() {
+  while (!stream_->IsAtEnd() && IsBinaryDigit(stream_->Current())) {
+    stream_->Advance();
+  }
+}
+
+void Lexer::ScanOctalDigits() {
+  while (!stream_->IsAtEnd() && IsOctalDigit(stream_->Current())) {
+    stream_->Advance();
+  }
+}
+
+void Lexer::ScanIdentifier() {
+  size_t start_pos = stream_->Position();
+  
+  // 識別子の先頭文字
+  stream_->Advance();
+  
+  // 識別子の残りの部分
+  while (!stream_->IsAtEnd() && IsIdentifierPart(stream_->Current())) {
+    stream_->Advance();
+  }
+  
+  size_t end_pos = stream_->Position();
+  std::string_view lexeme = stream_->Substring(start_pos, end_pos);
+  std::string lexeme_str(lexeme);
+  
+  // キャッシュをチェック
+  auto cached_token = token_cache_->Get(lexeme_str);
+  if (cached_token) {
+    current_token_ = *cached_token;
+    current_token_.UpdateLocation(SourceLocation(start_pos, end_pos));
+    stats_->IncrementCacheHits();
+    return;
+  }
+  
+  // キーワードかどうかをチェック
+  TokenType type = lookup_table_->FindKeyword(lexeme_str);
+  
+  // トークンの作成
+  current_token_ = Token(type, lexeme_str, SourceLocation(start_pos, end_pos));
+  
+  // キャッシュに追加
+  token_cache_->Add(lexeme_str, current_token_);
+}
+
+void Lexer::ScanString() {
+  size_t start_pos = stream_->Position();
+  char quote = stream_->Current();
+  
+  // 開始引用符をスキップ
+  stream_->Advance();
+  
+  std::string value;
+  
+  while (!stream_->IsAtEnd() && stream_->Current() != quote) {
+    // エスケープシーケンス
+    if (stream_->Current() == '\\') {
+      stream_->Advance();
+      
+      if (stream_->IsAtEnd()) {
+        break;
+      }
+      
+      char escaped = stream_->Current();
+      switch (escaped) {
+        case 'n': value += '\n'; break;
+        case 'r': value += '\r'; break;
+        case 't': value += '\t'; break;
+        case 'b': value += '\b'; break;
+        case 'f': value += '\f'; break;
+        case 'v': value += '\v'; break;
+        case '0': value += '\0'; break;
+        case '\\': value += '\\'; break;
+        case '\'': value += '\''; break;
+        case '"': value += '"'; break;
+        case '`': value += '`'; break;
+        case 'u': {
+          // Unicode エスケープシーケンス
+          value += ScanUnicodeEscapeSequence();
+          continue;
+        }
+        case 'x': {
+          // 16進数エスケープシーケンス
+          stream_->Advance();
+          if (stream_->IsAtEnd() || !IsHexDigit(stream_->Current())) {
+            if (logger_) {
+              logger_->Error("不正な16進数エスケープシーケンスです");
+            }
+            value += 'x';
+          } else {
+            int hex_value = 0;
+            for (int i = 0; i < 2 && !stream_->IsAtEnd() && IsHexDigit(stream_->Current()); i++) {
+              hex_value = hex_value * 16 + HexDigitValue(stream_->Current());
+              stream_->Advance();
+            }
+            value += static_cast<char>(hex_value);
+            continue;
           }
-          return Token(TokenType::GREATER_GREATER_GREATER, ">>>", nullptr, createSourceLocation());
-        } else if (match('=')) {
-          return Token(TokenType::GREATER_GREATER_EQUAL, ">>=", nullptr, createSourceLocation());
+          break;
         }
-        return Token(TokenType::GREATER_GREATER, ">>", nullptr, createSourceLocation());
+        default:
+          // 認識できないエスケープシーケンスは文字をそのまま使用
+          value += escaped;
       }
-      return Token(TokenType::GREATER, ">", nullptr, createSourceLocation());
+    } else if (IsLineTerminator(stream_->Current())) {
+      // 文字列リテラル内の改行はエラー（テンプレートリテラルを除く）
+      if (logger_) {
+        logger_->Error("文字列リテラル内に改行があります");
+      }
+      break;
+    } else {
+      value += stream_->Current();
+    }
     
-    // 算術演算子
-    case '+': 
-      if (match('=')) {
-        return Token(TokenType::PLUS_EQUAL, "+=", nullptr, createSourceLocation());
-      } else if (match('+')) {
-        return Token(TokenType::PLUS_PLUS, "++", nullptr, createSourceLocation());
+    stream_->Advance();
+  }
+  
+  // 終了引用符をスキップ
+  if (!stream_->IsAtEnd() && stream_->Current() == quote) {
+    stream_->Advance();
+  } else {
+    // 閉じられていない文字列リテラルはエラー
+    if (logger_) {
+      logger_->Error("閉じられていない文字列リテラルがあります");
+    }
+  }
+  
+  size_t end_pos = stream_->Position();
+  
+  // トークンの作成
+  current_token_ = Token(TokenType::STRING_LITERAL, value, SourceLocation(start_pos, end_pos));
+}
+
+std::string Lexer::ScanUnicodeEscapeSequence() {
+  stream_->Advance(); // 'u'をスキップ
+  
+  if (stream_->IsAtEnd()) {
+    return "u";
+  }
+  
+  // \u{XXXXXX} 形式のチェック
+  if (stream_->Current() == '{') {
+    stream_->Advance();
+    
+    int code_point = 0;
+    int digit_count = 0;
+    
+    while (!stream_->IsAtEnd() && stream_->Current() != '}' && digit_count < 6) {
+      if (!IsHexDigit(stream_->Current())) {
+        break;
       }
-      return Token(TokenType::PLUS, "+", nullptr, createSourceLocation());
-    case '-': 
-      if (match('=')) {
-        return Token(TokenType::MINUS_EQUAL, "-=", nullptr, createSourceLocation());
-      } else if (match('-')) {
-        return Token(TokenType::MINUS_MINUS, "--", nullptr, createSourceLocation());
+      
+      code_point = code_point * 16 + HexDigitValue(stream_->Current());
+      digit_count++;
+      stream_->Advance();
+    }
+    
+    if (stream_->IsAtEnd() || stream_->Current() != '}') {
+      if (logger_) {
+        logger_->Error("不正なUnicodeエスケープシーケンスです");
       }
-      return Token(TokenType::MINUS, "-", nullptr, createSourceLocation());
-    case '*': 
-      if (match('=')) {
-        return Token(TokenType::STAR_EQUAL, "*=", nullptr, createSourceLocation());
-      } else if (match('*')) {
-        if (match('=')) {
-          return Token(TokenType::STAR_STAR_EQUAL, "**=", nullptr, createSourceLocation());
+      return "u{";
+    }
+    
+    stream_->Advance(); // '}'をスキップ
+    
+    // コードポイントからUTF-8文字列に変換
+    return CodePointToUTF8(code_point);
+  } else {
+    // \uXXXX 形式
+    int code_point = 0;
+    
+    for (int i = 0; i < 4; i++) {
+      if (stream_->IsAtEnd() || !IsHexDigit(stream_->Current())) {
+        if (logger_) {
+          logger_->Error("不正なUnicodeエスケープシーケンスです");
         }
-        return Token(TokenType::STAR_STAR, "**", nullptr, createSourceLocation()); // 指数演算子
+        return "u";
       }
-      return Token(TokenType::STAR, "*", nullptr, createSourceLocation());
-    case '/': 
-      // コメント
-      if (match('/')) {
-        // 行コメント
-        while (peek() != '\n' && !isAtEnd()) {
-          advance();
+      
+      code_point = code_point * 16 + HexDigitValue(stream_->Current());
+      stream_->Advance();
+    }
+    
+    // コードポイントからUTF-8文字列に変換
+    return CodePointToUTF8(code_point);
+  }
+}
+
+std::string Lexer::CodePointToUTF8(int code_point) {
+  std::string result;
+  
+  if (code_point <= 0x7F) {
+    // 1バイト (0xxxxxxx)
+    result += static_cast<char>(code_point);
+  } else if (code_point <= 0x7FF) {
+    // 2バイト (110xxxxx 10xxxxxx)
+    result += static_cast<char>(0xC0 | (code_point >> 6));
+    result += static_cast<char>(0x80 | (code_point & 0x3F));
+  } else if (code_point <= 0xFFFF) {
+    // 3バイト (1110xxxx 10xxxxxx 10xxxxxx)
+    result += static_cast<char>(0xE0 | (code_point >> 12));
+    result += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+    result += static_cast<char>(0x80 | (code_point & 0x3F));
+  } else if (code_point <= 0x10FFFF) {
+    // 4バイト (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+    result += static_cast<char>(0xF0 | (code_point >> 18));
+    result += static_cast<char>(0x80 | ((code_point >> 12) & 0x3F));
+    result += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+    result += static_cast<char>(0x80 | (code_point & 0x3F));
+  } else {
+    // 無効なコードポイント
+    if (logger_) {
+      logger_->Error("無効なUnicodeコードポイントです");
+    }
+    result = "�"; // 置換文字
+  }
+  
+  return result;
+}
+
+void Lexer::ScanTemplate() {
+  size_t start_pos = stream_->Position();
+  
+  // 開始バッククォートをスキップ
+  stream_->Advance();
+  
+  std::string value;
+  bool is_head = true;
+  bool is_tail = true;
+  
+  while (!stream_->IsAtEnd() && stream_->Current() != '`') {
+    if (stream_->Current() == '$' && stream_->Peek(1) == '{') {
+      // テンプレート式の開始
+      is_tail = false;
+      stream_->Advance(); // '$'をスキップ
+      stream_->Advance(); // '{'をスキップ
+      break;
+    } else if (stream_->Current() == '\\') {
+      // エスケープシーケンス
+      stream_->Advance();
+      
+      if (stream_->IsAtEnd()) {
+        break;
+      }
+      
+      char escaped = stream_->Current();
+      switch (escaped) {
+        case 'n': value += '\n'; break;
+        case 'r': value += '\r'; break;
+        case 't': value += '\t'; break;
+        case 'b': value += '\b'; break;
+        case 'f': value += '\f'; break;
+        case 'v': value += '\v'; break;
+        case '0': value += '\0'; break;
+        case '\\': value += '\\'; break;
+        case '\'': value += '\''; break;
+        case '"': value += '"'; break;
+        case '`': value += '`'; break;
+        case '$': value += '$'; break;
+        case 'u': {
+          // Unicode エスケープシーケンス
+          value += ScanUnicodeEscapeSequence();
+          continue;
         }
-        return scanToken(); // コメントはスキップして次のトークンへ
-      } else if (match('*')) {
-        // ブロックコメント
-        while (!(peek() == '*' && peekNext() == '/') && !isAtEnd()) {
-          if (peek() == '\n') {
-            line_++;
-            column_ = 1;
+        case 'x': {
+          // 16進数エスケープシーケンス
+          stream_->Advance();
+          if (stream_->IsAtEnd() || !IsHexDigit(stream_->Current())) {
+            if (logger_) {
+              logger_->Error("不正な16進数エスケープシーケンスです");
+            }
+            value += 'x';
+          } else {
+            int hex_value = 0;
+            for (int i = 0; i < 2 && !stream_->IsAtEnd() && IsHexDigit(stream_->Current()); i++) {
+              hex_value = hex_value * 16 + HexDigitValue(stream_->Current());
+              stream_->Advance();
+            }
+            value += static_cast<char>(hex_value);
+            continue;
           }
-          advance();
+          break;
         }
-        
-        if (isAtEnd()) {
-          return errorToken("終了していないブロックコメント", createSourceLocation());
-        }
-        
-        // '*/'を消費
-        advance(); // *
-        advance(); // /
-        
-        return scanToken(); // コメントはスキップして次のトークンへ
-      } else if (match('=')) {
-        return Token(TokenType::SLASH_EQUAL, "/=", nullptr, createSourceLocation());
+        default:
+          // テンプレートリテラルでは、認識できないエスケープシーケンスも許可される
+          value += escaped;
       }
-      // 正規表現リテラルの開始かもしれない
-      // パーサーコンテキストに依存するので、実際の実装ではもっと複雑になる
-      return Token(TokenType::SLASH, "/", nullptr, createSourceLocation());
-    case '%': 
-      if (match('=')) {
-        return Token(TokenType::PERCENT_EQUAL, "%=", nullptr, createSourceLocation());
-      }
-      return Token(TokenType::PERCENT, "%", nullptr, createSourceLocation());
+    } else {
+      value += stream_->Current();
+    }
     
-    // ビット演算子
-    case '&': 
-      if (match('=')) {
-        return Token(TokenType::AMPERSAND_EQUAL, "&=", nullptr, createSourceLocation());
-      } else if (match('&')) {
-        if (match('=')) {
-          return Token(TokenType::AMPERSAND_AMPERSAND_EQUAL, "&&=", nullptr, createSourceLocation());
-        }
-        return Token(TokenType::AMPERSAND_AMPERSAND, "&&", nullptr, createSourceLocation());
-      }
-      return Token(TokenType::AMPERSAND, "&", nullptr, createSourceLocation());
-    case '|': 
-      if (match('=')) {
-        return Token(TokenType::PIPE_EQUAL, "|=", nullptr, createSourceLocation());
-      } else if (match('|')) {
-        if (match('=')) {
-          return Token(TokenType::PIPE_PIPE_EQUAL, "||=", nullptr, createSourceLocation());
-        }
-        return Token(TokenType::PIPE_PIPE, "||", nullptr, createSourceLocation());
-      }
-      return Token(TokenType::PIPE, "|", nullptr, createSourceLocation());
-    case '^': 
-      if (match('=')) {
-        return Token(TokenType::CARET_EQUAL, "^=", nullptr, createSourceLocation());
-      }
-      return Token(TokenType::CARET, "^", nullptr, createSourceLocation());
-    case '~': 
-      return Token(TokenType::TILDE, "~", nullptr, createSourceLocation());
-    
-    // 文字列リテラル
-    case '"': return scanString();
-    case '\'': return scanString();
-    
-    // テンプレートリテラル
-    case '`': return scanTemplate();
-    
-    // nullishコアレシング演算子
-    case '?': 
-      if (match('?')) {
-        if (match('=')) {
-          return Token(TokenType::QUESTION_QUESTION_EQUAL, "??=", nullptr, createSourceLocation());
-        }
-        return Token(TokenType::QUESTION_QUESTION, "??", nullptr, createSourceLocation());
-      } else if (match('.')) {
-        // オプショナルチェーン
-        return Token(TokenType::QUESTION_DOT, "?.", nullptr, createSourceLocation());
-      }
-      return Token(TokenType::QUESTION, "?", nullptr, createSourceLocation());
-    
-    case ':': return Token(TokenType::COLON, ":", nullptr, createSourceLocation());
+    stream_->Advance();
+  }
+  
+  // 終了バッククォートをスキップ
+  if (!stream_->IsAtEnd() && stream_->Current() == '`') {
+    stream_->Advance();
+  } else if (is_tail) {
+    // 閉じられていないテンプレートリテラルはエラー
+    if (logger_) {
+      logger_->Error("閉じられていないテンプレートリテラルがあります");
+    }
+  }
+  
+  size_t end_pos = stream_->Position();
+  
+  // トークンの作成
+  TokenType type;
+  if (is_head && is_tail) {
+    type = TokenType::TEMPLATE_LITERAL;
+  } else if (is_head) {
+    type = TokenType::TEMPLATE_HEAD;
+  } else if (is_tail) {
+    type = TokenType::TEMPLATE_TAIL;
+  } else {
+    type = TokenType::TEMPLATE_MIDDLE;
+  }
+  
+  current_token_ = Token(type, value, SourceLocation(start_pos, end_pos));
+}
+
+bool Lexer::IsRegExpStart() const {
+  // 正規表現リテラルの開始かどうかを判断するヒューリスティック
+  // 例: 演算子の後や制御構文の後は正規表現リテラルの可能性が高い
+  
+  // 現在のトークンの種類に基づいて判断
+  switch (current_token_.Type()) {
+    case TokenType::IDENTIFIER:
+    case TokenType::INTEGER_LITERAL:
+    case TokenType::FLOAT_LITERAL:
+    case TokenType::STRING_LITERAL:
+    case TokenType::TEMPLATE_LITERAL:
+    case TokenType::TEMPLATE_TAIL:
+    case TokenType::REGEXP_LITERAL:
+    case TokenType::TRUE:
+    case TokenType::FALSE:
+    case TokenType::NULL_LITERAL:
+    case TokenType::THIS:
+    case TokenType::SUPER:
+    case TokenType::RIGHT_PAREN:
+    case TokenType::RIGHT_BRACKET:
+    case TokenType::RIGHT_BRACE:
+    case TokenType::INCREMENT:
+    case TokenType::DECREMENT:
+      // これらの後に/が来た場合は除算演算子
+      return false;
     
     default:
-      return errorToken("予期しない文字", createSourceLocation());
+      // それ以外の場合は正規表現リテラルの可能性
+      return true;
   }
 }
 
-Token Lexer::peekToken() {
-  if (savedTokens_.empty()) {
-    savedTokens_.push_back(scanToken());
+void Lexer::ScanRegExp() {
+  size_t start_pos = stream_->Position();
+  
+  // '/'をスキップ
+  stream_->Advance();
+  
+  std::string pattern;
+  
+  // パターン部分の解析
+  bool in_character_class = false;
+  
+  while (!stream_->IsAtEnd() && 
+         (stream_->Current() != '/' || in_character_class)) {
+    
+    if (stream_->Current() == '\\') {
+      // エスケープシーケンス処理
+      pattern += stream_->Current();
+      stream_->Advance();
+      
+      if (stream_->IsAtEnd()) {
+        break;
+      }
+      
+      pattern += stream_->Current();
+    } else if (stream_->Current() == '[') {
+      in_character_class = true;
+      pattern += stream_->Current();
+    } else if (stream_->Current() == ']') {
+      in_character_class = false;
+      pattern += stream_->Current();
+    } else if (IsLineTerminator(stream_->Current())) {
+      // 正規表現内の改行はエラー
+      if (logger_) {
+        logger_->Error("正規表現リテラル内に改行が含まれています");
+      }
+      break;
+    } else {
+      pattern += stream_->Current();
+    }
+    
+    stream_->Advance();
   }
-  return savedTokens_.front();
+  
+  // 終了'/'の処理
+  if (!stream_->IsAtEnd() && stream_->Current() == '/') {
+    stream_->Advance();
+  } else {
+    if (logger_) {
+      logger_->Error("正規表現リテラルが閉じられていません");
+    }
+  }
+  
+  // フラグ部分の解析
+  std::string flags;
+  
+  while (!stream_->IsAtEnd() && IsIdentifierPart(stream_->Current())) {
+    flags += stream_->Current();
+    stream_->Advance();
+  }
+  
+  size_t end_pos = stream_->Position();
+  
+  // トークンの生成
+  current_token_ = Token(TokenType::REGEXP_LITERAL, pattern, SourceLocation(start_pos, end_pos));
+  current_token_.SetFlags(flags);
 }
 
-Token Lexer::peekToken(int n) {
-  while (static_cast<int>(savedTokens_.size()) < n) {
-    savedTokens_.push_back(scanToken());
-  }
-  return savedTokens_[n - 1];
-}
-
-bool Lexer::match(TokenType type) {
-  if (peekToken().type == type) {
-    scanToken(); // トークンを消費
-    return true;
-  }
-  return false;
-}
-
-std::optional<Token> Lexer::consume(TokenType type) {
-  if (peekToken().type == type) {
-    return scanToken();
-  }
-  return std::nullopt;
-}
-
-Token Lexer::expect(TokenType type, const std::string& message) {
-  if (peekToken().type == type) {
-    return scanToken();
-  }
-  throw ParserError(message, getCurrentLocation());
-}
-
-std::vector<Token> Lexer::scanAllTokens() {
-  std::vector<Token> tokens;
-  while (true) {
-    Token token = scanToken();
-    tokens.push_back(token);
-    if (token.type == TokenType::END_OF_FILE) {
+void Lexer::ScanOperator() {
+  size_t start_pos = stream_->Position();
+  char c = stream_->Current();
+  
+  stream_->Advance();
+  TokenType type;
+  
+  switch (c) {
+    case '{': type = TokenType::LEFT_BRACE; break;
+    case '}': type = TokenType::RIGHT_BRACE; break;
+    case '(': type = TokenType::LEFT_PAREN; break;
+    case ')': type = TokenType::RIGHT_PAREN; break;
+    case '[': type = TokenType::LEFT_BRACKET; break;
+    case ']': type = TokenType::RIGHT_BRACKET; break;
+    case '.': {
+      // スプレッド演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '.' && 
+          !stream_->IsAtEnd(1) && stream_->Peek(1) == '.') {
+        stream_->Advance();
+        stream_->Advance();
+        type = TokenType::SPREAD;
+      } else {
+        type = TokenType::DOT;
+      }
       break;
     }
-  }
-  return tokens;
-}
-
-int Lexer::getCurrentLine() const {
-  return line_;
-}
-
-int Lexer::getCurrentColumn() const {
-  return column_;
-}
-
-SourceLocation Lexer::getCurrentLocation() const {
-  return SourceLocation(filename_, line_, column_ - (current_ - start_));
-}
-
-Token Lexer::errorToken(const std::string& message, const SourceLocation& location) {
-  return Token(TokenType::ERROR, message, nullptr, location);
-}
-
-bool Lexer::isAtEnd() const {
-  return current_ >= source_.length();
-}
-
-char Lexer::advance() {
-  char c = source_[current_++];
-  if (c == '\n') {
-    line_++;
-    column_ = 1;
-  } else {
-    column_++;
-  }
-  return c;
-}
-
-char Lexer::peek() const {
-  if (isAtEnd()) return '\0';
-  return source_[current_];
-}
-
-char Lexer::peekNext() const {
-  if (current_ + 1 >= source_.length()) return '\0';
-  return source_[current_ + 1];
-}
-
-bool Lexer::match(char expected) {
-  if (isAtEnd()) return false;
-  if (source_[current_] != expected) return false;
-  
-  current_++;
-  column_++;
-  return true;
-}
-
-SourceLocation Lexer::createSourceLocation() const {
-  return SourceLocation(filename_, line_, column_ - (current_ - start_));
-}
-Token Lexer::scanString() {
-  // 開始の引用符を保存（'"'または''''）
-  char quoteType = source_[start_];
-  
-  while (peek() != quoteType && !isAtEnd()) {
-    if (peek() == '\n') {
-      line_++;
-      column_ = 1;
-    }
-    
-    // エスケープシーケンス
-    if (peek() == '\\') {
-      advance(); // バックスラッシュをスキップ
-    }
-    
-    advance();
-  }
-  
-  if (isAtEnd()) {
-    return errorToken("終了していない文字列", createSourceLocation());
-  }
-  
-  // 終了の引用符
-  advance();
-  
-  // 引用符を除いた文字列の値を取得
-  std::string value = source_.substr(start_ + 1, current_ - start_ - 2);
-  
-  // エスケープシーケンスを処理
-  std::string processedValue;
-  processedValue.reserve(value.length());
-  
-  for (size_t i = 0; i < value.length(); ++i) {
-    if (value[i] == '\\' && i + 1 < value.length()) {
-      switch (value[i + 1]) {
-        case 'n': processedValue += '\n'; break;
-        case 'r': processedValue += '\r'; break;
-        case 't': processedValue += '\t'; break;
-        case 'b': processedValue += '\b'; break;
-        case 'f': processedValue += '\f'; break;
-        case 'v': processedValue += '\v'; break;
-        case '0': processedValue += '\0'; break;
-        case '\'': processedValue += '\''; break;
-        case '\"': processedValue += '\"'; break;
-        case '\\': processedValue += '\\'; break;
-        case 'x': 
-          if (i + 3 < value.length() && isxdigit(value[i + 2]) && isxdigit(value[i + 3])) {
-            std::string hex = value.substr(i + 2, 2);
-            char ch = static_cast<char>(std::stoi(hex, nullptr, 16));
-            processedValue += ch;
-            i += 3;
-          } else {
-            processedValue += 'x';
-          }
-          break;
-        case 'u':
-          if (i + 5 < value.length() && value[i + 2] == '{' && isxdigit(value[i + 3]) && 
-              isxdigit(value[i + 4]) && isxdigit(value[i + 5]) && value[i + 6] == '}') {
-            // Unicode コードポイント形式 \u{XXX}
-            std::string hex = value.substr(i + 3, 3);
-            uint32_t codePoint = std::stoul(hex, nullptr, 16);
-            
-            // UTF-8 エンコーディング
-            if (codePoint <= 0x7F) {
-              // 1バイト文字
-              processedValue += static_cast<char>(codePoint);
-            } else if (codePoint <= 0x7FF) {
-              // 2バイト文字
-              processedValue += static_cast<char>(0xC0 | (codePoint >> 6));
-              processedValue += static_cast<char>(0x80 | (codePoint & 0x3F));
-            } else if (codePoint <= 0xFFFF) {
-              // 3バイト文字
-              processedValue += static_cast<char>(0xE0 | (codePoint >> 12));
-              processedValue += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
-              processedValue += static_cast<char>(0x80 | (codePoint & 0x3F));
-            } else if (codePoint <= 0x10FFFF) {
-              // 4バイト文字
-              processedValue += static_cast<char>(0xF0 | (codePoint >> 18));
-              processedValue += static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
-              processedValue += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
-              processedValue += static_cast<char>(0x80 | (codePoint & 0x3F));
-            }
-            i += 6;
-          } else if (i + 5 < value.length() && isxdigit(value[i + 2]) && isxdigit(value[i + 3]) && 
-                     isxdigit(value[i + 4]) && isxdigit(value[i + 5])) {
-            // 標準の \uXXXX 形式
-            std::string hex = value.substr(i + 2, 4);
-            uint16_t codeUnit = static_cast<uint16_t>(std::stoul(hex, nullptr, 16));
-            
-            // サロゲートペアの処理
-            if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF && 
-                i + 7 < value.length() && value[i + 6] == '\\' && value[i + 7] == 'u' &&
-                i + 11 < value.length()) {
-              // 上位サロゲート検出、下位サロゲートを確認
-              std::string lowHex = value.substr(i + 8, 4);
-              uint16_t lowSurrogate = static_cast<uint16_t>(std::stoul(lowHex, nullptr, 16));
-              
-              if (lowSurrogate >= 0xDC00 && lowSurrogate <= 0xDFFF) {
-                // 有効なサロゲートペア
-                uint32_t codePoint = 0x10000 + (((codeUnit - 0xD800) << 10) | (lowSurrogate - 0xDC00));
-                
-                // UTF-8 エンコーディング (4バイト)
-                processedValue += static_cast<char>(0xF0 | (codePoint >> 18));
-                processedValue += static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F));
-                processedValue += static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F));
-                processedValue += static_cast<char>(0x80 | (codePoint & 0x3F));
-                
-                i += 11; // サロゲートペア全体をスキップ
-              } else {
-                // 無効なサロゲートペア、単独の上位サロゲートとして処理
-                // ECMAScript仕様に従い、置換文字U+FFFDを使用
-                processedValue += "\xEF\xBF\xBD"; // UTF-8でのU+FFFD
-                i += 5;
-              }
-            } else {
-              // 通常のUnicode文字またはサロゲートではない
-              if (codeUnit >= 0xD800 && codeUnit <= 0xDFFF) {
-                // 孤立したサロゲート、置換文字を使用
-                processedValue += "\xEF\xBF\xBD"; // UTF-8でのU+FFFD
-              } else if (codeUnit <= 0x7F) {
-                // 1バイト文字
-                processedValue += static_cast<char>(codeUnit);
-              } else if (codeUnit <= 0x7FF) {
-                // 2バイト文字
-                processedValue += static_cast<char>(0xC0 | (codeUnit >> 6));
-                processedValue += static_cast<char>(0x80 | (codeUnit & 0x3F));
-              } else {
-                // 3バイト文字
-                processedValue += static_cast<char>(0xE0 | (codeUnit >> 12));
-                processedValue += static_cast<char>(0x80 | ((codeUnit >> 6) & 0x3F));
-                processedValue += static_cast<char>(0x80 | (codeUnit & 0x3F));
-              }
-              i += 5;
-            }
-          } else {
-            // 不正なUnicodeエスケープシーケンス
-            processedValue += 'u';
-          }
-          break;
-        default:
-          // ECMAScript仕様に従い、バックスラッシュの後の文字をそのまま出力
-          processedValue += value[i + 1];
-      }
-      i++; // エスケープシーケンスの2文字目をスキップ
-    } else {
-      processedValue += value[i];
-    }
-  }
-  
-  // 文字列リテラルの末尾にnがある場合、BigIntリテラルとして処理
-  if (peek() == 'n') {
-    advance(); // 'n'を消費
-    return Token(TokenType::BIGINT, source_.substr(start_, current_ - start_), processedValue, createSourceLocation());
-  }
-  
-  return Token(TokenType::STRING, source_.substr(start_, current_ - start_), processedValue, createSourceLocation());
-}
-
-Token Lexer::scanNumber() {
-  bool isFloat = false;
-  bool isHex = false;
-  bool isBinary = false;
-  bool isOctal = false;
-  bool isExponential = false;
-  bool isBigInt = false;
-  
-  // 0xで始まる16進数
-  if (source_[start_] == '0' && (peek() == 'x' || peek() == 'X')) {
-    isHex = true;
-    advance(); // 'x'をスキップ
-    
-    // 16進数の桁をスキャン
-    while (isxdigit(peek())) {
-      advance();
-    }
-    
-    // 16進数の後に不正な文字がある場合
-    if (isalpha(peek()) || peek() == '_' || peek() == '$') {
-      while (isalnum(peek()) || peek() == '_' || peek() == '$') {
-        advance();
-      }
-      return errorToken("不正な16進数リテラル", createSourceLocation());
-    }
-  }
-  // 0bで始まる2進数
-  else if (source_[start_] == '0' && (peek() == 'b' || peek() == 'B')) {
-    isBinary = true;
-    advance(); // 'b'をスキップ
-    
-    // 2進数の桁をスキャン
-    while (peek() == '0' || peek() == '1') {
-      advance();
-    }
-    
-    // 2進数の後に不正な文字がある場合
-    if (isalnum(peek()) || peek() == '_' || peek() == '$') {
-      while (isalnum(peek()) || peek() == '_' || peek() == '$') {
-        advance();
-      }
-      return errorToken("不正な2進数リテラル", createSourceLocation());
-    }
-  }
-  // 0oで始まる8進数
-  else if (source_[start_] == '0' && (peek() == 'o' || peek() == 'O')) {
-    isOctal = true;
-    advance(); // 'o'をスキップ
-    
-    // 8進数の桁をスキャン
-    while (peek() >= '0' && peek() <= '7') {
-      advance();
-    }
-    
-    // 8進数の後に不正な文字がある場合
-    if (isalnum(peek()) || peek() == '_' || peek() == '$') {
-      while (isalnum(peek()) || peek() == '_' || peek() == '$') {
-        advance();
-      }
-      return errorToken("不正な8進数リテラル", createSourceLocation());
-    }
-  }
-  // 通常の10進数
-  else {
-    // 整数部分
-    while (isdigit(peek())) {
-      advance();
-    }
-    
-    // 数値セパレータ（ES2021）のサポート
-    if (peek() == '_') {
-      while (peek() == '_') {
-        advance();
-        if (!isdigit(peek())) {
-          return errorToken("数値セパレータの後には数字が必要です", createSourceLocation());
-        }
-        while (isdigit(peek())) {
-          advance();
-        }
-      }
-    }
-    
-    // 小数部分
-    if (peek() == '.' && (isdigit(peekNext()) || peekNext() == '_')) {
-      isFloat = true;
-      advance(); // '.'をスキップ
-      
-      while (isdigit(peek()) || peek() == '_') {
-        if (peek() == '_') {
-          advance();
-          if (!isdigit(peek())) {
-            return errorToken("数値セパレータの後には数字が必要です", createSourceLocation());
-          }
-        } else {
-          advance();
-        }
-      }
-    }
-    
-    // 指数部分
-    if (peek() == 'e' || peek() == 'E') {
-      isExponential = true;
-      isFloat = true; // 指数表記は浮動小数点として扱う
-      advance(); // 'e'または'E'をスキップ
-      
-      // 符号
-      if (peek() == '-' || peek() == '+') {
-        advance();
-      }
-      
-      // 指数の桁
-      if (!isdigit(peek())) {
-        return errorToken("不正な指数表記", createSourceLocation());
-      }
-      
-      while (isdigit(peek()) || peek() == '_') {
-        if (peek() == '_') {
-          advance();
-          if (!isdigit(peek())) {
-            return errorToken("数値セパレータの後には数字が必要です", createSourceLocation());
-          }
-        } else {
-          advance();
-        }
-      }
-    }
-  }
-  
-  // BigInt接尾辞
-  if (peek() == 'n' && !isFloat && !isExponential) {
-    isBigInt = true;
-    advance(); // 'n'をスキップ
-  }
-  
-  // 数値の後に不正な識別子文字がある場合
-  if (isalpha(peek()) || peek() == '_' || peek() == '$') {
-    while (isalnum(peek()) || peek() == '_' || peek() == '$') {
-      advance();
-    }
-    return errorToken("不正な数値リテラル", createSourceLocation());
-  }
-  
-  std::string lexeme = source_.substr(start_, current_ - start_);
-  
-  try {
-    // 数値セパレータを除去
-    std::string cleanLexeme = lexeme;
-    cleanLexeme.erase(std::remove(cleanLexeme.begin(), cleanLexeme.end(), '_'), cleanLexeme.end());
-    
-    if (isBigInt) {
-      // BigIntの処理
-      std::string bigintValue = cleanLexeme.substr(0, cleanLexeme.length() - 1);
-      
-      if (isHex) {
-        // 16進数BigInt
-        size_t pos = 2; // "0x"をスキップ
-        std::string hexValue = bigintValue.substr(pos);
-        return Token(TokenType::BIGINT, lexeme, hexValue, createSourceLocation());
-      } else if (isBinary) {
-        // 2進数BigInt
-        size_t pos = 2; // "0b"をスキップ
-        std::string binValue = bigintValue.substr(pos);
-        return Token(TokenType::BIGINT, lexeme, binValue, createSourceLocation());
-      } else if (isOctal) {
-        // 8進数BigInt
-        size_t pos = 2; // "0o"をスキップ
-        std::string octValue = bigintValue.substr(pos);
-        return Token(TokenType::BIGINT, lexeme, octValue, createSourceLocation());
+    case ';': type = TokenType::SEMICOLON; break;
+    case ',': type = TokenType::COMMA; break;
+    case ':': type = TokenType::COLON; break;
+    case '?': {
+      // オプショナルチェーンとナリッシュコアレッシングの検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '.') {
+        stream_->Advance();
+        type = TokenType::OPTIONAL_CHAIN;
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '?') {
+        stream_->Advance();
+        type = TokenType::NULLISH_COALESCING;
       } else {
-        // 10進数BigInt
-        return Token(TokenType::BIGINT, lexeme, bigintValue, createSourceLocation());
+        type = TokenType::QUESTION;
       }
-    } else if (isHex) {
-      // 16進数の処理
-      size_t pos = 2; // "0x"をスキップ
-      std::string hexValue = cleanLexeme.substr(pos);
-      long long value = std::stoll(hexValue, nullptr, 16);
-      return Token(TokenType::NUMBER, lexeme, static_cast<double>(value), createSourceLocation());
-    } else if (isBinary) {
-      // 2進数の処理
-      size_t pos = 2; // "0b"をスキップ
-      std::string binValue = cleanLexeme.substr(pos);
-      long long value = std::stoll(binValue, nullptr, 2);
-      return Token(TokenType::NUMBER, lexeme, static_cast<double>(value), createSourceLocation());
-    } else if (isOctal) {
-      // 8進数の処理
-      size_t pos = 2; // "0o"をスキップ
-      std::string octValue = cleanLexeme.substr(pos);
-      long long value = std::stoll(octValue, nullptr, 8);
-      return Token(TokenType::NUMBER, lexeme, static_cast<double>(value), createSourceLocation());
-    } else {
-      // 10進数の処理
-      double value = std::stod(cleanLexeme);
-      return Token(TokenType::NUMBER, lexeme, value, createSourceLocation());
+      break;
     }
-  } catch (const std::exception& e) {
-    return errorToken("不正な数値: " + std::string(e.what()), createSourceLocation());
-  }
-}
-
-Token Lexer::scanIdentifier() {
-  while (isalnum(peek()) || peek() == '_' || peek() == '$') {
-    advance();
-  }
-  
-  std::string lexeme = source_.substr(start_, current_ - start_);
-  
-  // キーワードかどうかチェック
-  auto it = keywords_.find(lexeme);
-  TokenType type = (it != keywords_.end()) ? it->second : TokenType::IDENTIFIER;
-  
-  // 予約語の特別処理
-  if (type == TokenType::TRUE) {
-    return Token(type, lexeme, true, createSourceLocation());
-  } else if (type == TokenType::FALSE) {
-    return Token(type, lexeme, false, createSourceLocation());
-  } else if (type == TokenType::NULL_TOKEN) {
-    return Token(type, lexeme, nullptr, createSourceLocation());
-  } else if (type == TokenType::UNDEFINED) {
-    return Token(type, lexeme, nullptr, createSourceLocation());
-  }
-  
-  return Token(type, lexeme, lexeme, createSourceLocation());
-}
-Token Lexer::scanTemplate() {
-  bool isTaggedTemplate = false;
-  // パーサーの状態からタグ付きテンプレートかどうかを判断
-  if (previousToken_ && previousToken_->type == TokenType::IDENTIFIER) {
-    isTaggedTemplate = true;
-  }
-  
-  std::string templateContent;
-  bool inEscapeSequence = false;
-  
-  while (peek() != '`' && !isAtEnd()) {
-    if (peek() == '\n') {
-      line_++;
-      column_ = 1;
-      templateContent += peek();
-      advance();
-    } else if (peek() == '$' && peekNext() == '{' && !inEscapeSequence) {
-      // テンプレート式の開始
-      advance(); // '$'をスキップ
-      advance(); // '{'をスキップ
-      
-      // テンプレートの部分文字列を取得（開始の'`'と'${'を除く）
-      std::string part = source_.substr(start_ + 1, current_ - start_ - 3);
-      
-      // エスケープシーケンスを処理
-      std::string processedPart = processEscapeSequences(part);
-      
-      TokenType templateType = isTaggedTemplate ? TokenType::TAGGED_TEMPLATE_HEAD : TokenType::TEMPLATE_HEAD;
-      return Token(templateType, source_.substr(start_, current_ - start_), processedPart, createSourceLocation());
-    } else if (peek() == '\\' && !inEscapeSequence) {
-      // エスケープシーケンスの開始
-      inEscapeSequence = true;
-      templateContent += peek();
-      advance();
-      
-      if (peek() == 'u') {
-        // Unicode エスケープシーケンス (例: \u00A9)
-        templateContent += peek();
-        advance(); // 'u'をスキップ
-        
-        // 4桁の16進数を処理
-        for (int i = 0; i < 4 && !isAtEnd() && isHexDigit(peek()); i++) {
-          templateContent += peek();
-          advance();
-        }
-      } else if (peek() == 'x') {
-        // 16進数エスケープシーケンス (例: \x41)
-        templateContent += peek();
-        advance(); // 'x'をスキップ
-        
-        // 2桁の16進数を処理
-        for (int i = 0; i < 2 && !isAtEnd() && isHexDigit(peek()); i++) {
-          templateContent += peek();
-          advance();
-        }
-      } else if (peek() == 'u' && peekNext() == '{') {
-        // 拡張Unicode エスケープシーケンス (例: \u{1F600})
-        templateContent += peek();
-        advance(); // 'u'をスキップ
-        templateContent += peek();
-        advance(); // '{'をスキップ
-        
-        // 1〜6桁の16進数を処理
-        while (!isAtEnd() && peek() != '}' && isHexDigit(peek())) {
-          templateContent += peek();
-          advance();
-        }
-        
-        if (peek() == '}') {
-          templateContent += peek();
-          advance(); // '}'をスキップ
+    case '~': type = TokenType::BITWISE_NOT; break;
+    case '!': {
+      // 否定演算子と不等価演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::STRICT_NOT_EQUAL;
+        } else {
+          type = TokenType::NOT_EQUAL;
         }
       } else {
-        // その他のエスケープシーケンス (例: \n, \t, \\, \', \", \`)
-        templateContent += peek();
-        advance();
+        type = TokenType::LOGICAL_NOT;
       }
-      
-      inEscapeSequence = false;
-    } else {
-      templateContent += peek();
-      advance();
+      break;
     }
-  }
-  
-  if (isAtEnd()) {
-    return errorToken("終了していないテンプレートリテラル", createSourceLocation());
-  }
-  // 終了のバッククォート
-  advance();
-  
-  // 値を取得（開始と終了の'`'を除く）
-  std::string value = source_.substr(start_ + 1, current_ - start_ - 2);
-  
-  // エスケープシーケンスを処理
-  std::string processedValue;
-  processedValue.reserve(value.length());
-  
-  for (size_t i = 0; i < value.length(); ++i) {
-    if (value[i] == '\\' && i + 1 < value.length()) {
-      switch (value[i + 1]) {
-        case 'n': processedValue += '\n'; break;
-        case 'r': processedValue += '\r'; break;
-        case 't': processedValue += '\t'; break;
-        case 'b': processedValue += '\b'; break;
-        case 'f': processedValue += '\f'; break;
-        case 'v': processedValue += '\v'; break;
-        case '0': processedValue += '\0'; break;
-        case '\'': processedValue += '\''; break;
-        case '\"': processedValue += '\"'; break;
-        case '\\': processedValue += '\\'; break;
-        case '`': processedValue += '`'; break;
-        case '$': processedValue += '$'; break;
-        default: processedValue += value[i + 1];
+    case '+': {
+      // 加算演算子と増分演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '+') {
+        stream_->Advance();
+        type = TokenType::INCREMENT;
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::PLUS_ASSIGN;
+      } else {
+        type = TokenType::PLUS;
       }
-      i++; // エスケープシーケンスの2文字目をスキップ
-    } else {
-      processedValue += value[i];
+      break;
     }
-  }
-  
-  return Token(isTaggedTemplate ? TokenType::TEMPLATE_TAGGED : TokenType::TEMPLATE, 
-              source_.substr(start_, current_ - start_), 
-              processedValue, 
-              createSourceLocation());
-}
-
-void Lexer::skipWhitespace() {
-  while (true) {
-    char c = peek();
-    switch (c) {
-      case ' ':
-      case '\r':
-      case '\t':
-        advance();
-        break;
-      case '\n':
-        line_++;
-        column_ = 1;
-        advance();
-        break;
-      case '/':
-        if (peekNext() == '/') {
-          // 行コメント
-          advance(); // 最初の'/'をスキップ
-          advance(); // 2番目の'/'をスキップ
-          
-          // 行末までスキップ
-          while (peek() != '\n' && !isAtEnd()) {
-            advance();
-          }
-        } else if (peekNext() == '*') {
-          // ブロックコメント
-          advance(); // 最初の'/'をスキップ
-          advance(); // '*'をスキップ
-          
-          // コメント終了までスキップ
-          while (!(peek() == '*' && peekNext() == '/') && !isAtEnd()) {
-            if (peek() == '\n') {
-              line_++;
-              column_ = 1;
-            }
-            advance();
-          }
-          
-          if (isAtEnd()) {
-            // 終了していないブロックコメント
-            // エラーを報告せずに処理を続行
-          } else {
-            advance(); // '*'をスキップ
-            advance(); // '/'をスキップ
-          }
+    case '-': {
+      // 減算演算子と減分演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '-') {
+        stream_->Advance();
+        type = TokenType::DECREMENT;
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::MINUS_ASSIGN;
+      } else {
+        type = TokenType::MINUS;
+      }
+      break;
+    }
+    case '*': {
+      // 乗算演算子と累乗演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '*') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::EXPONENT_ASSIGN;
         } else {
-          return; // 除算演算子または正規表現リテラルの開始
+          type = TokenType::EXPONENT;
         }
-        break;
-      default:
-        return;
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::MULTIPLY_ASSIGN;
+      } else {
+        type = TokenType::MULTIPLY;
+      }
+      break;
     }
+    case '/': {
+      // 除算演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::DIVIDE_ASSIGN;
+      } else {
+        type = TokenType::DIVIDE;
+      }
+      break;
+    }
+    case '%': {
+      // 剰余演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::MODULO_ASSIGN;
+      } else {
+        type = TokenType::MODULO;
+      }
+      break;
+    }
+    case '&': {
+      // ビット演算子と論理演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '&') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::LOGICAL_AND_ASSIGN;
+        } else {
+          type = TokenType::LOGICAL_AND;
+        }
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::BITWISE_AND_ASSIGN;
+      } else {
+        type = TokenType::BITWISE_AND;
+      }
+      break;
+    }
+    case '|': {
+      // ビット演算子と論理演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '|') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::LOGICAL_OR_ASSIGN;
+        } else {
+          type = TokenType::LOGICAL_OR;
+        }
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::BITWISE_OR_ASSIGN;
+      } else {
+        type = TokenType::BITWISE_OR;
+      }
+      break;
+    }
+    case '^': {
+      // XOR演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::BITWISE_XOR_ASSIGN;
+      } else {
+        type = TokenType::BITWISE_XOR;
+      }
+      break;
+    }
+    case '<': {
+      // 比較演算子とシフト演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '<') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::LEFT_SHIFT_ASSIGN;
+        } else {
+          type = TokenType::LEFT_SHIFT;
+        }
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::LESS_EQUAL;
+      } else {
+        type = TokenType::LESS_THAN;
+      }
+      break;
+    }
+    case '>': {
+      // 比較演算子とシフト演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '>') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '>') {
+          stream_->Advance();
+          if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+            stream_->Advance();
+            type = TokenType::UNSIGNED_RIGHT_SHIFT_ASSIGN;
+          } else {
+            type = TokenType::UNSIGNED_RIGHT_SHIFT;
+          }
+        } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::RIGHT_SHIFT_ASSIGN;
+        } else {
+          type = TokenType::RIGHT_SHIFT;
+        }
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        type = TokenType::GREATER_EQUAL;
+      } else {
+        type = TokenType::GREATER_THAN;
+      }
+      break;
+    }
+    case '=': {
+      // 代入演算子と等価演算子の検出
+      if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+        stream_->Advance();
+        if (!stream_->IsAtEnd() && stream_->Current() == '=') {
+          stream_->Advance();
+          type = TokenType::STRICT_EQUAL;
+        } else {
+          type = TokenType::EQUAL;
+        }
+      } else if (!stream_->IsAtEnd() && stream_->Current() == '>') {
+        stream_->Advance();
+        type = TokenType::ARROW;
+      } else {
+        type = TokenType::ASSIGN;
+      }
+      break;
+    }
+    default:
+      type = TokenType::UNKNOWN;
+      if (logger_) {
+        logger_->Error("不明な演算子: " + std::string(1, c));
+      }
+      break;
   }
+  
+  size_t end_pos = stream_->Position();
+  current_token_ = Token(type, "", SourceLocation(start_pos, end_pos));
 }
 
-} // namespace core
-} // namespace aerojs 
+class Logger {
+public:
+  virtual ~Logger() = default;
+  virtual void Error(const std::string& message) = 0;
+  virtual void Warning(const std::string& message) = 0;
+  virtual void Info(const std::string& message) = 0;
+};
+
+namespace utils {
+class Logger {
+public:
+  virtual ~Logger() = default;
+  virtual void Error(const std::string& message) = 0;
+  virtual void Warning(const std::string& message) = 0;
+  virtual void Info(const std::string& message) = 0;
+};
+namespace memory {
+class ArenaAllocator {
+public:
+  ArenaAllocator(size_t initial_size = 4096);
+  ~ArenaAllocator();
+  
+  void* Allocate(size_t size, size_t alignment = 8);
+  void Reset();
+  size_t UsedMemory() const;
+  
+private:
+  struct Block {
+    void* memory;
+    size_t size;
+    size_t used;
+    Block* next;
+  };
+  
+  Block* current_block_;
+  size_t total_allocated_;
+};
+}  // namespace memory
+
+namespace thread {
+class ThreadPool {
+public:
+  ThreadPool(size_t num_threads = 0);
+  ~ThreadPool();
+  
+  template<typename F, typename... Args>
+  auto Enqueue(F&& f, Args&&... args);
+  
+  void WaitAll();
+  size_t NumThreads() const;
+  
+private:
+  std::vector<std::thread> workers_;
+  std::queue<std::function<void()>> tasks_;
+  std::mutex queue_mutex_;
+  std::condition_variable condition_;
+  bool stop_;
+};
+}  // namespace thread
+
+namespace metrics {
+class MetricsCollector {
+public:
+  MetricsCollector();
+  
+  void RecordTime(const std::string& name, double time_ms);
+  void RecordCount(const std::string& name, size_t count);
+  void RecordSize(const std::string& name, size_t size_bytes);
+  
+  std::map<std::string, double> GetTimings() const;
+  std::map<std::string, size_t> GetCounts() const;
+  std::map<std::string, size_t> GetSizes() const;
+  
+  void Reset();
+  
+private:
+  std::map<std::string, double> timings_;
+  std::map<std::string, size_t> counts_;
+  std::map<std::string, size_t> sizes_;
+  std::mutex mutex_;
+};
+}  // namespace metrics
+}  // namespace utils
+}  // namespace aerojs
+
+// 外部依存クラスの実装
+class CharacterStream {
+public:
+  CharacterStream(std::string_view source) : source_(source), position_(0) {}
+  
+  void Advance() {
+    if (!IsAtEnd()) {
+      position_++;
+    }
+  }
+  
+  char Current() const {
+    return IsAtEnd() ? '\0' : source_[position_];
+  }
+  
+  char Peek(size_t offset) const {
+    size_t pos = position_ + offset;
+    return (pos < source_.length()) ? source_[pos] : '\0';
+  }
+  
+  bool IsAtEnd() const {
+    return position_ >= source_.length();
+  }
+  
+  bool IsAtEnd(size_t offset) const {
+    return position_ + offset >= source_.length();
+  }
+  
+  size_t Position() const {
+    return position_;
+  }
+  
+  void SetPosition(size_t position) {
+    position_ = std::min(position, source_.length());
+  }
+  
+  void Reset() {
+    position_ = 0;
+  }
+  
+  std::string_view Substring(size_t start, size_t end) const {
+    if (start >= source_.length() || start > end) {
+      return "";
+    }
+    end = std::min(end, source_.length());
+    return source_.substr(start, end - start);
+  }
+  
+private:
+  std::string_view source_;
+  size_t position_;
+};
+
+class TokenLookupTable {
+public:
+  TokenLookupTable() {
+    InitializeKeywords();
+  }
+  
+  void InitializeKeywords() {
+    // JavaScriptの予約語を登録
+    keywords_["break"] = aerojs::core::parser::lexer::TokenType::BREAK;
+    keywords_["case"] = aerojs::core::parser::lexer::TokenType::CASE;
+    keywords_["catch"] = aerojs::core::parser::lexer::TokenType::CATCH;
+    keywords_["class"] = aerojs::core::parser::lexer::TokenType::CLASS;
+    keywords_["const"] = aerojs::core::parser::lexer::TokenType::CONST;
+    keywords_["continue"] = aerojs::core::parser::lexer::TokenType::CONTINUE;
+    keywords_["debugger"] = aerojs::core::parser::lexer::TokenType::DEBUGGER;
+    keywords_["default"] = aerojs::core::parser::lexer::TokenType::DEFAULT;
+    keywords_["delete"] = aerojs::core::parser::lexer::TokenType::DELETE;
+    keywords_["do"] = aerojs::core::parser::lexer::TokenType::DO;
+    keywords_["else"] = aerojs::core::parser::lexer::TokenType::ELSE;
+    keywords_["enum"] = aerojs::core::parser::lexer::TokenType::ENUM;
+    keywords_["export"] = aerojs::core::parser::lexer::TokenType::EXPORT;
+    keywords_["extends"] = aerojs::core::parser::lexer::TokenType::EXTENDS;
+    keywords_["false"] = aerojs::core::parser::lexer::TokenType::FALSE;
+    keywords_["finally"] = aerojs::core::parser::lexer::TokenType::FINALLY;
+    keywords_["for"] = aerojs::core::parser::lexer::TokenType::FOR;
+    keywords_["function"] = aerojs::core::parser::lexer::TokenType::FUNCTION;
+    keywords_["if"] = aerojs::core::parser::lexer::TokenType::IF;
+    keywords_["import"] = aerojs::core::parser::lexer::TokenType::IMPORT;
+    keywords_["in"] = aerojs::core::parser::lexer::TokenType::IN;
+    keywords_["instanceof"] = aerojs::core::parser::lexer::TokenType::INSTANCEOF;
+    keywords_["new"] = aerojs::core::parser::lexer::TokenType::NEW;
+    keywords_["null"] = aerojs::core::parser::lexer::TokenType::NULL_LITERAL;
+    keywords_["return"] = aerojs::core::parser::lexer::TokenType::RETURN;
+    keywords_["super"] = aerojs::core::parser::lexer::TokenType::SUPER;
+    keywords_["switch"] = aerojs::core::parser::lexer::TokenType::SWITCH;
+    keywords_["this"] = aerojs::core::parser::lexer::TokenType::THIS;
+    keywords_["throw"] = aerojs::core::parser::lexer::TokenType::THROW;
+    keywords_["true"] = aerojs::core::parser::lexer::TokenType::TRUE;
+    keywords_["try"] = aerojs::core::parser::lexer::TokenType::TRY;
+    keywords_["typeof"] = aerojs::core::parser::lexer::TokenType::TYPEOF;
+    keywords_["var"] = aerojs::core::parser::lexer::TokenType::VAR;
+    keywords_["void"] = aerojs::core::parser::lexer::TokenType::VOID;
+    keywords_["while"] = aerojs::core::parser::lexer::TokenType::WHILE;
+    keywords_["with"] = aerojs::core::parser::lexer::TokenType::WITH;
+    keywords_["yield"] = aerojs::core::parser::lexer::TokenType::YIELD;
+    keywords_["let"] = aerojs::core::parser::lexer::TokenType::LET;
+    keywords_["static"] = aerojs::core::parser::lexer::TokenType::STATIC;
+    keywords_["async"] = aerojs::core::parser::lexer::TokenType::ASYNC;
+    keywords_["await"] = aerojs::core::parser::lexer::TokenType::AWAIT;
+    keywords_["of"] = aerojs::core::parser::lexer::TokenType::OF;
+  }
+  
+  aerojs::core::parser::lexer::TokenType FindKeyword(const std::string& identifier) const {
+    auto it = keywords_.find(identifier);
+    if (it != keywords_.end()) {
+      return it->second;
+    }
+    return aerojs::core::parser::lexer::TokenType::IDENTIFIER;
+  }
+  
+private:
+  std::unordered_map<std::string, aerojs::core::parser::lexer::TokenType> keywords_;
+};
+
+class TokenCache {
+public:
+  TokenCache(size_t capacity = 1024) : capacity_(capacity) {}
+  
+  void Add(const std::string& key, const aerojs::core::parser::lexer::Token& token) {
+    if (cache_.size() >= capacity_) {
+      // キャッシュが一杯の場合、最も古いエントリを削除
+      cache_.erase(cache_.begin());
+    }
+    cache_[key] = token;
+  }
+  
+  std::optional<aerojs::core::parser::lexer::Token> Get(const std::string& key) {
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+  
+  void Clear() {
+    cache_.clear();
+  }
+  
+private:
+  std::unordered_map<std::string, aerojs::core::parser::lexer::Token> cache_;
+  size_t capacity_;
+};
+
+class LexerStateManager {
+public:
+  LexerStateManager() = default;
+  
+  struct State {
+    size_t position;
+    aerojs::core::parser::lexer::Token current_token;
+  };
+  
+  void PushState(size_t position, const aerojs::core::parser::lexer::Token& token) {
+    states_.push({position, token});
+  }
+  
+  std::optional<State> PopState() {
+    if (states_.empty()) {
+      return std::nullopt;
+    }
+    State state = states_.top();
+    states_.pop();
+    return state;
+  }
+  
+  bool HasSavedStates() const {
+    return !states_.empty();
+  }
+  
+private:
+  std::stack<State> states_;
+};
+
+struct SourceTextChunk {
+  std::string_view text;
+  aerojs::core::parser::lexer::SourceLocation startLocation;
+  
+  SourceTextChunk(std::string_view t, const aerojs::core::parser::lexer::SourceLocation& loc)
+    : text(t), startLocation(loc) {}
+};
+
+namespace aerojs {
+namespace core {
+namespace parser {
+namespace lexer {
+
+// Lexerクラスの実装
+
+}  // namespace lexer
+}  // namespace parser
+}  // namespace core
+}  // namespace aerojs

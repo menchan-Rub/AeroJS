@@ -7,10 +7,11 @@
 #ifndef AERO_SET_H
 #define AERO_SET_H
 
-#include "core/runtime/object.h"
-#include "core/runtime/value.h"
 #include <unordered_set>
 #include <vector>
+
+#include "core/runtime/object.h"
+#include "core/runtime/value.h"
 
 namespace aero {
 
@@ -22,100 +23,102 @@ class GlobalObject;
  * 異なるタイプの JavaScript 値に対して適切なハッシュ値を生成します
  */
 class ValueHasher {
-public:
-    /**
-     * @brief JavaScript の Value オブジェクトのハッシュ値を計算します
-     * @param value ハッシュ値を計算する JavaScript の値
-     * @return 計算されたハッシュ値
-     */
-    size_t operator()(const Value& value) const;
-    
-    /**
-     * @brief 二つの JavaScript の値が等しいかを判定します
-     * @param lhs 比較する左辺値
-     * @param rhs 比較する右辺値
-     * @return 二つの値が等しい場合は true、そうでない場合は false
-     */
-    bool operator()(const Value& lhs, const Value& rhs) const {
-        return lhs.equals(rhs);
-    }
+ public:
+  /**
+   * @brief JavaScript の Value オブジェクトのハッシュ値を計算します
+   * @param value ハッシュ値を計算する JavaScript の値
+   * @return 計算されたハッシュ値
+   */
+  size_t operator()(const Value& value) const;
+
+  /**
+   * @brief 二つの JavaScript の値が等しいかを判定します
+   * @param lhs 比較する左辺値
+   * @param rhs 比較する右辺値
+   * @return 二つの値が等しい場合は true、そうでない場合は false
+   */
+  bool operator()(const Value& lhs, const Value& rhs) const {
+    return lhs.equals(rhs);
+  }
 };
 
 /**
  * @class SetObject
  * @brief JavaScriptのSetオブジェクトを表すクラス
- * 
+ *
  * SetObjectはユニークな値のコレクションを提供します。
  * ECMAScript仕様に準拠した実装です。
  */
 class SetObject : public Object {
-public:
-    /**
-     * @brief コンストラクタ
-     * @param context 実行コンテキスト
-     * @param prototype プロトタイプオブジェクト
-     */
-    SetObject(Context* context, Object* prototype);
+ public:
+  /**
+   * @brief コンストラクタ
+   * @param context 実行コンテキスト
+   * @param prototype プロトタイプオブジェクト
+   */
+  SetObject(Context* context, Object* prototype);
 
-    /**
-     * @brief デストラクタ
-     */
-    ~SetObject() override;
-    
-    /**
-     * @brief Setに値を追加
-     * @param value 追加する値
-     * @return this
-     */
-    Value add(const Value& value);
-    
-    /**
-     * @brief Setが指定値を持つか確認
-     * @param value 確認する値
-     * @return 含まれていればtrue
-     */
-    bool has(const Value& value) const;
-    
-    /**
-     * @brief Setから値を削除
-     * @param value 削除する値
-     * @return 削除が成功したらtrue
-     */
-    bool remove(const Value& value);
-    
-    /**
-     * @brief Set内のすべての値を削除
-     */
-    void clear();
-    
-    /**
-     * @brief Set内の値の数を取得
-     * @return 値の数
-     */
-    size_t size() const;
-    
-    /**
-     * @brief Set内の全値を配列で取得
-     * @return 値の配列
-     */
-    Value values(Context* context) const;
-    
-    /**
-     * @brief Setのプロトタイプを初期化
-     * @param context 実行コンテキスト
-     * @return プロトタイプオブジェクト
-     */
-    static Value initializePrototype(Context* context);
+  /**
+   * @brief デストラクタ
+   */
+  ~SetObject() override;
 
-    /**
-     * @brief このオブジェクトがSetオブジェクトであるかを確認します
-     * @return 常にtrue
-     */
-    bool isSetObject() const override { return true; }
+  /**
+   * @brief Setに値を追加
+   * @param value 追加する値
+   * @return this
+   */
+  Value add(const Value& value);
 
-private:
-    /** @brief Setに格納されている値のコンテナ */
-    std::unordered_set<Value, ValueHasher, ValueHasher> m_values;
+  /**
+   * @brief Setが指定値を持つか確認
+   * @param value 確認する値
+   * @return 含まれていればtrue
+   */
+  bool has(const Value& value) const;
+
+  /**
+   * @brief Setから値を削除
+   * @param value 削除する値
+   * @return 削除が成功したらtrue
+   */
+  bool remove(const Value& value);
+
+  /**
+   * @brief Set内のすべての値を削除
+   */
+  void clear();
+
+  /**
+   * @brief Set内の値の数を取得
+   * @return 値の数
+   */
+  size_t size() const;
+
+  /**
+   * @brief Set内の全値を配列で取得
+   * @return 値の配列
+   */
+  Value values(Context* context) const;
+
+  /**
+   * @brief Setのプロトタイプを初期化
+   * @param context 実行コンテキスト
+   * @return プロトタイプオブジェクト
+   */
+  static Value initializePrototype(Context* context);
+
+  /**
+   * @brief このオブジェクトがSetオブジェクトであるかを確認します
+   * @return 常にtrue
+   */
+  bool isSetObject() const override {
+    return true;
+  }
+
+ private:
+  /** @brief Setに格納されている値のコンテナ */
+  std::unordered_set<Value, ValueHasher, ValueHasher> m_values;
 };
 
 /**
@@ -230,6 +233,6 @@ Value initializeSet(Context* context);
  */
 void registerSetBuiltin(GlobalObject* global);
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_SET_H 
+#endif  // AERO_SET_H

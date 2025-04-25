@@ -35,7 +35,7 @@ typedef enum {
 
 /**
  * @brief JavaScript値ハンドル
- * 
+ *
  * 不透明な値ハンドルで、JavaScriptエンジン内の値を参照します。
  * このハンドルはGCによって管理され、適切に解放する必要があります。
  */
@@ -204,7 +204,7 @@ AEROJS_EXPORT char* AerojsValueToString(AerojsContext* ctx, AerojsValueRef value
  * @return コピーされたバイト数 (終端のNULLバイトを含む)
  */
 AEROJS_EXPORT AerojsSize AerojsValueStringCopy(AerojsContext* ctx, AerojsValueRef value,
-                                              char* buffer, AerojsSize maxSize);
+                                               char* buffer, AerojsSize maxSize);
 
 /**
  * @brief 値の同値性を比較
@@ -242,7 +242,7 @@ AEROJS_EXPORT AerojsValueRef AerojsObjectGetProperty(AerojsContext* ctx, AerojsV
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsObjectSetProperty(AerojsContext* ctx, AerojsValueRef object,
-                                                 const char* propertyName, AerojsValueRef value);
+                                                   const char* propertyName, AerojsValueRef value);
 
 /**
  * @brief 値の参照をインクリメント (GC保護)
@@ -262,4 +262,4 @@ AEROJS_EXPORT void AerojsValueUnprotect(AerojsContext* ctx, AerojsValueRef value
 }
 #endif
 
-#endif /* AEROJS_VALUE_H */ 
+#endif /* AEROJS_VALUE_H */

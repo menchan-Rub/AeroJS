@@ -1,0 +1,13 @@
+# Doxyfile configuration for AeroJS
+
+PROJECT_NAME           = "AeroJS"
+OUTPUT_DIRECTORY       = "${CMAKE_CURRENT_BINARY_DIR}/html"
+INPUT                  = "${CMAKE_SOURCE_DIR}/src"
+FILE_PATTERNS          = *.h *.cpp
+RECURSIVE              = YES
+GENERATE_LATEX         = NO
+EXTRACT_ALL            = YES
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+JAVADOC_AUTOBRIEF      = YES 

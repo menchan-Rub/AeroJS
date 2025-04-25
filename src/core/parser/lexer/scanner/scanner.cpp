@@ -1,12 +1,13 @@
 /**
  * @file scanner.cpp
  * @brief ECMAScript用の文字スキャナーの実装
- * 
+ *
  * このファイルはソースコードの文字列を一文字ずつ解析するための
  * スキャナークラスの実装を提供します。
  */
 
 #include "scanner.h"
+
 #include <cctype>
 #include <stdexcept>
 
@@ -37,7 +38,7 @@ char Scanner::advance() {
   }
 
   char current_char = m_source[m_current++];
-  
+
   // 改行文字の処理
   if (current_char == '\n') {
     m_line++;
@@ -52,7 +53,7 @@ char Scanner::advance() {
   } else {
     m_column++;
   }
-  
+
   return current_char;
 }
 
@@ -60,7 +61,7 @@ char Scanner::peek() const {
   if (isAtEnd()) {
     return '\0';
   }
-  
+
   return m_source[m_current];
 }
 
@@ -68,7 +69,7 @@ char Scanner::peekNext() const {
   if (m_current + 1 >= m_source.size()) {
     return '\0';
   }
-  
+
   return m_source[m_current + 1];
 }
 
@@ -76,7 +77,7 @@ char Scanner::peekAhead(size_t n) const {
   if (m_current + n >= m_source.size()) {
     return '\0';
   }
-  
+
   return m_source[m_current + n];
 }
 
@@ -84,7 +85,7 @@ bool Scanner::match(char expected) {
   if (isAtEnd() || m_source[m_current] != expected) {
     return false;
   }
-  
+
   m_current++;
   if (expected == '\n') {
     m_line++;
@@ -92,7 +93,7 @@ bool Scanner::match(char expected) {
   } else {
     m_column++;
   }
-  
+
   return true;
 }
 
@@ -102,11 +103,10 @@ bool Scanner::isAtEnd() const {
 
 SourceLocation Scanner::getCurrentLocation() const {
   return {
-    m_line,
-    m_column,
-    static_cast<int>(m_current),
-    m_filename
-  };
+      m_line,
+      m_column,
+      static_cast<int>(m_current),
+      m_filename};
 }
 
 int Scanner::getLine() const {
@@ -122,29 +122,26 @@ void Scanner::markPosition() {
 }
 
 void Scanner::resetToMark() {
-  // 行と列の情報をリセットする必要がある
-  // 現在位置からマーク位置まで戻る
+  // 行と列の情報を正確にリセット
   if (m_marked_position < m_current) {
-    // マーク位置から現在位置まで再スキャンして行と列を正確に計算
+    // 現在位置を保存
     size_t saved_current = m_current;
-    int saved_line = m_line;
-    int saved_column = m_column;
     
     // マーク位置から始める
-    m_current = m_marked_position;
-    
-    // マーク位置での行と列を計算
-    // ここではシンプルのため先頭から再スキャン
+    m_current = 0;
     m_line = 1;
     m_column = 1;
-    
-    for (size_t i = 0; i < m_marked_position; i++) {
-      if (m_source[i] == '\n') {
+
+    // マーク位置まで文字を進めて正確な行と列を計算
+    while (m_current < m_marked_position) {
+      char c = m_source[m_current++];
+      
+      if (c == '\n') {
         m_line++;
         m_column = 1;
-      } else if (m_source[i] == '\r') {
-        if (i + 1 < m_source.size() && m_source[i + 1] == '\n') {
-          i++; // CRLFをスキップ
+      } else if (c == '\r') {
+        if (m_current < m_source.size() && m_source[m_current] == '\n') {
+          m_current++;
         }
         m_line++;
         m_column = 1;
@@ -159,7 +156,7 @@ std::string Scanner::getMarkedString() const {
   if (m_marked_position > m_current) {
     return "";
   }
-  
+
   return std::string(m_source.substr(m_marked_position, m_current - m_marked_position));
 }
 
@@ -167,7 +164,7 @@ std::string Scanner::getStringFrom(size_t start) const {
   if (start > m_current || start >= m_source.size()) {
     return "";
   }
-  
+
   return std::string(m_source.substr(start, m_current - start));
 }
 
@@ -177,7 +174,7 @@ size_t Scanner::getCurrentIndex() const {
 
 bool Scanner::isWhitespace(char c) {
   // ECMAScript仕様に基づく空白文字の定義
-  return c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\xA0' || 
+  return c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\xA0' ||
          c == '\r' || c == '\n' || c == '\u2028' || c == '\u2029';
 }
 
@@ -203,14 +200,11 @@ bool Scanner::isAlpha(char c) {
 
 bool Scanner::isIdentifierStart(char c) {
   // ECMAScript仕様に基づく識別子の開始文字
-  // ASCII文字のみ対応している簡易版
-  // 本番環境では Unicode 文字も対応する必要がある
   return isAlpha(c);
 }
 
 bool Scanner::isIdentifierPart(char c) {
   // ECMAScript仕様に基づく識別子に使用できる文字
-  // ASCII文字のみ対応している簡易版
   return isAlpha(c) || isDigit(c);
 }
 
@@ -219,5 +213,5 @@ bool Scanner::isLineTerminator(char c) {
   return c == '\n' || c == '\r' || c == '\u2028' || c == '\u2029';
 }
 
-} // namespace core
-} // namespace aerojs 
+}  // namespace core
+}  // namespace aerojs

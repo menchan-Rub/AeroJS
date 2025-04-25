@@ -6,9 +6,11 @@
  */
 
 #include "symbols.h"
+
 #include <sstream>
-#include "../error/error.h"
+
 #include "../context/context.h"
+#include "../error/error.h"
 
 namespace aero {
 
@@ -33,8 +35,8 @@ Symbol* Symbol::s_unscopables = nullptr;
 Symbol* Symbol::s_asyncIterator = nullptr;
 
 Symbol::Symbol(const std::string& description, uint64_t id, bool isGlobal, const std::string& key)
-    : m_description(description), 
-      m_isGlobal(isGlobal), 
+    : m_description(description),
+      m_isGlobal(isGlobal),
       m_key(key) {
   // IDが指定されていない場合は自動生成
   m_id = (id == 0) ? s_nextId.fetch_add(1) : id;
@@ -50,11 +52,11 @@ Symbol* Symbol::for_(const std::string& key) {
   if (symbol) {
     return symbol;
   }
-  
+
   // 新しいグローバルシンボルを作成して登録
   symbol = new Symbol(key, 0, true, key);
   registerToRegistry(key, symbol);
-  
+
   return symbol;
 }
 
@@ -62,12 +64,12 @@ Value Symbol::keyFor(Symbol* symbol) {
   if (!symbol) {
     return Value::createUndefined();
   }
-  
+
   // グローバルシンボルでない場合はundefinedを返す
   if (!symbol->m_isGlobal) {
     return Value::createUndefined();
   }
-  
+
   return Value::createString(symbol->m_key);
 }
 
@@ -75,7 +77,7 @@ bool Symbol::equals(const Symbol* other) const {
   if (!other) {
     return false;
   }
-  
+
   // シンボルの等価性はIDによって決定される
   return m_id == other->m_id;
 }
@@ -248,7 +250,7 @@ Symbol* Symbol::asyncIterator() {
 static Value symbolToString(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) {
   // thisがSymbolオブジェクトの場合は内部のSymbol値を取得
   Symbol* symbol = nullptr;
-  
+
   if (thisValue.isSymbol()) {
     symbol = thisValue.asSymbol();
   } else if (thisValue.isObject() && thisValue.asObject()->isSymbolObject(ctx)) {
@@ -258,7 +260,7 @@ static Value symbolToString(ExecutionContext* ctx, Value thisValue, const std::v
     ctx->throwError(Error::createTypeError(ctx, "Symbol.prototype.toString called on non-symbol"));
     return Value::createUndefined();
   }
-  
+
   return Value::createString(symbol->toString());
 }
 
@@ -268,7 +270,7 @@ static Value symbolToString(ExecutionContext* ctx, Value thisValue, const std::v
 static Value symbolValueOf(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) {
   // thisがSymbolオブジェクトの場合は内部のSymbol値を取得
   Symbol* symbol = nullptr;
-  
+
   if (thisValue.isSymbol()) {
     return thisValue;
   } else if (thisValue.isObject() && thisValue.asObject()->isSymbolObject(ctx)) {
@@ -302,7 +304,7 @@ static Value symbolToStringTag(ExecutionContext* ctx, Value thisValue, const std
 static Value symbolDescriptionGetter(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) {
   // thisがSymbolオブジェクトの場合は内部のSymbol値を取得
   Symbol* symbol = nullptr;
-  
+
   if (thisValue.isSymbol()) {
     symbol = thisValue.asSymbol();
   } else if (thisValue.isObject() && thisValue.asObject()->isSymbolObject(ctx)) {
@@ -312,12 +314,12 @@ static Value symbolDescriptionGetter(ExecutionContext* ctx, Value thisValue, con
     ctx->throwError(Error::createTypeError(ctx, "Symbol.prototype.description getter called on non-symbol"));
     return Value::createUndefined();
   }
-  
+
   const std::string& desc = symbol->description();
   if (desc.empty()) {
     return Value::createUndefined();
   }
-  
+
   return Value::createString(desc);
 }
 
@@ -325,66 +327,52 @@ void initializeSymbolPrototype(ExecutionContext* ctx, Object* globalObj) {
   // Symbolプロトタイプオブジェクトを作成
   Object* symbolPrototype = Object::create(ctx);
   symbolPrototype->setPrototype(ctx->getObjectPrototype());
-  
+
   // プロトタイプメソッドを定義
-  symbolPrototype->defineProperty(ctx, "toString", 
-      Value::createFunction(ctx, symbolToString, 0, "toString"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
-  symbolPrototype->defineProperty(ctx, "valueOf", 
-      Value::createFunction(ctx, symbolValueOf, 0, "valueOf"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
+  symbolPrototype->defineProperty(ctx, "toString",
+                                  Value::createFunction(ctx, symbolToString, 0, "toString"),
+                                  PropertyDescriptor::createDataDescriptorFlags(
+                                      PropertyDescriptor::Writable |
+                                      PropertyDescriptor::Configurable));
+
+  symbolPrototype->defineProperty(ctx, "valueOf",
+                                  Value::createFunction(ctx, symbolValueOf, 0, "valueOf"),
+                                  PropertyDescriptor::createDataDescriptorFlags(
+                                      PropertyDescriptor::Writable |
+                                      PropertyDescriptor::Configurable));
+
   // descriptionプロパティのゲッターを定義
   Object* descriptionDescriptor = Object::create(ctx);
-  descriptionDescriptor->defineProperty(ctx, "get", 
-      Value::createFunction(ctx, symbolDescriptionGetter, 0, "get description"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Enumerable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
-  symbolPrototype->defineProperty(ctx, "description", Value::createUndefined(), 
-      PropertyDescriptor::createAccessorDescriptorFlags(
-          PropertyDescriptor::Configurable
-      ),
-      Value::createFunction(ctx, symbolDescriptionGetter, 0, "get description"),
-      Value::createUndefined()
-  );
-  
+  descriptionDescriptor->defineProperty(ctx, "get",
+                                        Value::createFunction(ctx, symbolDescriptionGetter, 0, "get description"),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::Writable |
+                                            PropertyDescriptor::Enumerable |
+                                            PropertyDescriptor::Configurable));
+
+  symbolPrototype->defineProperty(ctx, "description", Value::createUndefined(),
+                                  PropertyDescriptor::createAccessorDescriptorFlags(
+                                      PropertyDescriptor::Configurable),
+                                  Value::createFunction(ctx, symbolDescriptionGetter, 0, "get description"),
+                                  Value::createUndefined());
+
   // Well-known Symbolを使用したメソッドを定義
-  symbolPrototype->defineProperty(ctx, Symbol::toPrimitive(), 
-      Value::createFunction(ctx, symbolToPrimitive, 1, "[Symbol.toPrimitive]"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
-  symbolPrototype->defineProperty(ctx, Symbol::toStringTag(), 
-      Value::createString("Symbol"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Configurable
-      )
-  );
-  
+  symbolPrototype->defineProperty(ctx, Symbol::toPrimitive(),
+                                  Value::createFunction(ctx, symbolToPrimitive, 1, "[Symbol.toPrimitive]"),
+                                  PropertyDescriptor::createDataDescriptorFlags(
+                                      PropertyDescriptor::Writable |
+                                      PropertyDescriptor::Configurable));
+
+  symbolPrototype->defineProperty(ctx, Symbol::toStringTag(),
+                                  Value::createString("Symbol"),
+                                  PropertyDescriptor::createDataDescriptorFlags(
+                                      PropertyDescriptor::Configurable));
+
   // Symbolプロトタイプをグローバルオブジェクトに保存
-  globalObj->defineProperty(ctx, "Symbol.prototype", Value(symbolPrototype), 
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
+  globalObj->defineProperty(ctx, "Symbol.prototype", Value(symbolPrototype),
+                            PropertyDescriptor::createDataDescriptorFlags(
+                                PropertyDescriptor::Writable |
+                                PropertyDescriptor::Configurable));
 }
 
 // Symbolコンストラクタメソッド
@@ -398,13 +386,13 @@ static Value symbolConstructor(ExecutionContext* ctx, Value thisValue, const std
     ctx->throwError(Error::createTypeError(ctx, "Symbol is not a constructor"));
     return Value::createUndefined();
   }
-  
+
   // 引数から説明を取得
   std::string description;
   if (!args.empty() && !args[0].isUndefined() && !args[0].isNull()) {
     description = args[0].toString(ctx);
   }
-  
+
   // 新しいシンボルを作成
   Symbol* symbol = Symbol::create(description);
   return Value(symbol);
@@ -418,10 +406,10 @@ static Value symbolFor(ExecutionContext* ctx, Value thisValue, const std::vector
     ctx->throwError(Error::createTypeError(ctx, "Symbol.for requires an argument"));
     return Value::createUndefined();
   }
-  
+
   // キーを文字列に変換
   std::string key = args[0].toString(ctx);
-  
+
   // グローバルレジストリからシンボルを取得または作成
   Symbol* symbol = Symbol::for_(key);
   return Value(symbol);
@@ -435,7 +423,7 @@ static Value symbolKeyFor(ExecutionContext* ctx, Value thisValue, const std::vec
     ctx->throwError(Error::createTypeError(ctx, "Symbol.keyFor requires a Symbol argument"));
     return Value::createUndefined();
   }
-  
+
   // シンボルのキーを取得
   return Symbol::keyFor(args[0].asSymbol());
 }
@@ -443,132 +431,98 @@ static Value symbolKeyFor(ExecutionContext* ctx, Value thisValue, const std::vec
 Function* initializeSymbolConstructor(ExecutionContext* ctx, Object* globalObj, Object* prototype) {
   // Symbolコンストラクタ関数を作成
   Function* symbolConstructorFunc = Function::create(ctx, symbolConstructor, 0, "Symbol");
-  
+
   // コンストラクタのprototypeプロパティを設定
-  symbolConstructorFunc->defineProperty(ctx, "prototype", Value(prototype), 
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
+  symbolConstructorFunc->defineProperty(ctx, "prototype", Value(prototype),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
   // 静的メソッドを定義
-  symbolConstructorFunc->defineProperty(ctx, "for", 
-      Value::createFunction(ctx, symbolFor, 1, "for"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "keyFor", 
-      Value::createFunction(ctx, symbolKeyFor, 1, "keyFor"),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
+  symbolConstructorFunc->defineProperty(ctx, "for",
+                                        Value::createFunction(ctx, symbolFor, 1, "for"),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::Writable |
+                                            PropertyDescriptor::Configurable));
+
+  symbolConstructorFunc->defineProperty(ctx, "keyFor",
+                                        Value::createFunction(ctx, symbolKeyFor, 1, "keyFor"),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::Writable |
+                                            PropertyDescriptor::Configurable));
+
   // Well-Known Symbolsをプロパティとして定義
-  symbolConstructorFunc->defineProperty(ctx, "hasInstance", 
-      Value(Symbol::hasInstance()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "isConcatSpreadable", 
-      Value(Symbol::isConcatSpreadable()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "iterator", 
-      Value(Symbol::iterator()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "match", 
-      Value(Symbol::match()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "matchAll", 
-      Value(Symbol::matchAll()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "replace", 
-      Value(Symbol::replace()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "search", 
-      Value(Symbol::search()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "species", 
-      Value(Symbol::species()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "split", 
-      Value(Symbol::split()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "toPrimitive", 
-      Value(Symbol::toPrimitive()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "toStringTag", 
-      Value(Symbol::toStringTag()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "unscopables", 
-      Value(Symbol::unscopables()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
-  symbolConstructorFunc->defineProperty(ctx, "asyncIterator", 
-      Value(Symbol::asyncIterator()),
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::None
-      )
-  );
-  
+  symbolConstructorFunc->defineProperty(ctx, "hasInstance",
+                                        Value(Symbol::hasInstance()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "isConcatSpreadable",
+                                        Value(Symbol::isConcatSpreadable()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "iterator",
+                                        Value(Symbol::iterator()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "match",
+                                        Value(Symbol::match()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "matchAll",
+                                        Value(Symbol::matchAll()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "replace",
+                                        Value(Symbol::replace()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "search",
+                                        Value(Symbol::search()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "species",
+                                        Value(Symbol::species()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "split",
+                                        Value(Symbol::split()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "toPrimitive",
+                                        Value(Symbol::toPrimitive()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "toStringTag",
+                                        Value(Symbol::toStringTag()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "unscopables",
+                                        Value(Symbol::unscopables()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
+  symbolConstructorFunc->defineProperty(ctx, "asyncIterator",
+                                        Value(Symbol::asyncIterator()),
+                                        PropertyDescriptor::createDataDescriptorFlags(
+                                            PropertyDescriptor::None));
+
   // Symbolコンストラクタをグローバルオブジェクトに設定
-  globalObj->defineProperty(ctx, "Symbol", Value(symbolConstructorFunc), 
-      PropertyDescriptor::createDataDescriptorFlags(
-          PropertyDescriptor::Writable | 
-          PropertyDescriptor::Configurable
-      )
-  );
-  
+  globalObj->defineProperty(ctx, "Symbol", Value(symbolConstructorFunc),
+                            PropertyDescriptor::createDataDescriptorFlags(
+                                PropertyDescriptor::Writable |
+                                PropertyDescriptor::Configurable));
+
   return symbolConstructorFunc;
 }
 
-} // namespace aero 
+}  // namespace aero

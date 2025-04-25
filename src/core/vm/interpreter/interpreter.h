@@ -1,7 +1,7 @@
 /**
  * @file interpreter.h
  * @brief バイトコードインタプリタの定義
- * 
+ *
  * このファイルはJavaScriptのバイトコード命令を実行するインタプリタの定義を提供します。
  * インタプリタはバイトコード命令を順次実行し、スタックマシンとして動作します。
  */
@@ -9,16 +9,16 @@
 #ifndef AEROJS_CORE_VM_INTERPRETER_INTERPRETER_H_
 #define AEROJS_CORE_VM_INTERPRETER_INTERPRETER_H_
 
-#include <vector>
+#include <functional>
 #include <memory>
 #include <unordered_map>
-#include <functional>
+#include <vector>
 
-#include "bytecode_instruction.h"
-#include "../../runtime/values/value.h"
 #include "../../runtime/context/context.h"
-#include "../stack/stack.h"
+#include "../../runtime/values/value.h"
 #include "../exception/exception.h"
+#include "../stack/stack.h"
+#include "bytecode_instruction.h"
 
 namespace aerojs {
 namespace core {
@@ -30,12 +30,12 @@ class Environment;
 
 /**
  * @brief バイトコードインタプリタクラス
- * 
+ *
  * バイトコード命令を実行するインタプリタクラスです。
  * スタックベースの仮想マシンとして実装され、各命令を順次実行します。
  */
 class Interpreter {
-public:
+ public:
   /**
    * @brief デフォルトコンストラクタ
    */
@@ -48,7 +48,7 @@ public:
 
   /**
    * @brief バイトコード命令の配列を実行する
-   * 
+   *
    * @param instructions 実行するバイトコード命令の配列
    * @param context 実行コンテキスト
    * @param environment 実行環境
@@ -61,7 +61,7 @@ public:
 
   /**
    * @brief 関数を呼び出す
-   * 
+   *
    * @param func 呼び出す関数オブジェクト
    * @param args 引数の配列
    * @param thisValue thisの値
@@ -76,7 +76,7 @@ public:
 
   /**
    * @brief 例外をスローする
-   * 
+   *
    * @param error エラーオブジェクト
    * @throws VMException スローされる例外
    */
@@ -87,7 +87,7 @@ public:
    */
   void reset();
 
-private:
+ private:
   /** @brief 命令実行関数の型定義 */
   using InstructionHandler = std::function<void(Interpreter*, const BytecodeInstruction&)>;
 
@@ -116,21 +116,21 @@ private:
 
   /**
    * @brief 現在のコールフレームを取得する
-   * 
+   *
    * @return std::shared_ptr<CallFrame> 現在のコールフレーム
    */
   std::shared_ptr<CallFrame> getCurrentCallFrame() const;
 
   /**
    * @brief 新しいコールフレームをプッシュする
-   * 
+   *
    * @param frame プッシュするコールフレーム
    */
   void pushCallFrame(std::shared_ptr<CallFrame> frame);
 
   /**
    * @brief コールフレームをポップする
-   * 
+   *
    * @return std::shared_ptr<CallFrame> ポップされたコールフレーム
    */
   std::shared_ptr<CallFrame> popCallFrame();
@@ -240,15 +240,15 @@ private:
 
 /**
  * @brief コールフレームクラス
- * 
+ *
  * 関数呼び出しのコンテキストを表すクラスです。
  * 各関数呼び出しごとに作成され、ローカル変数やプログラムカウンタなどの状態を保持します。
  */
 class CallFrame {
-public:
+ public:
   /**
    * @brief コンストラクタ
-   * 
+   *
    * @param function 関数オブジェクト
    * @param environment 実行環境
    * @param thisValue thisの値
@@ -267,54 +267,54 @@ public:
 
   /**
    * @brief 関数オブジェクトを取得する
-   * 
+   *
    * @return std::shared_ptr<FunctionObject> 関数オブジェクト
    */
   std::shared_ptr<FunctionObject> getFunction() const;
 
   /**
    * @brief 実行環境を取得する
-   * 
+   *
    * @return std::shared_ptr<Environment> 実行環境
    */
   std::shared_ptr<Environment> getEnvironment() const;
 
   /**
    * @brief thisの値を取得する
-   * 
+   *
    * @return ValuePtr thisの値
    */
   ValuePtr getThisValue() const;
 
   /**
    * @brief 戻りアドレスを取得する
-   * 
+   *
    * @return size_t 戻りアドレス
    */
   size_t getReturnAddress() const;
 
   /**
    * @brief プログラムカウンタを取得する
-   * 
+   *
    * @return size_t プログラムカウンタ
    */
   size_t getProgramCounter() const;
 
   /**
    * @brief プログラムカウンタを設定する
-   * 
+   *
    * @param pc 新しいプログラムカウンタ値
    */
   void setProgramCounter(size_t pc);
 
   /**
    * @brief プログラムカウンタをインクリメントする
-   * 
+   *
    * @return size_t インクリメント後のプログラムカウンタ
    */
   size_t incrementProgramCounter();
 
-private:
+ private:
   /** @brief 関数オブジェクト */
   std::shared_ptr<FunctionObject> m_function;
 
@@ -331,7 +331,7 @@ private:
   size_t m_programCounter;
 };
 
-} // namespace core
-} // namespace aerojs
+}  // namespace core
+}  // namespace aerojs
 
-#endif // AEROJS_CORE_VM_INTERPRETER_INTERPRETER_H_ 
+#endif  // AEROJS_CORE_VM_INTERPRETER_INTERPRETER_H_

@@ -4,14 +4,14 @@
  * @copyright 2023 AeroJS Project
  */
 
-#include "function.h"
 #include "core/runtime/global_object.h"
+#include "function.h"
 
 namespace aero {
 
 void registerFunctionModule(GlobalObject* global) {
-    // Function 組み込みオブジェクトを登録
-    registerFunctionBuiltin(global);
+  // Function 組み込みオブジェクトを登録
+  registerFunctionBuiltin(global);
 }
 
-} // namespace aero 
+}  // namespace aero

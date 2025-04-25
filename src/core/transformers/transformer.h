@@ -1,218 +1,259 @@
 /**
  * @file transformer.h
- * @version 1.0.0
- * @copyright Copyright (c) 2023 AeroJS Project
+ * @version 1.2.0
+ * @author AeroJS Developers
+ * @copyright Copyright (c) 2024 AeroJS Project
  * @license MIT License
- * @brief AST変換を行うトランスフォーマーの基本インターフェース
+ * @brief AST変換を行うトランスフォーマーの基本インターフェースと実装。
  *
+ * @details
  * このファイルは、AeroJS JavaScriptエンジンのためのASTトランスフォーマーシステムを定義します。
  * トランスフォーマーは、JavaScriptのASTを変換して最適化や解析を行うコンポーネントです。
+ *
+ * ここでは、純粋仮想インターフェース `ITransformer` と、
+ * AST ノードを再帰的に変換する基本的な具象クラス `Transformer` を定義します。
+ *
+ * コーディング規約: AeroJS Coding Standards v1.2 準拠。
  */
 
-#ifndef AERO_TRANSFORMER_H
-#define AERO_TRANSFORMER_H
+#pragma once
 
-#include "core/ast/node.h"
-#include "core/ast/visitor.h"
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <unordered_map>
 
-namespace aero {
-namespace transformers {
+// AeroJS Core AST components
+#include "src/core/parser/ast/node_type.h"
+#include "src/core/parser/ast/nodes/node.h"
+
+namespace aerojs::parser::ast {
+class Program;
+class ExpressionStatement;
+class BlockStatement;
+class EmptyStatement;
+class IfStatement;
+class SwitchStatement;
+class CaseClause;
+class WhileStatement;
+class DoWhileStatement;
+class ForStatement;
+class ForInStatement;
+class ForOfStatement;
+class ContinueStatement;
+class BreakStatement;
+class ReturnStatement;
+class WithStatement;
+class LabeledStatement;
+class TryStatement;
+class CatchClause;
+class ThrowStatement;
+class DebuggerStatement;
+class VariableDeclaration;
+class VariableDeclarator;
+class Identifier;
+class Literal;
+class FunctionDeclaration;
+class FunctionExpression;
+class ArrowFunctionExpression;
+class ClassDeclaration;
+class ClassExpression;
+class MethodDefinition;
+class FieldDefinition;
+class ImportDeclaration;
+class ExportNamedDeclaration;
+class ExportDefaultDeclaration;
+class ExportAllDeclaration;
+class ImportSpecifier;
+class ExportSpecifier;
+class ObjectPattern;
+class ArrayPattern;
+class AssignmentPattern;
+class RestElement;
+class SpreadElement;
+class TemplateElement;
+class TemplateLiteral;
+class TaggedTemplateExpression;
+class ObjectExpression;
+class Property;
+class ArrayExpression;
+class UnaryExpression;
+class UpdateExpression;
+class BinaryExpression;
+class AssignmentExpression;
+class LogicalExpression;
+class MemberExpression;
+class ConditionalExpression;
+class CallExpression;
+class NewExpression;
+class SequenceExpression;
+class AwaitExpression;
+class YieldExpression;
+class PrivateIdentifier;
+class Super;
+class ThisExpression;
+class MetaProperty;
+}
+
+namespace aerojs::transformers {
 
 /**
- * @brief 変換の結果を保持する構造体
+ * @struct TransformResult
+ * @brief AST ノードの変換結果を保持する構造体。
+ *
+ * @details
+ * 変換後のノード、変換によって変更があったかどうか、および
+ * 後続の変換処理を停止すべきかどうかを示します。
+ * イミュータブルなデータ構造として設計されており、static ファクトリメソッドを提供します。
  */
 struct TransformResult {
-    ast::NodePtr node;             ///< 変換後のノード
-    bool changed;                  ///< 変換によって変更があったか
-    bool stop_transformation;      ///< 変換処理を停止するか
-    
-    /**
-     * @brief 変更があったが変換を続行する結果を作成
-     * @param n 変換後のノード
-     * @return 変換結果
-     */
-    static TransformResult changed(ast::NodePtr n) {
-        return {std::move(n), true, false};
+  parser::ast::NodePtr transformedNode;  ///< 変換後のノード (所有権を持つ unique_ptr)。
+  bool wasChanged;                       ///< 変換によって AST に変更があったかを示すフラグ。
+  bool shouldStopTraversal;              ///< このノード以降の AST トラバーサルを停止すべきかを示すフラグ。
+
+  explicit TransformResult(parser::ast::NodePtr node, bool changed, bool stopTraversal)
+      : transformedNode(std::move(node)),
+        wasChanged(changed),
+        shouldStopTraversal(stopTraversal) {
+  }
+
+  static TransformResult Changed(parser::ast::NodePtr node) {
+    if (!node) {
+      throw std::invalid_argument("Changed node cannot be null in TransformResult::Changed.");
     }
-    
-    /**
-     * @brief 変更がなく変換を続行する結果を作成
-     * @param n 変換後のノード
-     * @return 変換結果
-     */
-    static TransformResult unchanged(ast::NodePtr n) {
-        return {std::move(n), false, false};
+    return TransformResult(std::move(node), true, false);
+  }
+
+  static TransformResult Unchanged(parser::ast::NodePtr node) {
+    if (!node) {
+      throw std::invalid_argument("Unchanged node cannot be null in TransformResult::Unchanged.");
     }
-    
-    /**
-     * @brief 変換を停止する結果を作成
-     * @param n 変換後のノード
-     * @return 変換結果
-     */
-    static TransformResult stop(ast::NodePtr n) {
-        return {std::move(n), true, true};
+    return TransformResult(std::move(node), false, false);
+  }
+
+  static TransformResult ChangedAndStop(parser::ast::NodePtr node) {
+    if (!node) {
+      throw std::invalid_argument("Stopped node cannot be null in TransformResult::ChangedAndStop.");
     }
+    return TransformResult(std::move(node), true, true);
+  }
+
+  static TransformResult UnchangedAndStop(parser::ast::NodePtr node) {
+    if (!node) {
+      throw std::invalid_argument("Stopped node cannot be null in TransformResult::UnchangedAndStop.");
+    }
+    return TransformResult(std::move(node), false, true);
+  }
 };
 
 /**
- * @brief トランスフォーマーの基本インターフェース
+ * @interface ITransformer
+ * @brief AST トランスフォーマーの純粋仮想インターフェース。
  *
- * ASTノードを変換するための基本インターフェースを定義します。
- * サブクラスは変換ロジックを実装する必要があります。
+ * @details
+ * 全ての具象トランスフォーマーが実装すべき基本的な操作を定義します。
+ * これにより、異なる種類のトランスフォーマーをポリモーフィックに扱うことが可能になります。
  */
 class ITransformer {
-public:
-    /**
-     * @brief 仮想デストラクタ
-     */
-    virtual ~ITransformer() = default;
-    
-    /**
-     * @brief ノードを変換します
-     * @param node 変換するノード
-     * @return 変換結果
-     */
-    virtual TransformResult transform(ast::NodePtr node) = 0;
-    
-    /**
-     * @brief トランスフォーマーの名前を取得します
-     * @return トランスフォーマーの名前
-     */
-    virtual std::string getName() const = 0;
-    
-    /**
-     * @brief トランスフォーマーの説明を取得します
-     * @return トランスフォーマーの説明
-     */
-    virtual std::string getDescription() const = 0;
+ public:
+  /**
+   * @brief 仮想デストラクタ。
+   * @details 派生クラスのデストラクタが正しく呼び出されることを保証します。
+   */
+  virtual ~ITransformer() = default;
+
+  /**
+   * @brief 指定された AST ノードを変換します (純粋仮想関数)。
+   * @param node 変換対象のノード (所有権を持つ unique_ptr)。変換後、このポインタは無効になる可能性があります。
+   * @return TransformResult 変換結果。変換後のノード、変更フラグ、停止フラグを含みます。
+   *         変換後のノードの所有権は TransformResult に移ります。
+   */
+  virtual TransformResult Transform(parser::ast::NodePtr node) = 0;
+
+  /**
+   * @brief トランスフォーマーの一意な名前を取得します (純粋仮想関数)。
+   * @return トランスフォーマーの名前 (例: "ConstantFolding", "DeadCodeElimination")。
+   */
+  virtual std::string GetName() const = 0;
+
+  /**
+   * @brief トランスフォーマーの目的や機能に関する簡単な説明を取得します (純粋仮想関数)。
+   * @return トランスフォーマーの説明。
+   */
+  virtual std::string GetDescription() const = 0;
 };
 
 /**
- * @brief スマートポインタによるトランスフォーマー型
+ * @typedef TransformerPtr
+ * @brief ITransformer へのスマートポインタ型エイリアス。
+ * @details トランスフォーマーの所有権管理を容易にします。
+ *          通常、トランスフォーマーの所有権は明確なため unique_ptr が推奨されますが、
+ *          状況に応じて shared_ptr も使用可能です。
  */
-using TransformerPtr = std::shared_ptr<ITransformer>;
+using TransformerPtr = std::unique_ptr<ITransformer>;
 
 /**
- * @brief 基本的なASTトランスフォーマー実装
+ * @class Transformer
+ * @brief AST ノードを再帰的に変換する基本的なトランスフォーマー実装。
  *
- * 再帰的にASTを訪問し、各ノードタイプに対する変換メソッドを呼び出します。
+ * @details
+ * `ITransformer` インターフェースを実装します。
+ * このクラスは、AST ノードを受け取り、その子ノードを再帰的に変換し、
+ * 必要に応じてノード自体を変換するための基本的な枠組みを提供します。
+ *
+ * 具体的な変換ロジックは、派生クラスで `TransformNode` メソッドを
+ * オーバーライドすることによって実装されます。
  */
-class Transformer : public ITransformer, public ast::Visitor {
-public:
-    /**
-     * @brief コンストラクタ
-     * @param name トランスフォーマーの名前
-     * @param description トランスフォーマーの説明
-     */
-    Transformer(std::string name, std::string description);
-    
-    /**
-     * @brief デストラクタ
-     */
-    ~Transformer() override = default;
-    
-    /**
-     * @brief ノードを変換します
-     * @param node 変換するノード
-     * @return 変換結果
-     */
-    TransformResult transform(ast::NodePtr node) override;
-    
-    /**
-     * @brief トランスフォーマーの名前を取得します
-     * @return トランスフォーマーの名前
-     */
-    std::string getName() const override;
-    
-    /**
-     * @brief トランスフォーマーの説明を取得します
-     * @return トランスフォーマーの説明
-     */
-    std::string getDescription() const override;
-    
-protected:
-    /**
-     * @brief ノードを再帰的に変換します
-     * @param node 変換するノード
-     * @return 変換結果
-     */
-    virtual TransformResult transformNode(ast::NodePtr node);
+class Transformer : public ITransformer {
+ public:
+  /**
+   * @brief コンストラクタ。
+   * @param name トランスフォーマーの名前。
+   * @param description トランスフォーマーの説明。
+   */
+  Transformer(std::string name, std::string description);
 
-    // AST Visitor メソッドのオーバーライド
-    void visitProgram(ast::Program* node) override;
-    void visitExpressionStatement(ast::ExpressionStatement* node) override;
-    void visitBlockStatement(ast::BlockStatement* node) override;
-    void visitEmptyStatement(ast::EmptyStatement* node) override;
-    void visitIfStatement(ast::IfStatement* node) override;
-    void visitSwitchStatement(ast::SwitchStatement* node) override;
-    void visitCaseClause(ast::CaseClause* node) override;
-    void visitWhileStatement(ast::WhileStatement* node) override;
-    void visitDoWhileStatement(ast::DoWhileStatement* node) override;
-    void visitForStatement(ast::ForStatement* node) override;
-    void visitForInStatement(ast::ForInStatement* node) override;
-    void visitForOfStatement(ast::ForOfStatement* node) override;
-    void visitContinueStatement(ast::ContinueStatement* node) override;
-    void visitBreakStatement(ast::BreakStatement* node) override;
-    void visitReturnStatement(ast::ReturnStatement* node) override;
-    void visitWithStatement(ast::WithStatement* node) override;
-    void visitLabeledStatement(ast::LabeledStatement* node) override;
-    void visitTryStatement(ast::TryStatement* node) override;
-    void visitCatchClause(ast::CatchClause* node) override;
-    void visitThrowStatement(ast::ThrowStatement* node) override;
-    void visitDebuggerStatement(ast::DebuggerStatement* node) override;
-    void visitVariableDeclaration(ast::VariableDeclaration* node) override;
-    void visitVariableDeclarator(ast::VariableDeclarator* node) override;
-    void visitIdentifier(ast::Identifier* node) override;
-    void visitLiteral(ast::Literal* node) override;
-    void visitFunctionDeclaration(ast::FunctionDeclaration* node) override;
-    void visitFunctionExpression(ast::FunctionExpression* node) override;
-    void visitArrowFunctionExpression(ast::ArrowFunctionExpression* node) override;
-    void visitClassDeclaration(ast::ClassDeclaration* node) override;
-    void visitClassExpression(ast::ClassExpression* node) override;
-    void visitMethodDefinition(ast::MethodDefinition* node) override;
-    void visitClassProperty(ast::ClassProperty* node) override;
-    void visitImportDeclaration(ast::ImportDeclaration* node) override;
-    void visitExportNamedDeclaration(ast::ExportNamedDeclaration* node) override;
-    void visitExportDefaultDeclaration(ast::ExportDefaultDeclaration* node) override;
-    void visitExportAllDeclaration(ast::ExportAllDeclaration* node) override;
-    void visitImportSpecifier(ast::ImportSpecifier* node) override;
-    void visitExportSpecifier(ast::ExportSpecifier* node) override;
-    void visitObjectPattern(ast::ObjectPattern* node) override;
-    void visitArrayPattern(ast::ArrayPattern* node) override;
-    void visitAssignmentPattern(ast::AssignmentPattern* node) override;
-    void visitRestElement(ast::RestElement* node) override;
-    void visitSpreadElement(ast::SpreadElement* node) override;
-    void visitTemplateElement(ast::TemplateElement* node) override;
-    void visitTemplateLiteral(ast::TemplateLiteral* node) override;
-    void visitTaggedTemplateExpression(ast::TaggedTemplateExpression* node) override;
-    void visitObjectExpression(ast::ObjectExpression* node) override;
-    void visitProperty(ast::Property* node) override;
-    void visitArrayExpression(ast::ArrayExpression* node) override;
-    void visitUnaryExpression(ast::UnaryExpression* node) override;
-    void visitUpdateExpression(ast::UpdateExpression* node) override;
-    void visitBinaryExpression(ast::BinaryExpression* node) override;
-    void visitAssignmentExpression(ast::AssignmentExpression* node) override;
-    void visitLogicalExpression(ast::LogicalExpression* node) override;
-    void visitMemberExpression(ast::MemberExpression* node) override;
-    void visitConditionalExpression(ast::ConditionalExpression* node) override;
-    void visitCallExpression(ast::CallExpression* node) override;
-    void visitNewExpression(ast::NewExpression* node) override;
-    void visitSequenceExpression(ast::SequenceExpression* node) override;
-    void visitAwaitExpression(ast::AwaitExpression* node) override;
-    void visitYieldExpression(ast::YieldExpression* node) override;
+  /**
+   * @brief デフォルトの仮想デストラクタ。
+   */
+  ~Transformer() override = default;
 
-private:
-    std::string m_name;           ///< トランスフォーマーの名前
-    std::string m_description;    ///< トランスフォーマーの説明
-    ast::NodePtr m_result;        ///< 変換結果のノード
-    bool m_changed;               ///< 変換によって変更があったか
+  // --- ITransformer インターフェースの実装 ---
+  TransformResult Transform(parser::ast::NodePtr node) override;
+  std::string GetName() const override;
+  std::string GetDescription() const override;
+
+ protected:
+  /**
+   * @brief ノードを再帰的に変換するための中心的な仮想メソッド。
+   * @details
+   * デフォルト実装では、ノードの子要素を再帰的に `TransformNode` で変換し、
+   * 子に変更があった場合にノードを更新します。
+   * 派生クラスは、特定のノードタイプに対してこのメソッドをオーバーライドし、
+   * 独自の変換ロジックを実装します。変換を行わない場合や、デフォルトの
+   * 子ノード走査を行いたい場合は、基底クラスの `TransformNode` を呼び出すか、
+   * あるいは `TransformChildren` ヘルパーを呼び出すことができます。
+   *
+   * @param node 変換対象のノード (所有権を持つ unique_ptr)。
+   * @return TransformResult 変換結果。
+   */
+  virtual TransformResult TransformNode(parser::ast::NodePtr node);
+
+  /**
+   * @brief ノードの子要素のみを再帰的に変換するヘルパーメソッド。
+   * @details
+   * `TransformNode` のデフォルト実装や、派生クラスが現在のノード自体は
+   * 変換せずに子要素のみを変換したい場合に使用します。
+   * このメソッドは非仮想です。
+   * @param node 子を変換する対象のノード (所有権を持つ unique_ptr)。
+   * @return TransformResult 子の変換結果。ノード自体は置き換えられません。
+   */
+  TransformResult TransformChildren(parser::ast::NodePtr node);
+
+ private:
+  std::string m_name;         ///< トランスフォーマーの名前 (読み取り専用)。
+  std::string m_description;  ///< トランスフォーマーの説明 (読み取り専用)。
+
+  // ヘルパー関数などをここに追加可能
+  // 例: 特定の子ノードを変換する private メソッドなど
 };
-
-} // namespace transformers
-} // namespace aero
-
-#endif // AERO_TRANSFORMER_H 

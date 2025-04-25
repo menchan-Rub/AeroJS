@@ -7,11 +7,12 @@
 #ifndef AERO_DATE_H
 #define AERO_DATE_H
 
-#include "../../object.h"
-#include "../../value.h"
 #include <chrono>
 #include <string>
 #include <vector>
+
+#include "../../object.h"
+#include "../../value.h"
 
 namespace aero {
 
@@ -20,170 +21,172 @@ class GlobalObject;
 /**
  * @class DateObject
  * @brief JavaScriptのDateオブジェクトを表現するクラス
- * 
+ *
  * ECMAScript仕様に基づき、日付と時刻を処理するための機能を提供します。
  * 内部的にはstd::chrono::system_clockを使用して時刻を管理します。
  */
 class DateObject : public Object {
-public:
-    /**
-     * @brief 現在の日時でDateオブジェクトを作成するコンストラクタ
-     */
-    DateObject();
-    
-    /**
-     * @brief 指定されたミリ秒値でDateオブジェクトを作成するコンストラクタ
-     * @param timeValue UNIX時間（1970年1月1日からのミリ秒）
-     */
-    explicit DateObject(double timeValue);
-    
-    /**
-     * @brief 指定された年月日時分秒でDateオブジェクトを作成するコンストラクタ
-     * @param year 年（例: 2023）
-     * @param month 月（0〜11）
-     * @param day 日（1〜31）
-     * @param hour 時（0〜23）
-     * @param minute 分（0〜59）
-     * @param second 秒（0〜59）
-     * @param millisecond ミリ秒（0〜999）
-     */
-    DateObject(int year, int month, int day, int hour = 0, int minute = 0, int second = 0, int millisecond = 0);
-    
-    /**
-     * @brief デストラクタ
-     */
-    ~DateObject();
-    
-    /**
-     * @brief オブジェクトがDateオブジェクトかどうかを判定
-     * @return 常にtrue
-     */
-    bool isDateObject() const override { return true; }
-    
-    /**
-     * @brief Dateオブジェクトのプリミティブ値（ミリ秒値）を取得
-     * @return Dateオブジェクトのプリミティブ値を表すValue
-     */
-    Value valueOf() const;
-    
-    /**
-     * @brief ISO 8601形式の文字列表現を取得
-     * @return ISO 8601形式の文字列（例: "2023-01-01T12:00:00.000Z"）
-     */
-    std::string toISOString() const;
-    
-    /**
-     * @brief 日付を文字列表現で取得
-     * @return 日付の文字列表現
-     */
-    std::string toString() const;
-    
-    /**
-     * @brief 1970年1月1日からのミリ秒数を取得
-     * @return ミリ秒数
-     */
-    double getTime() const;
-    
-    /**
-     * @brief 1970年1月1日からのミリ秒数を設定
-     * @param timeValue ミリ秒数
-     */
-    void setTime(double timeValue);
-    
-    /**
-     * @brief 年を取得
-     * @return 年（例: 2023）
-     */
-    int getFullYear() const;
-    
-    /**
-     * @brief 年を設定
-     * @param year 年（例: 2023）
-     */
-    void setFullYear(int year);
-    
-    /**
-     * @brief 月を取得
-     * @return 月（0〜11）
-     */
-    int getMonth() const;
-    
-    /**
-     * @brief 月を設定
-     * @param month 月（0〜11）
-     */
-    void setMonth(int month);
-    
-    /**
-     * @brief 日を取得
-     * @return 日（1〜31）
-     */
-    int getDate() const;
-    
-    /**
-     * @brief 日を設定
-     * @param date 日（1〜31）
-     */
-    void setDate(int date);
-    
-    /**
-     * @brief 時を取得
-     * @return 時（0〜23）
-     */
-    int getHours() const;
-    
-    /**
-     * @brief 時を設定
-     * @param hours 時（0〜23）
-     */
-    void setHours(int hours);
-    
-    /**
-     * @brief 分を取得
-     * @return 分（0〜59）
-     */
-    int getMinutes() const;
-    
-    /**
-     * @brief 分を設定
-     * @param minutes 分（0〜59）
-     */
-    void setMinutes(int minutes);
-    
-    /**
-     * @brief 秒を取得
-     * @return 秒（0〜59）
-     */
-    int getSeconds() const;
-    
-    /**
-     * @brief 秒を設定
-     * @param seconds 秒（0〜59）
-     */
-    void setSeconds(int seconds);
-    
-    /**
-     * @brief ミリ秒を取得
-     * @return ミリ秒（0〜999）
-     */
-    int getMilliseconds() const;
-    
-    /**
-     * @brief ミリ秒を設定
-     * @param milliseconds ミリ秒（0〜999）
-     */
-    void setMilliseconds(int milliseconds);
-    
-    /**
-     * @brief Dateプロトタイプオブジェクト
-     */
-    static Object* s_prototype;
-    
-private:
-    /**
-     * @brief 内部的な時間表現
-     */
-    std::chrono::system_clock::time_point m_time;
+ public:
+  /**
+   * @brief 現在の日時でDateオブジェクトを作成するコンストラクタ
+   */
+  DateObject();
+
+  /**
+   * @brief 指定されたミリ秒値でDateオブジェクトを作成するコンストラクタ
+   * @param timeValue UNIX時間（1970年1月1日からのミリ秒）
+   */
+  explicit DateObject(double timeValue);
+
+  /**
+   * @brief 指定された年月日時分秒でDateオブジェクトを作成するコンストラクタ
+   * @param year 年（例: 2023）
+   * @param month 月（0〜11）
+   * @param day 日（1〜31）
+   * @param hour 時（0〜23）
+   * @param minute 分（0〜59）
+   * @param second 秒（0〜59）
+   * @param millisecond ミリ秒（0〜999）
+   */
+  DateObject(int year, int month, int day, int hour = 0, int minute = 0, int second = 0, int millisecond = 0);
+
+  /**
+   * @brief デストラクタ
+   */
+  ~DateObject();
+
+  /**
+   * @brief オブジェクトがDateオブジェクトかどうかを判定
+   * @return 常にtrue
+   */
+  bool isDateObject() const override {
+    return true;
+  }
+
+  /**
+   * @brief Dateオブジェクトのプリミティブ値（ミリ秒値）を取得
+   * @return Dateオブジェクトのプリミティブ値を表すValue
+   */
+  Value valueOf() const;
+
+  /**
+   * @brief ISO 8601形式の文字列表現を取得
+   * @return ISO 8601形式の文字列（例: "2023-01-01T12:00:00.000Z"）
+   */
+  std::string toISOString() const;
+
+  /**
+   * @brief 日付を文字列表現で取得
+   * @return 日付の文字列表現
+   */
+  std::string toString() const;
+
+  /**
+   * @brief 1970年1月1日からのミリ秒数を取得
+   * @return ミリ秒数
+   */
+  double getTime() const;
+
+  /**
+   * @brief 1970年1月1日からのミリ秒数を設定
+   * @param timeValue ミリ秒数
+   */
+  void setTime(double timeValue);
+
+  /**
+   * @brief 年を取得
+   * @return 年（例: 2023）
+   */
+  int getFullYear() const;
+
+  /**
+   * @brief 年を設定
+   * @param year 年（例: 2023）
+   */
+  void setFullYear(int year);
+
+  /**
+   * @brief 月を取得
+   * @return 月（0〜11）
+   */
+  int getMonth() const;
+
+  /**
+   * @brief 月を設定
+   * @param month 月（0〜11）
+   */
+  void setMonth(int month);
+
+  /**
+   * @brief 日を取得
+   * @return 日（1〜31）
+   */
+  int getDate() const;
+
+  /**
+   * @brief 日を設定
+   * @param date 日（1〜31）
+   */
+  void setDate(int date);
+
+  /**
+   * @brief 時を取得
+   * @return 時（0〜23）
+   */
+  int getHours() const;
+
+  /**
+   * @brief 時を設定
+   * @param hours 時（0〜23）
+   */
+  void setHours(int hours);
+
+  /**
+   * @brief 分を取得
+   * @return 分（0〜59）
+   */
+  int getMinutes() const;
+
+  /**
+   * @brief 分を設定
+   * @param minutes 分（0〜59）
+   */
+  void setMinutes(int minutes);
+
+  /**
+   * @brief 秒を取得
+   * @return 秒（0〜59）
+   */
+  int getSeconds() const;
+
+  /**
+   * @brief 秒を設定
+   * @param seconds 秒（0〜59）
+   */
+  void setSeconds(int seconds);
+
+  /**
+   * @brief ミリ秒を取得
+   * @return ミリ秒（0〜999）
+   */
+  int getMilliseconds() const;
+
+  /**
+   * @brief ミリ秒を設定
+   * @param milliseconds ミリ秒（0〜999）
+   */
+  void setMilliseconds(int milliseconds);
+
+  /**
+   * @brief Dateプロトタイプオブジェクト
+   */
+  static Object* s_prototype;
+
+ private:
+  /**
+   * @brief 内部的な時間表現
+   */
+  std::chrono::system_clock::time_point m_time;
 };
 
 /**
@@ -394,6 +397,6 @@ void initDatePrototype(GlobalObject* globalObj);
  */
 void initDateObject(GlobalObject* globalObj);
 
-} // namespace aero
+}  // namespace aero
 
-#endif // AERO_DATE_H 
+#endif  // AERO_DATE_H

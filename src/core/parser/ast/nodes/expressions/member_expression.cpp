@@ -13,12 +13,14 @@
  */
 
 #include "member_expression.h"
-#include "../node.h" // For Super
-#include "identifier.h"
-#include "private_identifier.h"
-#include "../../visitors/ast_visitor.h"
+
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+
+#include "../../visitors/ast_visitor.h"
+#include "../node.h"  // For Super
+#include "identifier.h"
+#include "private_identifier.h"
 
 namespace aerojs {
 namespace core {
@@ -36,41 +38,59 @@ MemberExpression::MemberExpression(std::unique_ptr<Node> object,
       m_property(std::move(property)),
       m_computed(computed),
       m_optional(optional) {
-    if (!m_object) throw std::runtime_error("MemberExpression object cannot be null");
-    if (!m_property) throw std::runtime_error("MemberExpression property cannot be null");
-    m_object->setParent(this);
-    m_property->setParent(this);
+  if (!m_object) throw std::runtime_error("MemberExpression object cannot be null");
+  if (!m_property) throw std::runtime_error("MemberExpression property cannot be null");
+  m_object->setParent(this);
+  m_property->setParent(this);
 }
 
-const Node& MemberExpression::getObject() const { return *m_object; }
-Node& MemberExpression::getObject() { return *m_object; }
-const Node& MemberExpression::getProperty() const { return *m_property; }
-Node& MemberExpression::getProperty() { return *m_property; }
-bool MemberExpression::isComputed() const noexcept { return m_computed; }
-bool MemberExpression::isOptional() const noexcept { return m_optional; }
+const Node& MemberExpression::getObject() const {
+  return *m_object;
+}
+Node& MemberExpression::getObject() {
+  return *m_object;
+}
+const Node& MemberExpression::getProperty() const {
+  return *m_property;
+}
+Node& MemberExpression::getProperty() {
+  return *m_property;
+}
+bool MemberExpression::isComputed() const noexcept {
+  return m_computed;
+}
+bool MemberExpression::isOptional() const noexcept {
+  return m_optional;
+}
 
-void MemberExpression::accept(AstVisitor& visitor) { visitor.Visit(*this); }
-void MemberExpression::accept(ConstAstVisitor& visitor) const { visitor.Visit(*this); }
+void MemberExpression::accept(AstVisitor& visitor) {
+  visitor.Visit(*this);
+}
+void MemberExpression::accept(ConstAstVisitor& visitor) const {
+  visitor.Visit(*this);
+}
 
 std::vector<Node*> MemberExpression::getChildren() {
-    return {m_object.get(), m_property.get()};
+  return {m_object.get(), m_property.get()};
 }
 std::vector<const Node*> MemberExpression::getChildren() const {
-    return {m_object.get(), m_property.get()};
+  return {m_object.get(), m_property.get()};
 }
 
 nlohmann::json MemberExpression::toJson(bool pretty) const {
-    nlohmann::json jsonNode;
-    baseJson(jsonNode);
-    jsonNode["object"] = m_object->toJson(pretty);
-    jsonNode["property"] = m_property->toJson(pretty);
-    jsonNode["computed"] = m_computed;
-    jsonNode["optional"] = m_optional;
-    return jsonNode;
+  nlohmann::json jsonNode;
+  baseJson(jsonNode);
+  jsonNode["object"] = m_object->toJson(pretty);
+  jsonNode["property"] = m_property->toJson(pretty);
+  jsonNode["computed"] = m_computed;
+  jsonNode["optional"] = m_optional;
+  return jsonNode;
 }
-std::string MemberExpression::toString() const { return "MemberExpression"; }
+std::string MemberExpression::toString() const {
+  return "MemberExpression";
+}
 
-} // namespace ast
-} // namespace parser
-} // namespace core
-} // namespace aerojs 
+}  // namespace ast
+}  // namespace parser
+}  // namespace core
+}  // namespace aerojs

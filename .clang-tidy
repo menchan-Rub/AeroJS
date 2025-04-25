@@ -1,0 +1,14 @@
+---
+Checks: >
+  -*,
+  modernize-*+,
+  performance-*+, 
+  readability-*+, 
+  clang-analyzer-*+, 
+  hicpp-*+, 
+  bugprone-*+, 
+  cppcoreguidelines-*+
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'src/core/jit/.*'
+FormatStyle: file
+---

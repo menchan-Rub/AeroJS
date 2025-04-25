@@ -1,0 +1,11 @@
+SymbolTest.BasicCreation 1 0.0119489
+SymbolTest.EmptyDescription 1 0.0108078
+SymbolTest.Identity 1 0.00995204
+SymbolTest.GlobalSymbolRegistry 1 0.00892934
+SymbolTest.WellKnownSymbols 1 0.0117842
+SymbolTest.ThreadSafety 1 0.0143455
+SymbolTest.RegistryCleanup 1 0.0106776
+SymbolTest.HashSupport 1 0.00873835
+JITCompilerTest.BaselineCompileEmpty 1 0.00927877
+JITCompilerTest.BaselineCompileNonEmpty 1 0.00826885
+---
