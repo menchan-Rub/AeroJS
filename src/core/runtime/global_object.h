@@ -132,6 +132,22 @@ class GlobalObject : public Object {
   }
 
   /**
+   * @brief WeakRefプロトタイプを取得
+   * @return WeakRefプロトタイプ
+   */
+  Object* weakRefPrototype() const {
+    return m_weakRefPrototype;
+  }
+
+  /**
+   * @brief FinalizationRegistryプロトタイプを取得
+   * @return FinalizationRegistryプロトタイプ
+   */
+  Object* finalizationRegistryPrototype() const {
+    return m_finalizationRegistryPrototype;
+  }
+
+  /**
    * @brief オブジェクトコンストラクタを取得
    * @return オブジェクトコンストラクタ
    */
@@ -217,6 +233,22 @@ class GlobalObject : public Object {
    */
   FunctionObject* weakMapConstructor() const {
     return m_weakMapConstructor;
+  }
+
+  /**
+   * @brief WeakRefコンストラクタを取得
+   * @return WeakRefコンストラクタ
+   */
+  FunctionObject* weakRefConstructor() const {
+    return m_weakRefConstructor;
+  }
+
+  /**
+   * @brief FinalizationRegistryコンストラクタを取得
+   * @return FinalizationRegistryコンストラクタ
+   */
+  FunctionObject* finalizationRegistryConstructor() const {
+    return m_finalizationRegistryConstructor;
   }
 
   /**
@@ -308,6 +340,22 @@ class GlobalObject : public Object {
   }
 
   /**
+   * @brief WeakRefプロトタイプを設定
+   * @param prototype WeakRefプロトタイプ
+   */
+  void setWeakRefPrototype(Object* prototype) {
+    m_weakRefPrototype = prototype;
+  }
+
+  /**
+   * @brief FinalizationRegistryプロトタイプを設定
+   * @param prototype FinalizationRegistryプロトタイプ
+   */
+  void setFinalizationRegistryPrototype(Object* prototype) {
+    m_finalizationRegistryPrototype = prototype;
+  }
+
+  /**
    * @brief オブジェクトコンストラクタを設定
    * @param constructor オブジェクトコンストラクタ
    */
@@ -396,6 +444,22 @@ class GlobalObject : public Object {
   }
 
   /**
+   * @brief WeakRefコンストラクタを設定
+   * @param constructor WeakRefコンストラクタ
+   */
+  void setWeakRefConstructor(FunctionObject* constructor) {
+    m_weakRefConstructor = constructor;
+  }
+
+  /**
+   * @brief FinalizationRegistryコンストラクタを設定
+   * @param constructor FinalizationRegistryコンストラクタ
+   */
+  void setFinalizationRegistryConstructor(FunctionObject* constructor) {
+    m_finalizationRegistryConstructor = constructor;
+  }
+
+  /**
    * @brief 実行コンテキストを取得
    * @return 実行コンテキスト
    */
@@ -416,6 +480,8 @@ class GlobalObject : public Object {
   Object* m_errorPrototype;
   Object* m_setPrototype;
   Object* m_weakMapPrototype;
+  Object* m_weakRefPrototype;
+  Object* m_finalizationRegistryPrototype;
 
   // 各組み込みオブジェクトのコンストラクタ
   FunctionObject* m_objectConstructor;
@@ -429,6 +495,8 @@ class GlobalObject : public Object {
   FunctionObject* m_errorConstructor;
   FunctionObject* m_setConstructor;
   FunctionObject* m_weakMapConstructor;
+  FunctionObject* m_weakRefConstructor;
+  FunctionObject* m_finalizationRegistryConstructor;
 
   // 実行コンテキスト
   Context* m_context;

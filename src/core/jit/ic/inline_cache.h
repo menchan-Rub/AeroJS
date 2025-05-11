@@ -1,4 +1,5 @@
-#pragma once
+#ifndef AEROJS_CORE_JIT_IC_INLINE_CACHE_H
+#define AEROJS_CORE_JIT_IC_INLINE_CACHE_H
 
 #include <array>
 #include <cstdint>
@@ -249,4 +250,6 @@ void SetPropertyCached(JSObject* obj, uint32_t cacheId, const std::string& prope
 JSValue CallMethodCached(JSObject* obj, uint32_t cacheId, const std::string& methodName, const std::vector<JSValue>& args);
 
 }  // namespace core
-}  // namespace aerojs 
+}  // namespace aerojs
+
+#endif // AEROJS_CORE_JIT_IC_INLINE_CACHE_H 

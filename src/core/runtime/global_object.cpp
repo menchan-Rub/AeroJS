@@ -14,6 +14,7 @@
 #include "builtins/boolean/boolean.h"
 #include "builtins/date/date.h"
 #include "builtins/error/error.h"
+#include "builtins/finalization/finalization_registry.h"
 #include "builtins/function/function_prototype.h"
 #include "builtins/json/json.h"
 #include "builtins/map/map.h"
@@ -29,14 +30,16 @@
 #include "builtins/symbol/symbol.h"
 #include "builtins/typed_array/typed_array.h"
 #include "builtins/weakmap/weakmap.h"
+#include "builtins/weakref/weakref.h"
 #include "builtins/weakset/weakset.h"
 #include "context.h"
 #include "function.h"
+#include "builtins/modules.h"
 
 namespace aero {
 
 GlobalObject::GlobalObject(Context* context)
-    : Object(nullptr), m_objectPrototype(nullptr), m_functionPrototype(nullptr), m_arrayPrototype(nullptr), m_stringPrototype(nullptr), m_numberPrototype(nullptr), m_booleanPrototype(nullptr), m_datePrototype(nullptr), m_regExpPrototype(nullptr), m_errorPrototype(nullptr), m_setPrototype(nullptr), m_mapPrototype(nullptr), m_weakMapPrototype(nullptr), m_weakSetPrototype(nullptr), m_promisePrototype(nullptr), m_symbolPrototype(nullptr), m_proxyPrototype(nullptr), m_typedArrayPrototype(nullptr), m_objectConstructor(nullptr), m_functionConstructor(nullptr), m_arrayConstructor(nullptr), m_stringConstructor(nullptr), m_numberConstructor(nullptr), m_booleanConstructor(nullptr), m_dateConstructor(nullptr), m_regExpConstructor(nullptr), m_errorConstructor(nullptr), m_setConstructor(nullptr), m_mapConstructor(nullptr), m_weakMapConstructor(nullptr), m_weakSetConstructor(nullptr), m_promiseConstructor(nullptr), m_symbolConstructor(nullptr), m_proxyConstructor(nullptr), m_typedArrayConstructor(nullptr), m_context(context), m_initialized(false), m_initializationStartTime(std::chrono::high_resolution_clock::now()) {
+    : Object(nullptr), m_objectPrototype(nullptr), m_functionPrototype(nullptr), m_arrayPrototype(nullptr), m_stringPrototype(nullptr), m_numberPrototype(nullptr), m_booleanPrototype(nullptr), m_datePrototype(nullptr), m_regExpPrototype(nullptr), m_errorPrototype(nullptr), m_setPrototype(nullptr), m_mapPrototype(nullptr), m_weakMapPrototype(nullptr), m_weakSetPrototype(nullptr), m_promisePrototype(nullptr), m_symbolPrototype(nullptr), m_proxyPrototype(nullptr), m_typedArrayPrototype(nullptr), m_weakRefPrototype(nullptr), m_finalizationRegistryPrototype(nullptr), m_objectConstructor(nullptr), m_functionConstructor(nullptr), m_arrayConstructor(nullptr), m_stringConstructor(nullptr), m_numberConstructor(nullptr), m_booleanConstructor(nullptr), m_dateConstructor(nullptr), m_regExpConstructor(nullptr), m_errorConstructor(nullptr), m_setConstructor(nullptr), m_mapConstructor(nullptr), m_weakMapConstructor(nullptr), m_weakSetConstructor(nullptr), m_promiseConstructor(nullptr), m_symbolConstructor(nullptr), m_proxyConstructor(nullptr), m_typedArrayConstructor(nullptr), m_weakRefConstructor(nullptr), m_finalizationRegistryConstructor(nullptr), m_context(context), m_initialized(false), m_initializationStartTime(std::chrono::high_resolution_clock::now()) {
   // グローバルオブジェクトの初期化
   initialize();
 
@@ -109,6 +112,8 @@ void GlobalObject::setupPrototypeChain() {
   m_symbolPrototype = new Object(m_objectPrototype);
   m_proxyPrototype = new Object(m_objectPrototype);
   m_typedArrayPrototype = new Object(m_objectPrototype);
+  m_weakRefPrototype = new Object(m_objectPrototype);
+  m_finalizationRegistryPrototype = new Object(m_objectPrototype);
 }
 
 void GlobalObject::initializeBuiltins() {
@@ -135,6 +140,10 @@ void GlobalObject::initializeBuiltins() {
   registerProxyBuiltin(this);
   registerReflectBuiltin(this);
   registerTypedArrayBuiltin(this);
+  
+  // ES2021以降の組み込みオブジェクト
+  registerWeakRefBuiltin(this);
+  registerFinalizationRegistryBuiltin(this);
 
   // ユーティリティオブジェクト
   registerJSONBuiltin(this);
@@ -266,6 +275,8 @@ void GlobalObject::cleanupBuiltins() {
   safeDelete(m_symbolPrototype);
   safeDelete(m_proxyPrototype);
   safeDelete(m_typedArrayPrototype);
+  safeDelete(m_weakRefPrototype);
+  safeDelete(m_finalizationRegistryPrototype);
 
   // コンストラクタオブジェクトのクリーンアップ
   safeDelete(m_objectConstructor);
@@ -285,6 +296,8 @@ void GlobalObject::cleanupBuiltins() {
   safeDelete(m_symbolConstructor);
   safeDelete(m_proxyConstructor);
   safeDelete(m_typedArrayConstructor);
+  safeDelete(m_weakRefConstructor);
+  safeDelete(m_finalizationRegistryConstructor);
 
   // エラーコンストラクタのクリーンアップ
   for (auto& pair : m_errorConstructors) {
