@@ -1,5 +1,11 @@
-#ifndef AEROJS_CORE_JIT_REGISTERS_REGISTER_ALLOCATOR_H
-#define AEROJS_CORE_JIT_REGISTERS_REGISTER_ALLOCATOR_H
+/**
+ * @file register_allocator.h
+ * @brief 高性能なJITコンパイラのためのレジスタ割り当てクラス
+ * @version 1.0.0
+ * @license MIT
+ */
+
+#pragma once
 
 #include <bitset>
 #include <vector>

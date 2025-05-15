@@ -67,29 +67,49 @@ struct ProfiledTypeInfo {
 // 型フィードバックの記録用構造体
 //==============================================================================
 
+/**
+ * 型フィードバックレコード
+ */
 struct TypeFeedbackRecord {
-    // 型カテゴリの定義
+    // 型カテゴリ
     enum class TypeCategory {
-        Unknown,        // 未知の型または複合型
-        Integer,        // 整数型 (31ビット整数)
-        Double,         // 倍精度浮動小数点型
-        Boolean,        // 真偽値型
-        String,         // 文字列型
-        Object,         // オブジェクト型
-        Array,          // 配列型
-        Function,       // 関数型
-        Null,           // null
-        Undefined       // undefined
+        Unknown,    // 不明な型
+        Integer,    // 整数型
+        Double,     // 浮動小数点型
+        Boolean,    // 真偽値型
+        String,     // 文字列型
+        Object,     // オブジェクト型
+        Array,      // 配列型
+        Function,   // 関数型
+        Null,       // null
+        Undefined,  // undefined
+        Mixed       // 複数の型が混在
     };
-
-    TypeCategory category = TypeCategory::Unknown;  // 観測された型カテゴリ
-    uint32_t observationCount = 0;                  // 観測回数
-    float confidence = 0.0f;                        // 型の一貫性（0.0〜1.0）
-    bool hasNegativeZero = false;                   // 浮動小数点型の場合、-0.0が観測されたか
-    bool hasNaN = false;                            // 浮動小数点型の場合、NaNが観測されたか
-
-    // 型カテゴリ名を文字列で返す
+    
+    TypeCategory category;   // 観測された型
+    uint32_t observationCount; // 観測回数
+    uint32_t totalObservations; // 全観測回数
+    bool hasNegativeZero;    // 負のゼロが観測されたか
+    bool hasNaN;             // NaNが観測されたか
+    float confidence;        // 型の信頼度 (0.0-1.0)
+    
+    // デフォルトコンストラクタ
+    TypeFeedbackRecord()
+        : category(TypeCategory::Unknown),
+          observationCount(0),
+          totalObservations(0),
+          hasNegativeZero(false),
+          hasNaN(false),
+          confidence(0.0f) {}
+    
+    // カテゴリの名前を取得
     std::string GetCategoryName() const;
+    
+    // 型の安定性を計算
+    float GetTypeStability() const {
+        if (totalObservations == 0) return 0.0f;
+        return static_cast<float>(observationCount) / totalObservations;
+    }
 };
 
 //==============================================================================

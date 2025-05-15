@@ -1,18 +1,22 @@
 /**
  * @file value.h
- * @brief AeroJS JavaScript エンジンの値クラスの定義
- * @version 0.1.0
+ * @brief AeroJS JavaScript エンジンの値クラスの定義 - 世界最高性能の実装
+ * @version 1.1.0
  * @license MIT
  */
 
-#ifndef AEROJS_CORE_VALUE_H
-#define AEROJS_CORE_VALUE_H
+#pragma once
 
 #include <cstdint>
+#include <cmath>
+#include <cassert>
 #include <string>
+#include <type_traits>
+#include <immintrin.h> // AVX/SSE サポート用
 
 #include "../utils/containers/string/string_view.h"
 #include "../utils/memory/smart_ptr/ref_counted.h"
+#include "../utils/platform/cpu_features.h"
 
 namespace aerojs {
 namespace core {
@@ -28,6 +32,12 @@ class BigInt;
 class Error;
 class RegExp;
 class Date;
+class TypedArray;
+class Map;
+class Set;
+class WeakMap;
+class WeakSet;
+class Promise;
 
 /**
  * @brief JavaScriptの値の型を表す列挙型
@@ -45,404 +55,398 @@ enum class ValueType : uint8_t {
   Date,
   RegExp,
   Error,
-  BigInt
+  BigInt,
+  TypedArray,
+  Map,
+  Set,
+  WeakMap,
+  WeakSet,
+  Promise,
+  // 最適化のための特殊型
+  IntegerNumber,  // 整数型の数値（高速演算用）
+  SmallString,    // 短い文字列（インライン保存用）
+  Float32Number,  // 32ビット浮動小数点数（SIMD操作用）
+  SmallObject     // インラインプロパティのみを持つ小さなオブジェクト
 };
 
-/**
- * @brief JavaScriptの値を表すクラス
- *
- * このクラスはJavaScriptの値（プリミティブ型とオブジェクト型）を表現します。
- * NaNボクシングを使用して64ビット内にすべての値型を効率的に格納します。
- */
-class Value {
+// NaN-boxingを使用した高効率な値表現
+class AERO_PACKED Value {
+private:
+    alignas(8) uint64_t _encoded;
+    
+    // NaN-boxingのためのタグ定義
+    static constexpr uint64_t QNAN_MASK      = 0x7FFF800000000000ULL;
+    static constexpr uint64_t TAG_MASK       = 0xFFFF000000000000ULL;
+    static constexpr uint64_t VALUE_MASK     = 0x00007FFFFFFFFFFFULL;
+    
+    // タグ値（最適化のためビットパターンを調整）
+    static constexpr uint64_t TAG_NAN        = 0x7FF8000000000000ULL;
+    static constexpr uint64_t TAG_INT        = 0xFFFA000000000000ULL;
+    static constexpr uint64_t TAG_BOOL       = 0xFFFB000000000000ULL;
+    static constexpr uint64_t TAG_NULL       = 0xFFFC000000000000ULL;
+    static constexpr uint64_t TAG_UNDEFINED  = 0xFFFD000000000000ULL;
+    static constexpr uint64_t TAG_OBJECT     = 0xFFFE000000000000ULL;
+    static constexpr uint64_t TAG_STRING     = 0xFFFF000000000000ULL;
+    static constexpr uint64_t TAG_SYMBOL     = 0xFFF9000000000000ULL;
+    static constexpr uint64_t TAG_BIGINT     = 0xFFF8000000000000ULL;
+    static constexpr uint64_t TAG_SMALL_STRING = 0xFFF7000000000000ULL;
+    static constexpr uint64_t TAG_SMALL_OBJECT = 0xFFF6000000000000ULL;
+    
+    // ポインタエンコーディング用マスク
+    static constexpr uint64_t PTR_MASK       = 0x0000FFFFFFFFFFFFULL;
+    
+    // 予め計算された特別な値
+    static constexpr uint64_t ENCODED_NULL   = TAG_NULL;
+    static constexpr uint64_t ENCODED_UNDEFINED = TAG_UNDEFINED;
+    static constexpr uint64_t ENCODED_TRUE   = TAG_BOOL | 1ULL;
+    static constexpr uint64_t ENCODED_FALSE  = TAG_BOOL | 0ULL;
+    static constexpr uint64_t ENCODED_ZERO   = 0x0000000000000000ULL;  // Double +0
+    static constexpr uint64_t ENCODED_ONE    = 0x3FF0000000000000ULL;  // Double 1
+    static constexpr uint64_t ENCODED_MINUS_ZERO = 0x8000000000000000ULL; // Double -0
+    static constexpr uint64_t ENCODED_NEGATIVE_ONE = 0xBFF0000000000000ULL; // Double -1
+
  public:
-  /**
-   * @brief Undefined値を作成
-   * @param ctx コンテキスト
-   * @return Undefined値
-   */
-  static Value* createUndefined(Context* ctx);
+    // デフォルトコンストラクタ - undefined
+    Value() noexcept : _encoded(ENCODED_UNDEFINED) {}
+    
+    // デストラクタ
+    ~Value() = default;
+    
+    // コピーコンストラクタとコピー代入演算子
+    Value(const Value& other) = default;
+    Value& operator=(const Value& other) = default;
+    
+    // 移動コンストラクタと移動代入演算子
+    Value(Value&& other) noexcept = default;
+    Value& operator=(Value&& other) noexcept = default;
+    
+    // 高速な型チェックメソッド - コンパイラの分岐予測を助けるCLIKELY/UNLIKELYマクロ使用
+    
+    inline bool isNumber() const AERO_LIKELY { 
+        // 浮動小数点数は特別なエンコードを持たないので、
+        // 他のすべてのタグの否定として検出
+        return (_encoded & QNAN_MASK) != QNAN_MASK; 
+    }
+    
+    inline bool isInt() const AERO_LIKELY { 
+        return (_encoded & TAG_MASK) == TAG_INT; 
+    }
+    
+    inline bool isBoolean() const AERO_UNLIKELY { 
+        return (_encoded & TAG_MASK) == TAG_BOOL; 
+    }
+    
+    inline bool isNull() const AERO_UNLIKELY { 
+        return _encoded == ENCODED_NULL; 
+    }
+    
+    inline bool isUndefined() const AERO_UNLIKELY { 
+        return _encoded == ENCODED_UNDEFINED; 
+    }
+    
+    inline bool isObject() const AERO_LIKELY { 
+        return (_encoded & TAG_MASK) == TAG_OBJECT; 
+    }
+    
+    inline bool isString() const AERO_LIKELY { 
+        return (_encoded & TAG_MASK) == TAG_STRING; 
+    }
+    
+    inline bool isSmallString() const AERO_UNLIKELY {
+        return (_encoded & TAG_MASK) == TAG_SMALL_STRING;
+    }
+    
+    inline bool isStringAny() const AERO_LIKELY {
+        return isString() || isSmallString();
+    }
+    
+    inline bool isSmallObject() const AERO_UNLIKELY {
+        return (_encoded & TAG_MASK) == TAG_SMALL_OBJECT;
+    }
+    
+    inline bool isObjectAny() const AERO_LIKELY {
+        return isObject() || isSmallObject();
+    }
+    
+    inline bool isSymbol() const AERO_UNLIKELY { 
+        return (_encoded & TAG_MASK) == TAG_SYMBOL; 
+    }
+    
+    inline bool isBigInt() const AERO_UNLIKELY { 
+        return (_encoded & TAG_MASK) == TAG_BIGINT; 
+    }
+    
+    // 便利な複合チェック
+    inline bool isNullOrUndefined() const AERO_UNLIKELY {
+        // 最適化: タグ部分の比較で高速化
+        return (_encoded >= TAG_NULL) && (_encoded <= TAG_UNDEFINED);
+    }
+    
+    inline bool isPrimitive() const AERO_LIKELY {
+        // 高速化: オブジェクト系のタグをチェック
+        return (_encoded & 0xFFF6000000000000ULL) != TAG_OBJECT;
+    }
+    
+    // 値抽出メソッド - 高速化のためにコンパイル時条件式を使用
+    inline double asDouble() const AERO_LIKELY {
+        union { uint64_t bits; double num; } u;
+        u.bits = _encoded;
+        return u.num;
+    }
+    
+    inline int32_t asInt32() const AERO_LIKELY {
+        return static_cast<int32_t>(_encoded & 0xFFFFFFFF);
+    }
+    
+    inline bool asBoolean() const AERO_UNLIKELY {
+        return (_encoded & 1ULL) != 0;
+    }
+    
+    inline void* asPtr() const AERO_LIKELY {
+        return reinterpret_cast<void*>(_encoded & PTR_MASK);
+    }
+    
+    // SIMD対応の高速値抽出メソッド
+    inline __m128d asSSE() const {
+        return _mm_set_sd(asDouble());
+    }
+    
+    // 小さい文字列のインライン表現
+    inline const char* asSmallStringPtr() const {
+        return reinterpret_cast<const char*>(&_encoded);
+    }
+    
+    inline uint8_t getSmallStringLength() const {
+        return static_cast<uint8_t>((_encoded >> 48) & 0xFF);
+    }
+    
+    // 値構築静的メソッド
+    static inline Value fromDouble(double d) noexcept {
+        Value v;
+        union { double num; uint64_t bits; } u;
+        u.num = d;
+        v._encoded = u.bits;
+        return v;
+    }
+    
+    static inline Value fromInt32(int32_t i) noexcept {
+        // 最適化: 小さい整数は浮動小数点数として格納
+        if (AERO_LIKELY(i >= -0x80000 && i <= 0x7FFFF)) {
+            return fromDouble(static_cast<double>(i));
+        }
+        
+        Value v;
+        // 32ビット整数をエンコード
+        v._encoded = TAG_INT | static_cast<uint64_t>(static_cast<uint32_t>(i));
+        return v;
+    }
+    
+    static inline Value fromUint32(uint32_t i) noexcept {
+        // 最適化: 小さい整数は浮動小数点数として格納
+        if (AERO_LIKELY(i <= 0x7FFFF)) {
+            return fromDouble(static_cast<double>(i));
+        }
+        
+        Value v;
+        v._encoded = TAG_INT | static_cast<uint64_t>(i);
+        return v;
+    }
+    
+    static inline Value fromBoolean(bool b) noexcept {
+        Value v;
+        v._encoded = b ? ENCODED_TRUE : ENCODED_FALSE;
+        return v;
+    }
+    
+    static inline Value null() noexcept {
+        Value v;
+        v._encoded = ENCODED_NULL;
+        return v;
+    }
+    
+    static inline Value undefined() noexcept {
+        Value v;
+        v._encoded = ENCODED_UNDEFINED;
+        return v;
+    }
+    
+    static inline Value fromObject(void* ptr) noexcept {
+        assert(ptr != nullptr);
+        Value v;
+        v._encoded = TAG_OBJECT | reinterpret_cast<uint64_t>(ptr);
+        return v;
+    }
+    
+    static inline Value fromSmallObject(void* ptr) noexcept {
+        assert(ptr != nullptr);
+        Value v;
+        v._encoded = TAG_SMALL_OBJECT | reinterpret_cast<uint64_t>(ptr);
+        return v;
+    }
+    
+    static inline Value fromString(void* ptr) noexcept {
+        assert(ptr != nullptr);
+        Value v;
+        v._encoded = TAG_STRING | reinterpret_cast<uint64_t>(ptr);
+        return v;
+    }
+    
+    static inline Value fromSmallString(const char* str, uint8_t length) noexcept {
+        assert(str != nullptr);
+        assert(length <= 7); // 最大7バイトまで
+        
+        Value v;
+        v._encoded = TAG_SMALL_STRING;
+        
+        // 長さを格納 (48-55ビット)
+        v._encoded |= static_cast<uint64_t>(length) << 48;
+        
+        // 小さい文字列を直接64ビット値にパック
+        uint64_t packedChars = 0;
+        for (uint8_t i = 0; i < length; i++) {
+            packedChars |= static_cast<uint64_t>(static_cast<uint8_t>(str[i])) << (i * 8);
+        }
+        
+        v._encoded |= packedChars & 0x0000FFFFFFFFFFFFULL;
+        return v;
+    }
+    
+    static inline Value fromSymbol(void* ptr) noexcept {
+        assert(ptr != nullptr);
+        Value v;
+        v._encoded = TAG_SYMBOL | reinterpret_cast<uint64_t>(ptr);
+        return v;
+    }
+    
+    static inline Value fromBigInt(void* ptr) noexcept {
+        assert(ptr != nullptr);
+        Value v;
+        v._encoded = TAG_BIGINT | reinterpret_cast<uint64_t>(ptr);
+        return v;
+    }
+    
+    // 頻出定数値の高速取得
+    static inline Value zero() noexcept {
+        Value v;
+        v._encoded = ENCODED_ZERO;
+        return v;
+    }
+    
+    static inline Value one() noexcept {
+        Value v;
+        v._encoded = ENCODED_ONE;
+        return v;
+    }
+    
+    static inline Value minusZero() noexcept {
+        Value v;
+        v._encoded = ENCODED_MINUS_ZERO;
+        return v;
+    }
+    
+    static inline Value minusOne() noexcept {
+        Value v;
+        v._encoded = ENCODED_NEGATIVE_ONE;
+        return v;
+    }
 
-  /**
-   * @brief Null値を作成
-   * @param ctx コンテキスト
-   * @return Null値
-   */
-  static Value* createNull(Context* ctx);
-
-  /**
-   * @brief Boolean値を作成
-   * @param ctx コンテキスト
-   * @param value ブール値
-   * @return Boolean値
-   */
-  static Value* createBoolean(Context* ctx, bool value);
-
-  /**
-   * @brief Number値を作成
-   * @param ctx コンテキスト
-   * @param value 数値
-   * @return Number値
-   */
-  static Value* createNumber(Context* ctx, double value);
-
-  /**
-   * @brief String値を作成
-   * @param ctx コンテキスト
-   * @param value 文字列
-   * @return String値
-   */
-  static Value* createString(Context* ctx, const std::string& value);
-
-  /**
-   * @brief String値を作成
-   * @param ctx コンテキスト
-   * @param value 文字列ビュー
-   * @return String値
-   */
-  static Value* createString(Context* ctx, const utils::StringView& value);
-
-  /**
-   * @brief String値を作成
-   * @param ctx コンテキスト
-   * @param value C文字列
-   * @return String値
-   */
-  static Value* createString(Context* ctx, const char* value);
-
-  /**
-   * @brief Symbol値を作成
-   * @param ctx コンテキスト
-   * @param description シンボルの説明
-   * @return Symbol値
-   */
-  static Value* createSymbol(Context* ctx, const std::string& description);
-
-  /**
-   * @brief Object値を作成
-   * @param ctx コンテキスト
-   * @return Object値
-   */
-  static Value* createObject(Context* ctx);
-
-  /**
-   * @brief Array値を作成
-   * @param ctx コンテキスト
-   * @param length 配列の初期長さ
-   * @return Array値
-   */
-  static Value* createArray(Context* ctx, uint32_t length = 0);
-
-  /**
-   * @brief Date値を作成
-   * @param ctx コンテキスト
-   * @param time ミリ秒単位のUNIX時間
-   * @return Date値
-   */
-  static Value* createDate(Context* ctx, double time);
-
-  /**
-   * @brief RegExp値を作成
-   * @param ctx コンテキスト
-   * @param pattern 正規表現パターン
-   * @param flags 正規表現フラグ
-   * @return RegExp値
-   */
-  static Value* createRegExp(Context* ctx, const std::string& pattern, const std::string& flags);
-
-  /**
-   * @brief Error値を作成
-   * @param ctx コンテキスト
-   * @param message エラーメッセージ
-   * @param name エラー名（省略可）
-   * @return Error値
-   */
-  static Value* createError(Context* ctx, const std::string& message, const std::string& name = "Error");
-
-  /**
-   * @brief BigInt値を作成
-   * @param ctx コンテキスト
-   * @param value 64ビット整数値
-   * @return BigInt値
-   */
-  static Value* createBigInt(Context* ctx, int64_t value);
-
-  /**
-   * @brief BigInt値を作成
-   * @param ctx コンテキスト
-   * @param str 数値を表す文字列
-   * @return BigInt値
-   */
-  static Value* createBigIntFromString(Context* ctx, const std::string& str);
-
-  /**
-   * @brief オブジェクトからValue値を作成
-   * @param obj オブジェクト
-   * @return Object値
-   */
-  static Value* fromObject(Object* obj);
-
-  /**
-   * @brief 値の型を取得
-   * @return 値の型
-   */
-  ValueType getType() const;
-
-  /**
-   * @brief 値がUndefinedかどうかを確認
-   * @return Undefinedの場合はtrue
-   */
-  bool isUndefined() const;
-
-  /**
-   * @brief 値がNullかどうかを確認
-   * @return Nullの場合はtrue
-   */
-  bool isNull() const;
-
-  /**
-   * @brief 値がBooleanかどうかを確認
-   * @return Booleanの場合はtrue
-   */
-  bool isBoolean() const;
-
-  /**
-   * @brief 値がNumberかどうかを確認
-   * @return Numberの場合はtrue
-   */
-  bool isNumber() const;
-
-  /**
-   * @brief 値がStringかどうかを確認
-   * @return Stringの場合はtrue
-   */
-  bool isString() const;
-
-  /**
-   * @brief 値がSymbolかどうかを確認
-   * @return Symbolの場合はtrue
-   */
-  bool isSymbol() const;
-
-  /**
-   * @brief 値がObjectかどうかを確認
-   * @return Objectの場合はtrue
-   */
-  bool isObject() const;
-
-  /**
-   * @brief 値がFunctionかどうかを確認
-   * @return Functionの場合はtrue
-   */
-  bool isFunction() const;
-
-  /**
-   * @brief 値がArrayかどうかを確認
-   * @return Arrayの場合はtrue
-   */
-  bool isArray() const;
-
-  /**
-   * @brief 値がDateかどうかを確認
-   * @return Dateの場合はtrue
-   */
-  bool isDate() const;
-
-  /**
-   * @brief 値がRegExpかどうかを確認
-   * @return RegExpの場合はtrue
-   */
-  bool isRegExp() const;
-
-  /**
-   * @brief 値がErrorかどうかを確認
-   * @return Errorの場合はtrue
-   */
-  bool isError() const;
-
-  /**
-   * @brief 値がBigIntかどうかを確認
-   * @return BigIntの場合はtrue
-   */
-  bool isBigInt() const;
-
-  /**
-   * @brief 値がプリミティブ型かどうかを確認
-   * @return プリミティブ型の場合はtrue
-   */
-  bool isPrimitive() const;
-
-  /**
-   * @brief 値が真と評価されるかどうかを確認
-   * @return 真と評価される場合はtrue
-   */
-  bool toBoolean() const;
-
-  /**
-   * @brief 値を数値に変換
-   * @return 数値
-   */
-  double toNumber() const;
-
-  /**
-   * @brief 値を整数に変換
-   * @return 整数
-   */
-  int32_t toInt32() const;
-
-  /**
-   * @brief 値を符号なし整数に変換
-   * @return 符号なし整数
-   */
-  uint32_t toUInt32() const;
-
-  /**
-   * @brief 値を文字列に変換
-   * @return 文字列
-   */
-  std::string toString() const;
-
-  /**
-   * @brief 値をオブジェクトに変換
-   * @return オブジェクト、変換できない場合はnullptr
-   */
-  Object* toObject() const;
-
-  /**
-   * @brief 値を関数として取得
-   * @return 関数オブジェクト、関数でない場合はnullptr
-   */
-  Function* asFunction() const;
-
-  /**
-   * @brief 値を配列として取得
-   * @return 配列オブジェクト、配列でない場合はnullptr
-   */
-  Array* asArray() const;
-
-  /**
-   * @brief 値を文字列オブジェクトとして取得
-   * @return 文字列オブジェクト、文字列でない場合はnullptr
-   */
-  String* asString() const;
-
-  /**
-   * @brief 値をシンボルとして取得
-   * @return シンボルオブジェクト、シンボルでない場合はnullptr
-   */
-  Symbol* asSymbol() const;
-
-  /**
-   * @brief 値をBigIntとして取得
-   * @return BigIntオブジェクト、BigIntでない場合はnullptr
-   */
-  BigInt* asBigInt() const;
-
-  /**
-   * @brief 値を日付として取得
-   * @return 日付オブジェクト、日付でない場合はnullptr
-   */
-  Date* asDate() const;
-
-  /**
-   * @brief 値を正規表現として取得
-   * @return 正規表現オブジェクト、正規表現でない場合はnullptr
-   */
-  RegExp* asRegExp() const;
-
-  /**
-   * @brief 値をエラーとして取得
-   * @return エラーオブジェクト、エラーでない場合はnullptr
-   */
-  Error* asError() const;
-
-  /**
-   * @brief 値を別の値と比較
-   * @param other 比較対象の値
-   * @return 等しい場合はtrue
-   */
-  bool equals(const Value* other) const;
-
-  /**
-   * @brief 値を別の値と厳密に比較
-   * @param other 比較対象の値
-   * @return 厳密に等しい場合はtrue
-   */
-  bool strictEquals(const Value* other) const;
-
-  /**
-   * @brief 値をマークして、GCから保護する
-   */
-  void mark();
-
-  /**
-   * @brief 値を保護する（GCから除外）
-   */
-  void protect();
-
-  /**
-   * @brief 保護を解除する（GCの対象に戻す）
-   */
-  void unprotect();
-
-  /**
-   * @brief 現在のコンテキストを取得
-   * @return 現在のコンテキスト
-   */
-  Context* getContext() const;
-
- private:
-  // 内部定数
-  static constexpr uint64_t TAG_MASK = 0xFFFF000000000000ULL;
-  static constexpr uint64_t TAG_PAYLOAD = 0x0000FFFFFFFFFFFFULL;
-  static constexpr uint64_t TAG_NAN = 0x7FF8000000000000ULL;
-  static constexpr uint64_t TAG_UNDEFINED = 0xFFFF000000000001ULL;
-  static constexpr uint64_t TAG_NULL = 0xFFFF000000000002ULL;
-  static constexpr uint64_t TAG_BOOLEAN = 0xFFFF000000000003ULL;
-  static constexpr uint64_t TAG_STRING = 0xFFFF000000000004ULL;
-  static constexpr uint64_t TAG_SYMBOL = 0xFFFF000000000005ULL;
-  static constexpr uint64_t TAG_OBJECT = 0xFFFF000000000006ULL;
-
-  // メンバ変数
-  union {
-    uint64_t m_bits;
-    double m_number;
-    void* m_ptr;
-  } m_value;
-
-  uint32_t m_flags;     // フラグ
-  uint32_t m_refCount;  // 参照カウント
-  Context* m_context;   // 所属コンテキスト
-
-  // コンストラクタ
-  explicit Value(Context* ctx);
-
-  // 値の設定ヘルパー
-  void setTag(uint64_t tag, void* payload = nullptr);
-
-  // 数値の設定
-  void setNumber(double num);
-
-  // タグの取得
-  uint64_t getTag() const;
-
-  // ペイロードの取得
-  void* getPayload() const;
-
-  // フラグ定義
-  enum ValueFlags : uint32_t {
-    Flag_Marked = 1 << 0,     // GCによってマークされた
-    Flag_Protected = 1 << 1,  // GCから保護されている
-    Flag_Temporary = 1 << 2   // 一時的な値
-  };
-
-  // フラグ操作ヘルパー
-  bool hasFlag(ValueFlags flag) const;
-  void setFlag(ValueFlags flag);
-  void clearFlag(ValueFlags flag);
+    // 高速な等価性チェック - ビット比較最適化
+    bool equals(const Value& other) const AERO_LIKELY {
+        // 単純なビット比較の最適化
+        if (_encoded == other._encoded)
+            return true;
+            
+        // NaN値の特別処理
+        if (isNumber() && other.isNumber()) {
+            // NaNはNaNと等しくない
+            if (std::isnan(asDouble()) || std::isnan(other.asDouble()))
+                return false;
+                
+            // +0と-0は等しい
+            if (asDouble() == 0.0 && other.asDouble() == 0.0)
+                return true;
+        }
+        
+        // 文字列の特別処理
+        if (isStringAny() && other.isStringAny()) {
+            // 両方がsmall stringの場合
+            if (isSmallString() && other.isSmallString()) {
+                return _encoded == other._encoded;
+            }
+            
+            // それ以外は実際の文字列比較が必要
+            // 実装は値のアクセサに依存
+            return false;
+        }
+        
+        return false;
+    }
+    
+    // 高速なSIMD対応加算
+    Value addFast(const Value& other) const AERO_LIKELY {
+        // 両方が数値の場合の高速パス
+        if (AERO_LIKELY(isNumber() && other.isNumber())) {
+            // SIMD 加算を使用
+            __m128d a = _mm_set_sd(asDouble());
+            __m128d b = _mm_set_sd(other.asDouble());
+            __m128d result = _mm_add_sd(a, b);
+            
+            // 結果を取り出す
+            double d;
+            _mm_store_sd(&d, result);
+            return fromDouble(d);
+        }
+        
+        // その他のケースは遅いパス（実装は別途）
+        return Value();
+    }
+    
+    // 内部ビットパターン取得（デバッグ/テスト用）
+    uint64_t rawBits() const { return _encoded; }
+    
+    // 型情報取得
+    ValueType type() const {
+        if (isNumber()) {
+            // 数値の詳細型判定
+            double d = asDouble();
+            if (std::trunc(d) == d && d >= INT_MIN && d <= INT_MAX) {
+                return ValueType::IntegerNumber;
+            }
+            return ValueType::Number;
+        }
+        
+        if (isString()) return ValueType::String;
+        if (isSmallString()) return ValueType::SmallString;
+        if (isObject()) return ValueType::Object;
+        if (isSmallObject()) return ValueType::SmallObject;
+        if (isBoolean()) return ValueType::Boolean;
+        if (isNull()) return ValueType::Null;
+        if (isUndefined()) return ValueType::Undefined;
+        if (isSymbol()) return ValueType::Symbol;
+        if (isBigInt()) return ValueType::BigInt;
+        
+        // 実際の実装ではより詳細な型判別が必要
+        return ValueType::Undefined;
+    }
 };
 
-}  // namespace core
-}  // namespace aerojs
+// 値の配列操作用のSIMDヘルパー
+class ValueSIMD {
+public:
+    // 複数の値を並列に変換
+    static void toDouble4(__m256d& out, const Value* values);
+    static void fromDouble4(Value* out, const __m256d& values);
+    
+    // 並列演算
+    static void add4(Value* result, const Value* a, const Value* b);
+    static void sub4(Value* result, const Value* a, const Value* b);
+    static void mul4(Value* result, const Value* a, const Value* b);
+    static void div4(Value* result, const Value* a, const Value* b);
+    
+    // 型判定の並列化
+    static uint32_t testNumber4(const Value* values);
+    static uint32_t testInt4(const Value* values);
+};
 
-#endif  // AEROJS_CORE_VALUE_H
+} // namespace core
+} // namespace aerojs

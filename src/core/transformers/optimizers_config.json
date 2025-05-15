@@ -1,0 +1,112 @@
+{
+  "version": "2.0.0",
+  "transformers": {
+    "parallel_array_optimization": {
+      "enabled": true,
+      "priority": 70,
+      "phase": "optimization",
+      "options": {
+        "optimization_level": 1,
+        "thread_count": 0,
+        "enable_simd": true,
+        "enable_profiling": true,
+        "min_array_size": 32,
+        "simd_preferences": ["AVX2", "NEON", "SSE4", "AVX512"],
+        "enable_heuristics": true,
+        "cache_size": 128
+      }
+    },
+    "constant_folding": {
+      "enabled": true,
+      "priority": 50,
+      "phase": "optimization",
+      "options": {
+        "level": 2,
+        "max_iterations": 3,
+        "enable_speculative_folding": true,
+        "fold_builtin_calls": true,
+        "fold_global_math": true
+      }
+    },
+    "type_inference": {
+      "enabled": true,
+      "priority": 40,
+      "phase": "analysis",
+      "options": {
+        "precision_level": 2,
+        "max_inference_depth": 5,
+        "enable_polymorphic_inference": true,
+        "cache_results": true,
+        "propagate_literals": true
+      }
+    },
+    "inline_functions": {
+      "enabled": true,
+      "priority": 80,
+      "phase": "optimization",
+      "options": {
+        "max_inline_size": 128,
+        "max_recursion_depth": 2,
+        "enable_heuristics": true,
+        "inline_builtins": true
+      }
+    },
+    "dead_code_elimination": {
+      "enabled": true,
+      "priority": 85,
+      "phase": "optimization",
+      "options": {
+        "remove_unreachable": true,
+        "remove_unused_vars": true,
+        "remove_unused_properties": false,
+        "remove_empty_blocks": true
+      }
+    },
+    "loop_optimization": {
+      "enabled": true,
+      "priority": 75,
+      "phase": "optimization",
+      "options": {
+        "enable_unrolling": true,
+        "max_unroll_count": 8,
+        "enable_fusion": true,
+        "enable_hoisting": true,
+        "enable_vectorization": true
+      }
+    }
+  },
+  "pipelines": {
+    "default": [
+      "type_inference",
+      "constant_folding",
+      "inline_functions",
+      "parallel_array_optimization",
+      "loop_optimization",
+      "dead_code_elimination"
+    ],
+    "fast": [
+      "constant_folding",
+      "inline_functions",
+      "dead_code_elimination"
+    ],
+    "size_optimized": [
+      "constant_folding",
+      "dead_code_elimination"
+    ],
+    "debug": [
+      "type_inference"
+    ]
+  },
+  "global_options": {
+    "max_transform_iterations": 3,
+    "cache_directory": ".transform_cache",
+    "enable_statistics": true,
+    "log_level": "info",
+    "parallel_pipeline": true,
+    "hardware_detection": {
+      "enabled": true,
+      "cache_results": true,
+      "force_cpu_features": []
+    }
+  }
+} 

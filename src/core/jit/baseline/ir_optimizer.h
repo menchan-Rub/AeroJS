@@ -136,6 +136,12 @@ public:
    */
   void SetCostThreshold(int32_t threshold) noexcept;
 
+  // パスが有効かどうかを返す
+  [[nodiscard]] bool IsPassEnabled(OptimizationPass pass) const noexcept;
+  
+  // ジャンプ命令かどうかを判定する
+  [[nodiscard]] bool IsJumpInstruction(Opcode opcode) const noexcept;
+
 private:
   /**
    * @brief 定数畳み込みを実行する
@@ -209,13 +215,6 @@ private:
    * @param level 最適化レベル
    */
   void ConfigurePassesForLevel(OptimizationLevel level) noexcept;
-  
-  /**
-   * @brief 指定されたパスが有効かどうかを取得する
-   * @param pass チェックする最適化パス
-   * @return 有効な場合true
-   */
-  bool IsPassEnabled(OptimizationPass pass) const noexcept;
   
   /**
    * @brief 最適化パスを実行し、統計情報を更新する

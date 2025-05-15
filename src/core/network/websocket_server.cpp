@@ -216,6 +216,165 @@ class WebSocketConnectionImpl {
     m_isOpen = isOpen;
   }
 
+  // WebSocketConnectionImpl::sendCompressed の実装
+  bool sendCompressed(const std::string& message, WebSocketConnection::CompressionMethod method, int level) {
+    if (!m_isOpen || !m_wsi) {
+      logger.error("切断された接続にメッセージを送信しようとしました: ID={}", m_id);
+      return false;
+    }
+
+    try {
+      std::vector<uint8_t> compressedData;
+      
+      switch (method) {
+        case WebSocketConnection::CompressionMethod::DEFLATE: {
+          // zlib deflateを使用した圧縮
+          compressedData = compressWithZlib(message, level);
+          break;
+        }
+        case WebSocketConnection::CompressionMethod::BROTLI: {
+          // Brotli圧縮（利用可能な場合）
+  #ifdef HAVE_BROTLI
+          compressedData = compressWithBrotli(message, level);
+  #else
+          logger.warn("Brotli圧縮が利用できないため、zlibにフォールバックします");
+          compressedData = compressWithZlib(message, level);
+  #endif
+          break;
+        }
+        case WebSocketConnection::CompressionMethod::CUSTOM: {
+          // カスタム圧縮（必要に応じて実装）
+          logger.warn("カスタム圧縮は実装されていません。zlibにフォールバックします");
+          compressedData = compressWithZlib(message, level);
+          break;
+        }
+        default:
+          // 圧縮なし
+          return send(message);
+      }
+
+      // 圧縮データの送信
+      if (compressedData.empty()) {
+        logger.error("圧縮に失敗しました: ID={}", m_id);
+        return false;
+      }
+
+      return sendRawData(compressedData.data(), compressedData.size(), LWS_WRITE_BINARY);
+    } catch (const std::exception& e) {
+      logger.error("圧縮メッセージの送信中にエラーが発生しました: {}", e.what());
+      return false;
+    }
+  }
+
+  // WebSocketConnectionImpl::sendFragmented の実装
+  bool sendFragmented(const std::string& message, size_t fragmentSize) {
+    if (!m_isOpen || !m_wsi) {
+      logger.error("切断された接続にメッセージを送信しようとしました: ID={}", m_id);
+      return false;
+    }
+
+    try {
+      const size_t totalSize = message.size();
+      if (totalSize <= fragmentSize) {
+        // フラグメント化が不要な場合は通常送信
+        return send(message);
+      }
+
+      size_t offset = 0;
+      bool isFirst = true;
+      bool success = true;
+
+      while (offset < totalSize) {
+        size_t chunkSize = std::min(fragmentSize, totalSize - offset);
+        std::string_view chunk(message.data() + offset, chunkSize);
+        
+        // フラグメントの種類を決定
+        int writeMode;
+        if (isFirst) {
+          writeMode = LWS_WRITE_TEXT_START;
+          isFirst = false;
+        } else if (offset + chunkSize >= totalSize) {
+          writeMode = LWS_WRITE_TEXT_FINAL;
+        } else {
+          writeMode = LWS_WRITE_TEXT_CONTINUATION;
+        }
+        
+        // フラグメントの送信
+        if (!sendRawData(chunk.data(), chunk.size(), writeMode)) {
+          logger.error("フラグメントの送信に失敗しました: ID={}, オフセット={}", m_id, offset);
+          success = false;
+          break;
+        }
+        
+        offset += chunkSize;
+      }
+      
+      return success;
+    } catch (const std::exception& e) {
+      logger.error("フラグメント化メッセージの送信中にエラーが発生しました: {}", e.what());
+      return false;
+    }
+  }
+
+  // WebSocketConnectionImpl::sendPing の実装
+  bool sendPing(const std::string& data) {
+    if (!m_isOpen || !m_wsi) {
+      return false;
+    }
+
+    try {
+      // データサイズを125バイト以下に制限（WebSocketの制約）
+      std::string pingData = data;
+      if (pingData.size() > 125) {
+        pingData.resize(125);
+        logger.warn("Pingデータが大きすぎるため切り詰めました: ID={}", m_id);
+      }
+
+      // PINGフレームの送信
+      return sendRawData(pingData.data(), pingData.size(), LWS_WRITE_PING);
+    } catch (const std::exception& e) {
+      logger.error("PINGの送信中にエラーが発生しました: {}", e.what());
+      return false;
+    }
+  }
+
+  // WebSocketConnectionImpl::getProtocol の実装
+  std::string getProtocol() const {
+    if (!m_wsi) {
+      return "";
+    }
+
+    return lws_get_protocol(m_wsi)->name;
+  }
+
+  // WebSocketConnectionImpl::getStats の実装
+  std::string getStats() const {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    
+    json stats;
+    stats["id"] = m_id;
+    stats["remote_address"] = m_remoteAddress;
+    stats["connection_time"] = m_connectionTimeStr;
+    stats["is_open"] = m_isOpen;
+    stats["bytes_sent"] = m_bytesSent;
+    stats["bytes_received"] = m_bytesReceived;
+    stats["messages_sent"] = m_messagesSent;
+    stats["messages_received"] = m_messagesReceived;
+    stats["last_activity_time"] = m_lastActivityTimeStr;
+    
+    return stats.dump();
+  }
+
+  // WebSocketConnection の setReceiveTimeout メソッドの実装
+  void setReceiveTimeout(std::chrono::milliseconds timeout) {
+    m_receiveTimeout = timeout;
+  }
+
+  // WebSocketConnection の sendAsync メソッドの実装
+  void sendAsync(const std::string& message, std::function<void(bool)> callback) {
+    m_asyncQueue.push_back({message, callback});
+  }
+
  private:
   lws* m_wsi;                                               ///< libwebsockets接続インスタンス
   lws_context* m_context;                                   ///< libwebsockets コンテキスト
@@ -223,6 +382,8 @@ class WebSocketConnectionImpl {
   std::string m_remoteAddress;                              ///< リモートアドレス
   std::atomic<bool> m_isOpen;                               ///< 接続状態
   std::unordered_map<std::string, std::string> m_userData;  ///< ユーザーデータ
+  std::chrono::milliseconds m_receiveTimeout;                ///< 受信タイムアウト
+  std::vector<std::pair<std::string, std::function<void(bool)>>> m_asyncQueue;  ///< 非同期メッセージキュー
 };
 
 /**

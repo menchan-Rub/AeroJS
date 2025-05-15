@@ -1,6 +1,6 @@
 /*******************************************************************************
  * @file src/core/transformers/dead_code_elimination.h
- * @version 1.0.0 // TODO: バージョン管理
+ * @version 1.1.0
  * @copyright Copyright (c) 2024 AeroJS Project // 年更新
  * @license MIT License
  * @brief 不要なコード（デッドコード）を除去する AST Transformer。

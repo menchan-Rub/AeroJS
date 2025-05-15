@@ -1,254 +1,693 @@
 #include "trace_recorder.h"
-
+#include "tracing_jit.h"
+#include "../../runtime/context/execution_context.h"
+#include "../../runtime/values/value.h"
+#include "../../vm/bytecode/opcode.h"
+#include "../../vm/interpreter/interpreter.h"
+#include "../ir/ir_builder.h"
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <iostream>
 
 namespace aerojs {
 namespace core {
+namespace jit {
+namespace metatracing {
 
-TraceRecorder::TraceRecorder()
-    : isRecording_(false),
-      recordingStartPc_(0),
-      recordingExitPc_(0),
-      lastInstructionIndex_(0) {
+using namespace aerojs::core::runtime;
+using namespace aerojs::core::vm;
+
+// SIMD操作をサポートする最適化されたメモリコピーユーティリティ
+namespace {
+    // メモリ操作のアラインメントサイズ
+    constexpr size_t ALIGNMENT_SIZE = 16;
+    
+    template<typename T>
+    inline void optimizedCopy(const T* src, T* dest, size_t count) {
+        #if defined(__AVX2__)
+        // AVX2が利用可能な場合、SIMD命令を使用
+        if (count >= 8 && reinterpret_cast<uintptr_t>(src) % ALIGNMENT_SIZE == 0 && 
+            reinterpret_cast<uintptr_t>(dest) % ALIGNMENT_SIZE == 0) {
+            // アラインメントが合っている場合はSIMD最適化
+            size_t simdCount = count / 8;
+            for (size_t i = 0; i < simdCount; i++) {
+                __m256i value = _mm256_load_si256(reinterpret_cast<const __m256i*>(src + i * 8));
+                _mm256_store_si256(reinterpret_cast<__m256i*>(dest + i * 8), value);
+            }
+            
+            // 残りの要素をコピー
+            size_t remaining = count % 8;
+            size_t offset = count - remaining;
+            for (size_t i = 0; i < remaining; i++) {
+                dest[offset + i] = src[offset + i];
+            }
+        } else
+        #endif
+        {
+            // SIMDが使えない場合は標準コピー
+            for (size_t i = 0; i < count; i++) {
+                dest[i] = src[i];
+            }
+        }
+    }
 }
 
-TraceRecorder::~TraceRecorder() = default;
+/**
+ * @brief コンストラクタ
+ */
+TraceRecorder::TraceRecorder(TracingJIT& jit)
+    : m_jit(jit),
+      m_isRecording(false),
+      m_currentTrace(),
+      m_exitReason(ExitReason::None),
+      m_guardFailureCount(0),
+      m_recordingDepth(0),
+      m_lastEntryPoint(nullptr),
+      m_statisticsEnabled(true)
+{
+    initializeEmptyTrace();
+}
 
-bool TraceRecorder::beginRecording(uint64_t pc) {
-    if (isRecording_) {
-        // 既に記録中
+/**
+ * @brief デストラクタ
+ */
+TraceRecorder::~TraceRecorder() {
+    // リソースクリーンアップ
+    reset();
+}
+
+/**
+ * @brief トレース記録を開始する
+ * @param context 実行コンテキスト
+ * @param entryPoint トレース開始位置
+ * @return 記録開始に成功したらtrue
+ */
+bool TraceRecorder::startRecording(execution::ExecutionContext* context, const bytecode::BytecodeAddress& entryPoint) {
+    if (m_isRecording) {
+        // 既に記録中の場合、ネストしたトレースとして処理
+        if (m_recordingDepth >= MAX_NESTED_TRACE_DEPTH) {
+            // ネストの深さが限界を超えた場合は記録しない
         return false;
+        }
+        m_recordingDepth++;
+        return true;
     }
     
-    // 最適化済みトレースが既に存在する場合は記録開始しない
-    if (optimizedTraces_.find(pc) != optimizedTraces_.end()) {
-        return false;
-    }
+    // 新しいトレースを初期化
+    initializeEmptyTrace();
     
-    isRecording_ = true;
-    recordingStartPc_ = pc;
-    currentTrace_.clear();
-    lastInstructionIndex_ = 0;
+    m_isRecording = true;
+    m_recordingDepth = 1;
+    m_lastEntryPoint = entryPoint;
+    m_currentTrace.entryPoint = entryPoint;
+    m_currentTrace.startTimestamp = getCurrentTimestamp();
+    m_currentTrace.contextSnapshot = std::make_unique<ContextSnapshot>(context);
+    
+    // トレース開始命令を記録
+    TraceInstruction startInstr;
+    startInstr.opcode = TraceOpcode::TraceStart;
+    startInstr.location = entryPoint;
+    startInstr.timestamp = getCurrentTimestamp();
+    m_currentTrace.instructions.push_back(startInstr);
+    
+    // 統計情報を記録
+    m_jit.recordTraceStartEvent(entryPoint);
     
     return true;
 }
 
-std::unique_ptr<IRFunction> TraceRecorder::endRecording(uint64_t exitPc) {
-    if (!isRecording_) {
+/**
+ * @brief トレース記録を強制終了する
+ * @param reason 終了理由
+ */
+void TraceRecorder::abortRecording(ExitReason reason) {
+    if (!m_isRecording) {
+        return;
+    }
+    
+    // ネストしたトレースの場合、深さを減らすだけ
+    if (m_recordingDepth > 1) {
+        m_recordingDepth--;
+        return;
+    }
+    
+    m_exitReason = reason;
+    m_isRecording = false;
+    m_recordingDepth = 0;
+    
+    // 統計情報を記録
+    if (m_statisticsEnabled) {
+        m_jit.recordTraceAbortEvent(m_currentTrace.entryPoint, reason);
+    }
+    
+    // トレースをクリア
+    initializeEmptyTrace();
+}
+
+/**
+ * @brief トレース記録を完了する
+ * @return 記録されたトレース
+ */
+std::unique_ptr<TraceRecorder::Trace> TraceRecorder::finishRecording() {
+    if (!m_isRecording) {
         return nullptr;
     }
     
-    isRecording_ = false;
-    recordingExitPc_ = exitPc;
-    
-    // トレースが短すぎる場合は最適化しない
-    if (currentTrace_.size() < 3) {
+    // ネストしたトレースの場合、深さを減らすだけ
+    if (m_recordingDepth > 1) {
+        m_recordingDepth--;
         return nullptr;
     }
     
-    // 現在のトレースを最適化
-    auto& profile = traceProfiles_[recordingStartPc_];
-    auto optimizedTrace = optimizeTrace(currentTrace_, profile);
+    // トレース終了命令を記録
+    TraceInstruction endInstr;
+    endInstr.opcode = TraceOpcode::TraceEnd;
+    endInstr.timestamp = getCurrentTimestamp();
+    m_currentTrace.instructions.push_back(endInstr);
     
-    // 最適化されたトレースを保存
-    optimizedTraces_[recordingStartPc_] = std::move(optimizedTrace);
+    // トレース実行時間を計算
+    m_currentTrace.executionTimeNs = endInstr.timestamp - m_currentTrace.startTimestamp;
     
-    return std::make_unique<IRFunction>(*(optimizedTraces_[recordingStartPc_]));
-}
-
-void TraceRecorder::recordExecution(uint64_t pc, uint32_t opcode, const std::vector<Value>& args, const Value& result) {
-    // まずプロファイルを更新
-    auto& profile = getOrCreateProfile(pc);
-    profile.incrementExecutionCount();
-    
-    // 型情報を記録
-    if (!args.empty()) {
-        for (size_t i = 0; i < args.size(); ++i) {
-            profile.recordTypeInfo(lastInstructionIndex_, args[i]);
-        }
+    // 統計情報を記録
+    if (m_statisticsEnabled) {
+        m_jit.recordTraceCompletionEvent(m_currentTrace.entryPoint, 
+                                         m_currentTrace.instructions.size(),
+                                         m_currentTrace.executionTimeNs);
     }
     
-    // 結果の型情報も記録
-    profile.recordTypeInfo(lastInstructionIndex_ + 1, result);
+    // 結果を返すためにトレースのコピーを作成
+    std::unique_ptr<Trace> result = std::make_unique<Trace>();
+    result->entryPoint = m_currentTrace.entryPoint;
+    result->exitPoint = m_currentTrace.exitPoint;
+    result->startTimestamp = m_currentTrace.startTimestamp;
+    result->executionTimeNs = m_currentTrace.executionTimeNs;
+    result->exitReason = m_exitReason;
     
-    // トレースの記録中であれば命令を追加
-    if (isRecording_) {
-        IRInstruction instruction;
-        instruction.opcode = static_cast<IROpcode>(opcode);
-        
-        // 引数をコピー
-        for (const auto& arg : args) {
-            instruction.args.push_back(arg.toInt64());
-        }
-        
-        currentTrace_.push_back(instruction);
-        lastInstructionIndex_++;
+    // コンテキストスナップショットのコピー
+    if (m_currentTrace.contextSnapshot) {
+        result->contextSnapshot = std::make_unique<ContextSnapshot>(*m_currentTrace.contextSnapshot);
     }
     
-    // 実行回数が閾値を超えたら記録開始
-    if (!isRecording_ && profile.shouldOptimize()) {
-        beginRecording(pc);
-    }
-}
-
-TraceProfile& TraceRecorder::getOrCreateProfile(uint64_t pc) {
-    auto it = traceProfiles_.find(pc);
-    if (it == traceProfiles_.end()) {
-        auto [newIt, _] = traceProfiles_.emplace(pc, TraceProfile(pc));
-        return newIt->second;
-    }
-    return it->second;
-}
-
-void TraceRecorder::recordResult(uint64_t pc, const Value& result) {
-    auto& profile = getOrCreateProfile(pc);
-    profile.recordTypeInfo(lastInstructionIndex_, result);
-}
-
-const IRFunction* TraceRecorder::getOptimizedTrace(uint64_t pc) const {
-    auto it = optimizedTraces_.find(pc);
-    if (it != optimizedTraces_.end()) {
-        return it->second.get();
-    }
-    return nullptr;
-}
-
-std::unique_ptr<IRFunction> TraceRecorder::optimizeTrace(
-    const std::vector<IRInstruction>& trace,
-    const TraceProfile& profile) {
+    // 命令リストのコピー
+    result->instructions.resize(m_currentTrace.instructions.size());
+    optimizedCopy(m_currentTrace.instructions.data(), 
+                  result->instructions.data(),
+                  m_currentTrace.instructions.size());
     
-    // 型情報に基づく投機的最適化を適用
-    auto optimizedTrace = applySpeculativeOptimizations(trace, profile);
+    // サイドエグジットのコピー
+    result->sideExits.resize(m_currentTrace.sideExits.size());
+    for (size_t i = 0; i < m_currentTrace.sideExits.size(); i++) {
+        result->sideExits[i] = m_currentTrace.sideExits[i];
+    }
     
-    // 脱最適化ポイントを生成
-    generateDeoptimizationPoints(optimizedTrace, profile);
+    // 統計情報のコピー
+    result->executedBytecodes = m_currentTrace.executedBytecodes;
     
-    // 最適化されたトレースからIR関数を生成
-    auto result = std::make_unique<IRFunction>();
-    result->SetInstructions(optimizedTrace);
-    result->SetEntryPC(profile.getStartPc());
+    // 現在のトレースをリセット
+    m_isRecording = false;
+    m_recordingDepth = 0;
+    m_exitReason = ExitReason::None;
+    initializeEmptyTrace();
     
     return result;
 }
 
-std::vector<IRInstruction> TraceRecorder::applySpeculativeOptimizations(
-    const std::vector<IRInstruction>& trace,
-    const TraceProfile& profile) {
+/**
+ * @brief バイトコード命令の実行を記録する
+ * @param context 実行コンテキスト
+ * @param location バイトコードの位置
+ * @param opcode バイトコードのオペコード
+ * @param operands オペランドリスト
+ */
+void TraceRecorder::recordBytecodeExecution(
+    execution::ExecutionContext* context,
+    const bytecode::BytecodeAddress& location,
+    bytecode::Opcode opcode,
+    const std::vector<Value>& operands) 
+{
+    if (!m_isRecording) {
+        return;
+    }
     
-    std::vector<IRInstruction> optimized = trace;
+    // 最大トレース長のチェック
+    if (m_currentTrace.instructions.size() >= MAX_TRACE_LENGTH) {
+        abortRecording(ExitReason::TraceTooLong);
+        return;
+    }
     
-    // 1. 定数伝播
-    for (size_t i = 0; i < optimized.size(); ++i) {
-        // パターンマッチングによる定数伝播
-        if (i > 0 && optimized[i-1].opcode == IROpcode::LoadConst) {
-            int64_t constValue = optimized[i-1].args[0];
+    // バイトコード実行命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::ExecuteBytecode;
+    instr.location = location;
+    instr.bytecodeOp = opcode;
+    instr.timestamp = getCurrentTimestamp();
+    
+    // オペランドのコピー
+    instr.operands.resize(operands.size());
+    for (size_t i = 0; i < operands.size(); i++) {
+        instr.operands[i] = operands[i];
+    }
+    
+    // スタックスナップショットの記録（定期的に）
+    const size_t STACK_SNAPSHOT_INTERVAL = 10; // 10命令ごとにスタックをスナップショット
+    if (m_currentTrace.instructions.size() % STACK_SNAPSHOT_INTERVAL == 0) {
+        instr.hasStackSnapshot = true;
+        instr.stackSnapshot = captureStackSnapshot(context);
+    }
+    
+    m_currentTrace.instructions.push_back(instr);
+    m_currentTrace.executedBytecodes++;
+    
+    // バイトコードの種類に応じた特殊処理
+    switch (opcode) {
+        case bytecode::Opcode::CALL:
+        case bytecode::Opcode::CALL_METHOD:
+            // 関数呼び出しの場合、呼び出し深さをチェック
+            if (context->getCallStackDepth() > MAX_INLINE_CALL_DEPTH) {
+                // インライン展開の深さが制限を超えた場合
+                recordSideExit(context, location, SideExitType::CallStackLimitReached);
+            }
+            break;
             
-            // 定数畳み込み: 定数同士の演算を事前計算
-            if (i > 1 && optimized[i-2].opcode == IROpcode::LoadConst) {
-                int64_t constValue2 = optimized[i-2].args[0];
+        case bytecode::Opcode::JMP_IF_FALSE:
+        case bytecode::Opcode::JMP_IF_TRUE:
+        case bytecode::Opcode::JMP:
+            // ジャンプ命令の場合、トレースが大きくなりすぎないようにループ検出
+            if (isBackwardJump(location, getBytecodeJumpTarget(location, opcode, operands))) {
+                m_loopIterationCount++;
                 
-                if (optimized[i].opcode == IROpcode::Add) {
-                    // 加算の定数畳み込み
-                    optimized[i].opcode = IROpcode::LoadConst;
-                    optimized[i].args.clear();
-                    optimized[i].args.push_back(constValue + constValue2);
-                    // 元の定数ロード命令を削除
-                    optimized[i-1].opcode = IROpcode::Nop;
-                    optimized[i-2].opcode = IROpcode::Nop;
-                } else if (optimized[i].opcode == IROpcode::Sub) {
-                    // 減算の定数畳み込み
-                    optimized[i].opcode = IROpcode::LoadConst;
-                    optimized[i].args.clear();
-                    optimized[i].args.push_back(constValue2 - constValue);
-                    // 元の定数ロード命令を削除
-                    optimized[i-1].opcode = IROpcode::Nop;
-                    optimized[i-2].opcode = IROpcode::Nop;
-                } else if (optimized[i].opcode == IROpcode::Mul) {
-                    // 乗算の定数畳み込み
-                    optimized[i].opcode = IROpcode::LoadConst;
-                    optimized[i].args.clear();
-                    optimized[i].args.push_back(constValue * constValue2);
-                    // 元の定数ロード命令を削除
-                    optimized[i-1].opcode = IROpcode::Nop;
-                    optimized[i-2].opcode = IROpcode::Nop;
-                } else if (optimized[i].opcode == IROpcode::Div && constValue != 0) {
-                    // 除算の定数畳み込み (ゼロ除算回避)
-                    optimized[i].opcode = IROpcode::LoadConst;
-                    optimized[i].args.clear();
-                    optimized[i].args.push_back(constValue2 / constValue);
-                    // 元の定数ロード命令を削除
-                    optimized[i-1].opcode = IROpcode::Nop;
-                    optimized[i-2].opcode = IROpcode::Nop;
+                if (m_loopIterationCount > MAX_LOOP_ITERATIONS) {
+                    // ループ反復回数が多すぎる場合、サイドエグジット
+                    recordSideExit(context, location, SideExitType::LoopIterationLimit);
                 }
             }
-        }
-    }
-    
-    // 2. 不要コード削除
-    std::vector<IRInstruction> result;
-    for (const auto& inst : optimized) {
-        if (inst.opcode != IROpcode::Nop) {
-            result.push_back(inst);
-        }
-    }
-    
-    // 3. 型特化最適化
-    for (size_t i = 0; i < result.size(); ++i) {
-        const auto& typeFeedback = profile.getTypeFeedback(i);
-        
-        // 単相的な呼び出しを特殊化
-        if (typeFeedback.isMonomorphic()) {
-            uint32_t dominantType = typeFeedback.getDominantType();
+            break;
             
-            // 特定の型に特化した命令に変換
-            if (result[i].opcode == IROpcode::Add) {
-                // 数値型に特化した加算命令に変換
-                if (dominantType == ValueType::Number) {
-                    result[i].opcode = IROpcode::AddInt;
-                }
-            } else if (result[i].opcode == IROpcode::Call) {
-                // 型情報に基づいてインライン化
-                if (dominantType == ValueType::Function) {
-                    // この特定関数呼び出しの特化命令はユースケースに応じて実装
-                }
-            }
-        }
-    }
-    
-    return result;
-}
-
-void TraceRecorder::generateDeoptimizationPoints(
-    std::vector<IRInstruction>& optimizedTrace,
-    const TraceProfile& profile) {
-    
-    // 全てのガードに対して脱最適化ポイントを生成
-    for (const auto& guard : profile.getGuards()) {
-        uint32_t point = guard.getDeoptPoint();
-        
-        // ガードの種類に応じた脱最適化チェックを追加
-        if (point < optimizedTrace.size()) {
-            // 型チェックガードの追加例
-            if (guard.getType() == TraceGuard::TYPE_GUARD) {
-                IRInstruction checkInst;
-                checkInst.opcode = IROpcode::GuardType;
-                checkInst.args.push_back(static_cast<int64_t>(guard.getOperandIndex()));
-                
-                // ガード失敗時の脱最適化ポイントを指定
-                checkInst.args.push_back(static_cast<int64_t>(point));
-                
-                // ガードのための型情報を取得
-                const auto& typeFeedback = profile.getTypeFeedback(point);
-                checkInst.args.push_back(static_cast<int64_t>(typeFeedback.getDominantType()));
-                
-                // チェック命令を対象位置の前に挿入
-                optimizedTrace.insert(optimizedTrace.begin() + point, checkInst);
-            }
-        }
+        default:
+            // その他のバイトコードは通常処理
+            break;
     }
 }
 
+/**
+ * @brief ガード条件を記録する
+ * @param context 実行コンテキスト
+ * @param location バイトコードの位置
+ * @param condition ガード条件
+ * @param valueType 期待される値の型
+ * @param actualValue 実際の値
+ * @return ガードが成功した場合はtrue
+ */
+bool TraceRecorder::recordGuardCondition(
+    execution::ExecutionContext* context,
+    const bytecode::BytecodeAddress& location,
+    GuardCondition condition,
+    ValueType expectedType,
+    const Value& actualValue) 
+{
+    if (!m_isRecording) {
+        return true; // 記録中でなければガードは常に成功したと見なす
+    }
+    
+    // ガード命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::Guard;
+    instr.location = location;
+    instr.guardCondition = condition;
+    instr.expectedType = expectedType;
+    instr.operands.push_back(actualValue);
+    instr.timestamp = getCurrentTimestamp();
+    
+    m_currentTrace.instructions.push_back(instr);
+    
+    // ガードの実際の評価
+    bool guardSuccess = evaluateGuard(condition, expectedType, actualValue);
+    
+    if (!guardSuccess) {
+        // ガード失敗を記録
+        recordGuardFailure(context, location, condition, expectedType, actualValue);
+        m_guardFailureCount++;
+        
+        // ガード失敗が多すぎる場合はトレースを中止
+        if (m_guardFailureCount > MAX_GUARD_FAILURES) {
+            abortRecording(ExitReason::TooManyGuardFailures);
+        }
+    }
+    
+    return guardSuccess;
+}
+
+/**
+ * @brief サイドエグジットを記録する
+ * @param context 実行コンテキスト
+ * @param location バイトコードの位置
+ * @param exitType サイドエグジットのタイプ
+ */
+void TraceRecorder::recordSideExit(
+    execution::ExecutionContext* context,
+    const bytecode::BytecodeAddress& location,
+    SideExitType exitType) 
+{
+    if (!m_isRecording) {
+        return;
+    }
+    
+    // サイドエグジット命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::SideExit;
+    instr.location = location;
+    instr.sideExitType = exitType;
+    instr.timestamp = getCurrentTimestamp();
+    
+    // スタックスナップショットを記録
+    instr.hasStackSnapshot = true;
+    instr.stackSnapshot = captureStackSnapshot(context);
+    
+    m_currentTrace.instructions.push_back(instr);
+    
+    // サイドエグジット情報を保存
+    SideExit exit;
+    exit.location = location;
+    exit.type = exitType;
+    exit.instructionIndex = m_currentTrace.instructions.size() - 1;
+    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
+    
+    m_currentTrace.sideExits.push_back(std::move(exit));
+    
+    // サイドエグジットが多すぎる場合はトレースを中止
+    if (m_currentTrace.sideExits.size() > MAX_SIDE_EXITS) {
+        abortRecording(ExitReason::TooManySideExits);
+    }
+}
+
+/**
+ * @brief 最適化条件のヒントを記録する
+ * @param location バイトコードの位置
+ * @param hint 最適化ヒント
+ * @param data 追加データ
+ */
+void TraceRecorder::recordOptimizationHint(
+    const bytecode::BytecodeAddress& location,
+    OptimizationHint hint,
+    const Value& data) 
+{
+    if (!m_isRecording) {
+        return;
+    }
+    
+    // 最適化ヒント命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::OptimizationHint;
+    instr.location = location;
+    instr.optimizationHint = hint;
+    instr.operands.push_back(data);
+    instr.timestamp = getCurrentTimestamp();
+    
+    m_currentTrace.instructions.push_back(instr);
+}
+
+/**
+ * @brief ガード失敗を記録する
+ * @param context 実行コンテキスト
+ * @param location バイトコードの位置
+ * @param condition ガード条件
+ * @param expectedType 期待される値の型
+ * @param actualValue 実際の値
+ */
+void TraceRecorder::recordGuardFailure(
+    execution::ExecutionContext* context,
+    const bytecode::BytecodeAddress& location,
+    GuardCondition condition,
+    ValueType expectedType,
+    const Value& actualValue) 
+{
+    // ガード失敗命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::GuardFailure;
+    instr.location = location;
+    instr.guardCondition = condition;
+    instr.expectedType = expectedType;
+    instr.operands.push_back(actualValue);
+    instr.timestamp = getCurrentTimestamp();
+    
+    // スタックスナップショットを記録
+    instr.hasStackSnapshot = true;
+    instr.stackSnapshot = captureStackSnapshot(context);
+    
+    m_currentTrace.instructions.push_back(instr);
+    
+    // ガード失敗に対応するサイドエグジットを記録
+    SideExit exit;
+    exit.location = location;
+    exit.type = SideExitType::GuardFailure;
+    exit.instructionIndex = m_currentTrace.instructions.size() - 1;
+    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
+    exit.guardCondition = condition;
+    exit.expectedType = expectedType;
+    exit.actualValue = actualValue;
+    
+    m_currentTrace.sideExits.push_back(std::move(exit));
+}
+
+/**
+ * @brief トレースレコーダーをリセットする
+ */
+void TraceRecorder::reset() {
+    m_isRecording = false;
+    m_recordingDepth = 0;
+    m_exitReason = ExitReason::None;
+    m_guardFailureCount = 0;
+    m_loopIterationCount = 0;
+    m_lastEntryPoint = nullptr;
+    
+    initializeEmptyTrace();
+}
+
+/**
+ * @brief トレース記録中かどうかを返す
+ */
+bool TraceRecorder::isRecording() const {
+    return m_isRecording;
+}
+
+/**
+ * @brief 現在の記録深度を返す
+ */
+int TraceRecorder::getRecordingDepth() const {
+    return m_recordingDepth;
+}
+
+/**
+ * @brief 最後のエントリーポイントを返す
+ */
+const bytecode::BytecodeAddress* TraceRecorder::getLastEntryPoint() const {
+    return m_lastEntryPoint;
+}
+
+/**
+ * @brief 統計情報の収集を有効化/無効化する
+ */
+void TraceRecorder::enableStatistics(bool enable) {
+    m_statisticsEnabled = enable;
+}
+
+/**
+ * @brief ガード条件を評価する
+ * @param condition ガード条件
+ * @param expectedType 期待される値の型
+ * @param actualValue 実際の値
+ * @return ガードが成功した場合はtrue
+ */
+bool TraceRecorder::evaluateGuard(
+    GuardCondition condition,
+    ValueType expectedType,
+    const Value& actualValue) 
+{
+    switch (condition) {
+        case GuardCondition::TypeCheck:
+            return actualValue.getType() == expectedType;
+            
+        case GuardCondition::NonNull:
+            return !actualValue.isNull() && !actualValue.isUndefined();
+            
+        case GuardCondition::IntegerInRange:
+            if (actualValue.isInt32()) {
+                int32_t value = actualValue.asInt32();
+                int32_t min = static_cast<int32_t>(expectedType & 0xFFFFFFFF);
+                int32_t max = static_cast<int32_t>(expectedType >> 32);
+                return value >= min && value <= max;
+            }
+            return false;
+            
+        case GuardCondition::StringLength:
+            if (actualValue.isString()) {
+                size_t length = actualValue.asString()->length();
+                return length == static_cast<size_t>(expectedType);
+            }
+            return false;
+            
+        case GuardCondition::ObjectShape:
+            // オブジェクトシェイプの比較は複雑なため、実際の実装ではさらに詳細な処理が必要
+            if (actualValue.isObject()) {
+                return actualValue.asObject()->getShapeId() == static_cast<uint32_t>(expectedType);
+            }
+            return false;
+            
+        case GuardCondition::ArrayLength:
+            if (actualValue.isArray()) {
+                size_t length = actualValue.asArray()->length();
+                return length == static_cast<size_t>(expectedType);
+            }
+            return false;
+            
+        default:
+            // 未知のガード条件は安全のため失敗とする
+            return false;
+    }
+}
+
+/**
+ * @brief 現在のタイムスタンプを取得する
+ */
+uint64_t TraceRecorder::getCurrentTimestamp() {
+    auto now = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now.time_since_epoch()).count();
+}
+
+/**
+ * @brief スタックスナップショットを取得する
+ * @param context 実行コンテキスト
+ * @return スタックスナップショット
+ */
+TraceRecorder::StackSnapshot TraceRecorder::captureStackSnapshot(execution::ExecutionContext* context) {
+    StackSnapshot snapshot;
+    
+    // 現在のスタックをコピー（実際の実装ではエンジンの内部構造に依存）
+    const auto& stack = context->getStack();
+    snapshot.values.resize(stack.size());
+    
+    for (size_t i = 0; i < stack.size(); i++) {
+        snapshot.values[i] = stack[i];
+    }
+    
+    snapshot.stackPointer = context->getStackPointer();
+    snapshot.framePointer = context->getFramePointer();
+    
+    return snapshot;
+}
+
+/**
+ * @brief 空のトレースを初期化する
+ */
+void TraceRecorder::initializeEmptyTrace() {
+    m_currentTrace.instructions.clear();
+    m_currentTrace.sideExits.clear();
+    m_currentTrace.entryPoint = nullptr;
+    m_currentTrace.exitPoint = nullptr;
+    m_currentTrace.startTimestamp = 0;
+    m_currentTrace.executionTimeNs = 0;
+    m_currentTrace.executedBytecodes = 0;
+    m_currentTrace.contextSnapshot.reset();
+    m_loopIterationCount = 0;
+}
+
+/**
+ * @brief 後方ジャンプかどうかをチェックする
+ * @param current 現在の位置
+ * @param target ジャンプ先
+ * @return 後方ジャンプならtrue
+ */
+bool TraceRecorder::isBackwardJump(
+    const bytecode::BytecodeAddress& current,
+    const bytecode::BytecodeAddress& target) 
+{
+    // 通常、バイトコードアドレスは関数とオフセットで構成される
+    // 同じ関数内で、オフセットが現在地より小さければ後方ジャンプ
+    if (current.function == target.function) {
+        return target.offset < current.offset;
+    }
+    
+    // 異なる関数の場合は後方ジャンプとは見なさない
+    return false;
+}
+
+/**
+ * @brief バイトコードのジャンプターゲットを取得する
+ * @param location 現在の位置
+ * @param opcode バイトコードのオペコード
+ * @param operands オペランドリスト
+ * @return ジャンプ先アドレス
+ */
+bytecode::BytecodeAddress TraceRecorder::getBytecodeJumpTarget(
+    const bytecode::BytecodeAddress& location,
+    bytecode::Opcode opcode,
+    const std::vector<Value>& operands) 
+{
+    // ジャンプ命令のターゲットは通常、相対オフセットとして指定される
+    // 実際の実装ではバイトコードフォーマットに依存する
+    
+    // 簡略化のため、直接ジャンプオフセットが指定されていると仮定
+    if (operands.size() > 0 && operands[0].isInt32()) {
+        int32_t offset = operands[0].asInt32();
+        
+        bytecode::BytecodeAddress target;
+        target.function = location.function;
+        target.offset = location.offset + offset;
+        
+        return target;
+    }
+    
+    // デフォルトでは現在位置を返す
+    return location;
+}
+
+/**
+ * @brief コンテキストスナップショットのコンストラクタ
+ * @param context 実行コンテキスト
+ */
+TraceRecorder::ContextSnapshot::ContextSnapshot(execution::ExecutionContext* context) {
+    if (context) {
+        // 実行コンテキストの状態をキャプチャ
+        instruction = context->getCurrentInstruction();
+        stackPointer = context->getStackPointer();
+        framePointer = context->getFramePointer();
+        
+        // 現在のスタックフレームをコピー
+        const auto& stack = context->getStack();
+        stackValues.resize(stack.size());
+        
+        for (size_t i = 0; i < stack.size(); i++) {
+            stackValues[i] = stack[i];
+        }
+        
+        // その他の必要な状態をキャプチャ
+        // コンテキストの実装に応じて追加
+    }
+}
+
+/**
+ * @brief コンテキストスナップショットのコピーコンストラクタ
+ * @param other コピー元のスナップショット
+ */
+TraceRecorder::ContextSnapshot::ContextSnapshot(const ContextSnapshot& other) {
+    instruction = other.instruction;
+    stackPointer = other.stackPointer;
+    framePointer = other.framePointer;
+    
+    stackValues.resize(other.stackValues.size());
+    optimizedCopy(other.stackValues.data(), stackValues.data(), other.stackValues.size());
+}
+
+/**
+ * @brief コンテキストスナップショットのデストラクタ
+ */
+TraceRecorder::ContextSnapshot::~ContextSnapshot() {
+    // 特に必要なリソース解放はない
+}
+
+} // namespace metatracing
+} // namespace jit
 } // namespace core
 } // namespace aerojs 

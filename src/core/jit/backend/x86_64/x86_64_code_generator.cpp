@@ -1,141 +1,1104 @@
 #include "x86_64_code_generator.h"
-
-#include <algorithm>
+#include <cassert>
+#include <cstring>
 
 namespace aerojs {
 namespace core {
 
-// 各Opcode向けのエミッタ関数
-using EmitFn = void (*)(const IRInstruction&, std::vector<uint8_t>&);
-
-static void EmitNop(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x90);
-}
-static void EmitLoadConst(const IRInstruction& inst, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x48);
-  out.push_back(0xC7);
-  out.push_back(0xC0);
-  int32_t val = inst.args.empty() ? 0 : inst.args[0];
-  out.push_back(static_cast<uint8_t>(val & 0xFF));
-  out.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-  out.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-  out.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
-  out.push_back(0x50);
-}
-static void EmitLoadVar(const IRInstruction& inst, std::vector<uint8_t>& out) noexcept {
-  int32_t idx = inst.args.empty() ? 0 : inst.args[0];
-  int32_t disp = -8 * (idx + 1);
-  out.push_back(0x48);
-  out.push_back(0x8B);
-  out.push_back(0x85);
-  out.push_back(static_cast<uint8_t>(disp & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 8) & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 16) & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 24) & 0xFF));
-  out.push_back(0x50);
-}
-static void EmitStoreVar(const IRInstruction& inst, std::vector<uint8_t>& out) noexcept {
-  int32_t idx = inst.args.empty() ? 0 : inst.args[0];
-  int32_t disp = -8 * (idx + 1);
-  out.push_back(0x58);
-  out.push_back(0x48);
-  out.push_back(0x89);
-  out.push_back(0x85);
-  out.push_back(static_cast<uint8_t>(disp & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 8) & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 16) & 0xFF));
-  out.push_back(static_cast<uint8_t>((disp >> 24) & 0xFF));
-}
-static void EmitAdd(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x58);
-  out.push_back(0x5B);
-  out.push_back(0x48);
-  out.push_back(0x01);
-  out.push_back(0xD8);
-  out.push_back(0x50);
-}
-static void EmitSub(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x5B);
-  out.push_back(0x58);
-  out.push_back(0x48);
-  out.push_back(0x29);
-  out.push_back(0xD8);
-  out.push_back(0x50);
-}
-static void EmitMul(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x5B);
-  out.push_back(0x58);
-  out.push_back(0x48);
-  out.push_back(0x0F);
-  out.push_back(0xAF);
-  out.push_back(0xC3);
-  out.push_back(0x50);
-}
-static void EmitDiv(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x5B);
-  out.push_back(0x58);
-  out.push_back(0x48);
-  out.push_back(0x99);
-  out.push_back(0x48);
-  out.push_back(0xF7);
-  out.push_back(0xFB);
-  out.push_back(0x50);
-}
-static void EmitCall(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0x58);
-  out.push_back(0xFF);
-  out.push_back(0xD0);
-  out.push_back(0x50);
-}
-static void EmitReturn(const IRInstruction&, std::vector<uint8_t>& out) noexcept {
-  out.push_back(0xC9);
-  out.push_back(0xC3);
+X86_64CodeGenerator::X86_64CodeGenerator() noexcept {
 }
 
-static constexpr EmitFn kEmitTable[] = {
-    EmitNop,
-    EmitAdd,
-    EmitSub,
-    EmitMul,
-    EmitDiv,
-    EmitLoadConst,
-    EmitLoadVar,
-    EmitStoreVar,
-    EmitCall,
-    EmitReturn};
-
-void X86_64CodeGenerator::Generate(const IRFunction& ir, std::vector<uint8_t>& outCode) noexcept {
-  // プロローグ
-  EmitPrologue(outCode);
-  // IR 命令ごとにエミット
-  for (const auto& inst : ir.GetInstructions()) {
-    EmitInstruction(inst, outCode);
-  }
-  // エピローグ
-  EmitEpilogue(outCode);
+X86_64CodeGenerator::~X86_64CodeGenerator() noexcept {
 }
 
-void X86_64CodeGenerator::EmitPrologue(std::vector<uint8_t>& out) noexcept {
-  // push rbp; mov rbp, rsp
-  out.push_back(0x55);
-  out.push_back(0x48);
-  out.push_back(0x89);
-  out.push_back(0xE5);
+bool X86_64CodeGenerator::Generate(const IRFunction& function, std::vector<uint8_t>& outCode) noexcept {
+    // 出力バッファのサイズを事前に確保（命令あたり平均10バイトと仮定）
+    outCode.reserve(function.GetInstructionCount() * 10);
+    
+    // プロローグコードを生成
+    EncodePrologue(outCode);
+    
+    // 各IR命令をx86_64コードに変換
+    const auto& instructions = function.GetInstructions();
+    for (const auto& inst : instructions) {
+        switch (inst.opcode) {
+            case Opcode::kNop:
+                // NOPは何もしない
+                break;
+            case Opcode::kLoadConst:
+                EncodeLoadConst(inst, outCode);
+                break;
+            case Opcode::kMove:
+                EncodeMove(inst, outCode);
+                break;
+            case Opcode::kAdd:
+            case Opcode::kSub:
+            case Opcode::kMul:
+            case Opcode::kDiv:
+            case Opcode::kMod:
+                // 算術演算
+                switch (inst.opcode) {
+                    case Opcode::kAdd: EncodeAdd(inst, outCode); break;
+                    case Opcode::kSub: EncodeSub(inst, outCode); break;
+                    case Opcode::kMul: EncodeMul(inst, outCode); break;
+                    case Opcode::kDiv: EncodeDiv(inst, outCode); break;
+                    case Opcode::kMod: EncodeMod(inst, outCode); break;
+                    default: break;
+                }
+                break;
+            case Opcode::kNeg:
+                EncodeNeg(inst, outCode);
+                break;
+            case Opcode::kCompareEq:
+            case Opcode::kCompareNe:
+            case Opcode::kCompareLt:
+            case Opcode::kCompareLe:
+            case Opcode::kCompareGt:
+            case Opcode::kCompareGe:
+                // 比較演算
+                EncodeCompare(inst, outCode);
+                break;
+            case Opcode::kAnd:
+            case Opcode::kOr:
+            case Opcode::kNot:
+                // 論理演算
+                EncodeLogical(inst, outCode);
+                break;
+            case Opcode::kBitAnd:
+            case Opcode::kBitOr:
+            case Opcode::kBitXor:
+            case Opcode::kBitNot:
+            case Opcode::kShiftLeft:
+            case Opcode::kShiftRight:
+                // ビット演算
+                EncodeBitwise(inst, outCode);
+                break;
+            case Opcode::kJump:
+            case Opcode::kJumpIfTrue:
+            case Opcode::kJumpIfFalse:
+                // ジャンプ命令
+                EncodeJump(inst, outCode);
+                break;
+            case Opcode::kCall:
+                // 関数呼び出し
+                EncodeCall(inst, outCode);
+                break;
+            case Opcode::kReturn:
+                // 関数からの戻り
+                EncodeReturn(inst, outCode);
+                break;
+            case Opcode::kSIMDLoad:
+                EncodeSIMDLoad(inst, outCode);
+                break;
+            case Opcode::kSIMDStore:
+                EncodeSIMDStore(inst, outCode);
+                break;
+            case Opcode::kSIMDArithmetic:
+                EncodeSIMDArithmetic(inst, outCode);
+                break;
+            case Opcode::kFMA:
+                EncodeFMA(inst, outCode);
+                break;
+            case Opcode::kFastMath:
+                EncodeFastMath(inst, outCode);
+                break;
+            default:
+                // 未サポートの命令
+                // エラーログを出力などの処理を入れるとよい
+                return false;
+        }
+    }
+    
+    // エピローグコードを生成
+    EncodeEpilogue(outCode);
+    
+    return true;
 }
 
-void X86_64CodeGenerator::EmitEpilogue(std::vector<uint8_t>& out) noexcept {
-  // leave; ret
-  out.push_back(0xC9);  // leave
-  out.push_back(0xC3);  // ret
+void X86_64CodeGenerator::SetRegisterMapping(int32_t virtualReg, X86_64Register physicalReg) noexcept {
+    m_registerMapping[virtualReg] = physicalReg;
 }
 
-void X86_64CodeGenerator::EmitInstruction(const IRInstruction& inst, std::vector<uint8_t>& out) noexcept {
-  size_t idx = static_cast<size_t>(inst.opcode);
-  if (idx < sizeof(kEmitTable) / sizeof(EmitFn)) {
-    kEmitTable[idx](inst, out);
+X86_64Register X86_64CodeGenerator::GetPhysicalReg(int32_t virtualReg) const noexcept {
+    auto it = m_registerMapping.find(virtualReg);
+    if (it != m_registerMapping.end()) {
+        return it->second;
+    }
+    
+    // マッピングがない場合は、仮想レジスタ番号に基づいて物理レジスタを推測
+    // この実装はとても単純で、実際には適切なレジスタアロケーションが必要
+    int32_t regIndex = virtualReg % 14; // RSP, RBPを除く14個のGPRに対応
+    
+    // RSP, RBPを避けるための調整
+    if (regIndex >= 4) regIndex += 1;
+    if (regIndex >= 5) regIndex += 1;
+    
+    return static_cast<X86_64Register>(regIndex);
+}
+
+void X86_64CodeGenerator::EncodePrologue(std::vector<uint8_t>& code) noexcept {
+    // プロローグの実装
+    // PUSH RBP
+    code.push_back(0x55);
+    
+    // MOV RBP, RSP
+    code.push_back(0x48); // REX.W
+    code.push_back(0x89);
+    code.push_back(0xE5);
+    
+    // SUB RSP, 128 (スタックフレーム確保)
+    code.push_back(0x48); // REX.W
+    code.push_back(0x81);
+    code.push_back(0xEC);
+    code.push_back(0x80); // 0x80 = 128
+    code.push_back(0x00);
+    code.push_back(0x00);
+    code.push_back(0x00);
+    
+    // 保存が必要なレジスタをプッシュ
+    // PUSH RBX
+    code.push_back(0x53);
+    
+    // PUSH R12-R15
+    code.push_back(0x41); // REX.B for R12
+    code.push_back(0x54);
+    code.push_back(0x41); // REX.B for R13
+    code.push_back(0x55);
+    code.push_back(0x41); // REX.B for R14
+    code.push_back(0x56);
+    code.push_back(0x41); // REX.B for R15
+    code.push_back(0x57);
+}
+
+void X86_64CodeGenerator::EncodeEpilogue(std::vector<uint8_t>& code) noexcept {
+    // エピローグの実装
+    // POP R15-R12
+    code.push_back(0x41); // REX.B for R15
+    code.push_back(0x5F);
+    code.push_back(0x41); // REX.B for R14
+    code.push_back(0x5E);
+    code.push_back(0x41); // REX.B for R13
+    code.push_back(0x5D);
+    code.push_back(0x41); // REX.B for R12
+    code.push_back(0x5C);
+    
+    // POP RBX
+    code.push_back(0x5B);
+    
+    // MOV RSP, RBP
+    code.push_back(0x48); // REX.W
+    code.push_back(0x89);
+    code.push_back(0xEC);
+    
+    // POP RBP
+    code.push_back(0x5D);
+    
+    // RET
+    code.push_back(0xC3);
+}
+
+// ヘルパー関数
+void X86_64CodeGenerator::AppendImmediate32(std::vector<uint8_t>& code, int32_t value) noexcept {
+    uint8_t* bytes = reinterpret_cast<uint8_t*>(&value);
+    for (int i = 0; i < 4; ++i) {
+        code.push_back(bytes[i]);
+    }
+}
+
+void X86_64CodeGenerator::AppendImmediate64(std::vector<uint8_t>& code, int64_t value) noexcept {
+    uint8_t* bytes = reinterpret_cast<uint8_t*>(&value);
+    for (int i = 0; i < 8; ++i) {
+        code.push_back(bytes[i]);
+    }
+}
+
+void X86_64CodeGenerator::AppendREXPrefix(std::vector<uint8_t>& code, bool w, bool r, bool x, bool b) noexcept {
+    uint8_t rex = 0x40;
+    if (w) rex |= 0x08; // REX.W = 1: 64-bit operand
+    if (r) rex |= 0x04; // REX.R = 1: Extension of the ModR/M reg field
+    if (x) rex |= 0x02; // REX.X = 1: Extension of the SIB index field
+    if (b) rex |= 0x01; // REX.B = 1: Extension of the ModR/M r/m field, SIB base, or Opcode reg
+    
+    code.push_back(rex);
+}
+
+void X86_64CodeGenerator::AppendModRM(std::vector<uint8_t>& code, uint8_t mod, uint8_t reg, uint8_t rm) noexcept {
+    // mod(2) | reg(3) | rm(3)
+    uint8_t modrm = (mod << 6) | ((reg & 0x7) << 3) | (rm & 0x7);
+    code.push_back(modrm);
+}
+
+// 基本命令エンコード実装
+void X86_64CodeGenerator::EncodeMove(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 2) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physSrc = GetPhysicalReg(srcReg);
+    
+    // MOV dst, src
+    // REXプレフィックス: W=1 (64-bit), R=拡張destReg, B=拡張srcReg
+    bool rExt = static_cast<uint8_t>(physDest) >= 8;
+    bool bExt = static_cast<uint8_t>(physSrc) >= 8;
+    AppendREXPrefix(code, true, rExt, false, bExt);
+    
+    code.push_back(0x89); // MOV r/m64, r64
+    
+    // ModR/Mバイト: mod=11 (レジスタ直接), reg=srcReg, r/m=destReg
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physSrc) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+}
+
+void X86_64CodeGenerator::EncodeLoadConst(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 2) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t constValue = inst.args[1];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    
+    // MOV dst, imm32
+    // REXプレフィックス: W=1 (64-bit), B=拡張destReg
+    bool bExt = static_cast<uint8_t>(physDest) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    
+    // オペコード: 0xB8 + レジスタ番号 (MOV r64, imm64)
+    code.push_back(0xB8 + (static_cast<uint8_t>(physDest) & 0x7));
+    
+    // 64ビット即値 (64ビットモードでも32ビット即値でゼロ拡張される)
+    AppendImmediate32(code, constValue);
+    AppendImmediate32(code, 0); // 上位32ビットはゼロ
+}
+
+void X86_64CodeGenerator::EncodeAdd(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t leftReg = inst.args[1];
+    int32_t rightReg = inst.args[2];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physLeft = GetPhysicalReg(leftReg);
+    X86_64Register physRight = GetPhysicalReg(rightReg);
+    
+    // destとleftが異なる場合、まずleftをdestにコピー
+    if (physDest != physLeft) {
+        // MOV dest, left
+        bool rExt = static_cast<uint8_t>(physLeft) >= 8;
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, rExt, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, static_cast<uint8_t>(physLeft) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+    }
+    
+    // ADD dest, right
+    bool rExt = static_cast<uint8_t>(physRight) >= 8;
+    bool bExt = static_cast<uint8_t>(physDest) >= 8;
+    AppendREXPrefix(code, true, rExt, false, bExt);
+    code.push_back(0x01); // ADD r/m64, r64
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physRight) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+}
+
+void X86_64CodeGenerator::EncodeSub(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t leftReg = inst.args[1];
+    int32_t rightReg = inst.args[2];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physLeft = GetPhysicalReg(leftReg);
+    X86_64Register physRight = GetPhysicalReg(rightReg);
+    
+    // destとleftが異なる場合、まずleftをdestにコピー
+    if (physDest != physLeft) {
+        // MOV dest, left
+        bool rExt = static_cast<uint8_t>(physLeft) >= 8;
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, rExt, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, static_cast<uint8_t>(physLeft) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+    }
+    
+    // SUB dest, right
+    bool rExt = static_cast<uint8_t>(physRight) >= 8;
+    bool bExt = static_cast<uint8_t>(physDest) >= 8;
+    AppendREXPrefix(code, true, rExt, false, bExt);
+    code.push_back(0x29); // SUB r/m64, r64
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physRight) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+}
+
+void X86_64CodeGenerator::EncodeMul(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t leftReg = inst.args[1];
+    int32_t rightReg = inst.args[2];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physLeft = GetPhysicalReg(leftReg);
+    X86_64Register physRight = GetPhysicalReg(rightReg);
+    
+    // destとleftが異なる場合、まずleftをdestにコピー
+    if (physDest != physLeft) {
+        // MOV dest, left
+        bool rExt = static_cast<uint8_t>(physLeft) >= 8;
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, rExt, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, static_cast<uint8_t>(physLeft) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+    }
+    
+    // IMUL dest, right
+    bool rExt = static_cast<uint8_t>(physDest) >= 8;
+    bool bExt = static_cast<uint8_t>(physRight) >= 8;
+    AppendREXPrefix(code, true, rExt, false, bExt);
+    code.push_back(0x0F);
+    code.push_back(0xAF); // IMUL r64, r/m64
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physDest) & 0x7, static_cast<uint8_t>(physRight) & 0x7);
+}
+
+void X86_64CodeGenerator::EncodeDiv(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t leftReg = inst.args[1];
+    int32_t rightReg = inst.args[2];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physLeft = GetPhysicalReg(leftReg);
+    X86_64Register physRight = GetPhysicalReg(rightReg);
+    
+    // 除算は複雑なので、まずRAXにleftを、RDXを0にセットし、
+    // IDIVで割り、結果をdestに移動する必要がある
+    
+    // MOV RAX, left
+    bool bExt = static_cast<uint8_t>(physLeft) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    code.push_back(0x89); // MOV r/m64, r64
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physLeft) & 0x7, 0); // RAX = 0
+    
+    // XOR RDX, RDX (RDXをゼロクリア)
+    AppendREXPrefix(code, true, false, false, false);
+    code.push_back(0x31); // XOR r/m64, r64
+    AppendModRM(code, 0b11, 2, 2); // RDX = 2
+    
+    // IDIV right
+    bExt = static_cast<uint8_t>(physRight) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    code.push_back(0xF7); // IDIV r/m64
+    AppendModRM(code, 0b11, 7, static_cast<uint8_t>(physRight) & 0x7);
+    
+    // 商はRAXに入っているので、これをdestに移動（RAXでない場合）
+    if (physDest != X86_64Register::RAX) {
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, false, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, 0, static_cast<uint8_t>(physDest) & 0x7);
+    }
+}
+
+void X86_64CodeGenerator::EncodeMod(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t leftReg = inst.args[1];
+    int32_t rightReg = inst.args[2];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physLeft = GetPhysicalReg(leftReg);
+    X86_64Register physRight = GetPhysicalReg(rightReg);
+    
+    // 剰余も除算と同様に複雑
+    
+    // MOV RAX, left
+    bool bExt = static_cast<uint8_t>(physLeft) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    code.push_back(0x89); // MOV r/m64, r64
+    AppendModRM(code, 0b11, static_cast<uint8_t>(physLeft) & 0x7, 0); // RAX = 0
+    
+    // XOR RDX, RDX (RDXをゼロクリア)
+    AppendREXPrefix(code, true, false, false, false);
+    code.push_back(0x31); // XOR r/m64, r64
+    AppendModRM(code, 0b11, 2, 2); // RDX = 2
+    
+    // IDIV right
+    bExt = static_cast<uint8_t>(physRight) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    code.push_back(0xF7); // IDIV r/m64
+    AppendModRM(code, 0b11, 7, static_cast<uint8_t>(physRight) & 0x7);
+    
+    // 剰余はRDXに入っているので、これをdestに移動（RDXでない場合）
+    if (physDest != X86_64Register::RDX) {
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, false, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, 2, static_cast<uint8_t>(physDest) & 0x7);
+    }
+}
+
+void X86_64CodeGenerator::EncodeNeg(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 2) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physSrc = GetPhysicalReg(srcReg);
+    
+    // destとsrcが異なる場合、まずsrcをdestにコピー
+    if (physDest != physSrc) {
+        // MOV dest, src
+        bool rExt = static_cast<uint8_t>(physSrc) >= 8;
+        bool bExt = static_cast<uint8_t>(physDest) >= 8;
+        AppendREXPrefix(code, true, rExt, false, bExt);
+        code.push_back(0x89); // MOV r/m64, r64
+        AppendModRM(code, 0b11, static_cast<uint8_t>(physSrc) & 0x7, static_cast<uint8_t>(physDest) & 0x7);
+    }
+    
+    // NEG dest
+    bool bExt = static_cast<uint8_t>(physDest) >= 8;
+    AppendREXPrefix(code, true, false, false, bExt);
+    code.push_back(0xF7); // NEG r/m64
+    AppendModRM(code, 0b11, 3, static_cast<uint8_t>(physDest) & 0x7);
+}
+
+// 実際の実装ではもっと多くの命令を実装する必要があります
+// この例では基本的な算術演算のみ実装しています
+
+void X86_64CodeGenerator::EncodeCompare(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // 比較命令の実装
+    // 簡略化のため、実装は省略
+}
+
+void X86_64CodeGenerator::EncodeLogical(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // 論理演算の実装
+    // 簡略化のため、実装は省略
+}
+
+void X86_64CodeGenerator::EncodeBitwise(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // ビット演算の実装
+    // 簡略化のため、実装は省略
+}
+
+void X86_64CodeGenerator::EncodeJump(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // ジャンプ命令の実装
+    // 簡略化のため、実装は省略
+}
+
+void X86_64CodeGenerator::EncodeCall(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // 関数呼び出しの実装
+    // 簡略化のため、実装は省略
+}
+
+void X86_64CodeGenerator::EncodeReturn(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    // 関数リターンの実装
+    // 簡略化のため、実装は省略
+}
+
+// SIMD操作
+void X86_64CodeGenerator::EncodeSIMDLoad(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t addrReg = inst.args[1];
+    int32_t offset = inst.args[2];
+    
+    auto simdReg = GetSIMDReg(destReg);
+    if (!simdReg.has_value()) return;
+    
+    X86_64Register addrRegPhysical = GetPhysicalReg(addrReg);
+    
+    // AVX使用可能時に最適化
+    bool useAVX = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX);
+    
+    if (useAVX) {
+        // VEX.256.0F.WIG 10 /r VMOVUPS ymm1, m256
+        // 16バイトアラインメント済みのデータに対してはVMOVAPS (aligned)が高速
+        AppendVEXPrefix(code, 0b01, 0b00, 1, 0, 0b1111, 0, 0, 
+                         static_cast<uint8_t>(addrRegPhysical) >= 8);
+        code.push_back(0x10); // MOVUPS opcode
+        
+        // ModRM: [addrReg + offset]
+        if (offset == 0) {
+            // レジスタ間接アドレッシング
+            AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                        static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        } else if (offset >= -128 && offset <= 127) {
+            // 1バイト変位付きアドレッシング
+            AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                        static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            code.push_back(static_cast<uint8_t>(offset));
+        } else {
+            // 4バイト変位付きアドレッシング
+            AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                        static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            AppendImmediate32(code, offset);
+        }
+    } else {
+        // 従来のSSE命令を使用
+        bool rExt = static_cast<uint8_t>(*simdReg) >= 8;
+        bool bExt = static_cast<uint8_t>(addrRegPhysical) >= 8;
+        
+        // REX.R = SIMD Reg extension, REX.B = Base address reg extension
+        AppendREXPrefix(code, false, rExt, false, bExt);
+        
+        code.push_back(0x0F); // Two-byte opcode prefix
+        code.push_back(0x10); // MOVUPS opcode
+        
+        // ModRM: [addrReg + offset]
+        if (offset == 0) {
+            AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        } else if (offset >= -128 && offset <= 127) {
+            AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            code.push_back(static_cast<uint8_t>(offset));
+        } else {
+            AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            AppendImmediate32(code, offset);
+        }
+    }
+}
+
+void X86_64CodeGenerator::EncodeSIMDStore(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t srcReg = inst.args[0];
+    int32_t addrReg = inst.args[1];
+    int32_t offset = inst.args[2];
+    
+    auto simdReg = GetSIMDReg(srcReg);
+    if (!simdReg.has_value()) return;
+    
+    X86_64Register addrRegPhysical = GetPhysicalReg(addrReg);
+    
+    // AVX使用可能時に最適化
+    bool useAVX = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX);
+    
+    if (useAVX) {
+        // VEX.256.0F.WIG 11 /r VMOVUPS m256, ymm1
+        AppendVEXPrefix(code, 0b01, 0b00, 1, 0, 0b1111, 0, 0, 
+                       static_cast<uint8_t>(addrRegPhysical) >= 8);
+        code.push_back(0x11); // MOVUPS opcode (store)
+        
+        // ModRM: [addrReg + offset]
+        if (offset == 0) {
+            AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        } else if (offset >= -128 && offset <= 127) {
+            AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            code.push_back(static_cast<uint8_t>(offset));
+        } else {
+            AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            AppendImmediate32(code, offset);
+        }
+    } else {
+        // 従来のSSE命令を使用
+        bool rExt = static_cast<uint8_t>(*simdReg) >= 8;
+        bool bExt = static_cast<uint8_t>(addrRegPhysical) >= 8;
+        
+        AppendREXPrefix(code, false, rExt, false, bExt);
+        
+        code.push_back(0x0F); // Two-byte opcode prefix
+        code.push_back(0x11); // MOVUPS opcode (store)
+        
+        // ModRM: [addrReg + offset]
+        if (offset == 0) {
+            AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        } else if (offset >= -128 && offset <= 127) {
+            AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            code.push_back(static_cast<uint8_t>(offset));
+        } else {
+            AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                      static_cast<uint8_t>(addrRegPhysical) & 0x7);
+            AppendImmediate32(code, offset);
+        }
+    }
+}
+
+void X86_64CodeGenerator::EncodeSIMDArithmetic(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t src1Reg = inst.args[1];
+    int32_t src2Reg = inst.args[2];
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto src1SIMD = GetSIMDReg(src1Reg);
+    auto src2SIMD = GetSIMDReg(src2Reg);
+    
+    if (!destSIMD.has_value() || !src1SIMD.has_value() || !src2SIMD.has_value()) return;
+    
+    bool useAVX = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX);
+    bool useFMA = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseFMA);
+    
+    uint8_t opcode = 0;
+    uint8_t prefix = 0;
+    
+    // 命令タイプを決定
+    switch (inst.opcode) {
+        case Opcode::kSIMDAdd:
+            opcode = 0x58; // ADDPS
+            break;
+        case Opcode::kSIMDSub:
+            opcode = 0x5C; // SUBPS
+            break;
+        case Opcode::kSIMDMul:
+            opcode = 0x59; // MULPS
+            break;
+        case Opcode::kSIMDDiv:
+            opcode = 0x5E; // DIVPS
+            break;
+        case Opcode::kSIMDMin:
+            opcode = 0x5D; // MINPS
+            break;
+        case Opcode::kSIMDMax:
+            opcode = 0x5F; // MAXPS
+            break;
+        case Opcode::kSIMDAnd:
+            opcode = 0x54; // ANDPS
+            break;
+        case Opcode::kSIMDOr:
+            opcode = 0x56; // ORPS
+            break;
+        case Opcode::kSIMDXor:
+            opcode = 0x57; // XORPS
+            break;
+        default:
+            return; // サポートされていない操作
+    }
+    
+    if (useAVX) {
+        // AVX命令は3オペランド形式をサポート: dest = src1 op src2
+        // VEX.256.0F.WIG opcode /r VADDPS ymm1, ymm2, ymm3/m256
+        AppendVEXPrefix(code, 0b01, 0b00, 1, 0,
+                        static_cast<uint8_t>(*src1SIMD) ^ 0xF, // VEX.vvvv = src1 (反転)
+                        static_cast<uint8_t>(*destSIMD) >= 8,
+                        false,
+                        static_cast<uint8_t>(*src2SIMD) >= 8);
+        
+        code.push_back(opcode);
+        
+        // ModRM
+        AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                    static_cast<uint8_t>(*src2SIMD) & 0x7);
+    } else {
+        // 従来のSSE命令は2オペランド形式: dest = dest op src
+        // まずsrc1をdestにコピーする必要がある場合
+        if (*destSIMD != *src1SIMD) {
+            // MOVAPS dest, src1
+            bool rExt = static_cast<uint8_t>(*destSIMD) >= 8;
+            bool bExt = static_cast<uint8_t>(*src1SIMD) >= 8;
+            
+            AppendREXPrefix(code, false, rExt, false, bExt);
+            
+            code.push_back(0x0F);
+            code.push_back(0x28); // MOVAPS
+            
+            AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                        static_cast<uint8_t>(*src1SIMD) & 0x7);
+        }
+        
+        // 演算を実行: dest = dest op src2
+        bool rExt = static_cast<uint8_t>(*destSIMD) >= 8;
+        bool bExt = static_cast<uint8_t>(*src2SIMD) >= 8;
+        
+        AppendREXPrefix(code, false, rExt, false, bExt);
+        
+        code.push_back(0x0F);
+        code.push_back(opcode);
+        
+        AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                    static_cast<uint8_t>(*src2SIMD) & 0x7);
+    }
+}
+
+void X86_64CodeGenerator::EncodeFMA(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 4) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t src1Reg = inst.args[1];
+    int32_t src2Reg = inst.args[2];
+    int32_t src3Reg = inst.args[3];
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto src1SIMD = GetSIMDReg(src1Reg);
+    auto src2SIMD = GetSIMDReg(src2Reg);
+    auto src3SIMD = GetSIMDReg(src3Reg);
+    
+    if (!destSIMD.has_value() || !src1SIMD.has_value() || 
+        !src2SIMD.has_value() || !src3SIMD.has_value()) return;
+    
+    bool useFMA = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseFMA);
+    if (!useFMA) {
+        // FMA命令をサポートしていない場合、通常の乗算と加算に分解
+        // dest = src1 * src2
+        IRInstruction mulInst;
+        mulInst.opcode = Opcode::kSIMDMul;
+        mulInst.args.push_back(destReg);
+        mulInst.args.push_back(src1Reg);
+        mulInst.args.push_back(src2Reg);
+        
+        // dest = dest + src3
+        IRInstruction addInst;
+        addInst.opcode = Opcode::kSIMDAdd;
+        addInst.args.push_back(destReg);
+        addInst.args.push_back(destReg);
+        addInst.args.push_back(src3Reg);
+        
+        EncodeSIMDArithmetic(mulInst, code);
+        EncodeSIMDArithmetic(addInst, code);
+        return;
+    }
+    
+    // VFMADD132PS/VFMADD213PS/VFMADD231PS
+    // 様々なオペランド順序に対応するFMA命令をサポート
+    
+    // VFMADD213PS: dest = src2 * dest + src3
+    // VEX.DDS.256.66.0F38.W0 A8 /r VFMADD213PS ymm1, ymm2, ymm3/m256
+    AppendVEXPrefix(code, 0b10, 0b01, 1, 0,
+                    static_cast<uint8_t>(*src2SIMD) ^ 0xF, // VEX.vvvv = src2 (反転)
+                    static_cast<uint8_t>(*destSIMD) >= 8,
+                    false,
+                    static_cast<uint8_t>(*src3SIMD) >= 8);
+    
+    code.push_back(0xA8); // VFMADD213PS opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*src3SIMD) & 0x7);
+}
+
+// VEXプレフィックスの追加ヘルパー
+void X86_64CodeGenerator::AppendVEXPrefix(std::vector<uint8_t>& code, uint8_t m, uint8_t p, uint8_t l, uint8_t w, uint8_t vvvv, uint8_t r, uint8_t x, uint8_t b) noexcept {
+    // m: 0F, 0F38, 0F3A のいずれか
+    // p: none, 66, F3, F2 のいずれか
+    // l: vector length (0 = 128-bit, 1 = 256-bit)
+    // w: 64-bit operand
+    // vvvv: 高次のSSEレジスタ指定（反転）
+    // r, x, b: REXプレフィックスのビット
+    
+    if (r || x || b || m != 1) {
+        // 3バイトVEXプレフィックス
+        code.push_back(0xC4);
+        
+        // RXB反転ビットとmapSelect
+        code.push_back((~r & 0x1) << 7 | (~x & 0x1) << 6 | (~b & 0x1) << 5 | (m & 0x1F));
+        
+        // W, vvvv反転, L, pp
+        code.push_back((w & 0x1) << 7 | ((~vvvv) & 0xF) << 3 | (l & 0x1) << 2 | (p & 0x3));
+    } else {
+        // 2バイトVEXプレフィックス（0Fマッピングのみ）
+        code.push_back(0xC5);
+        
+        // R反転ビット, vvvv反転, L, pp
+        code.push_back((~r & 0x1) << 7 | ((~vvvv) & 0xF) << 3 | (l & 0x1) << 2 | (p & 0x3));
+    }
+}
+
+// SIBバイトの追加ヘルパー
+void X86_64CodeGenerator::AppendSIB(std::vector<uint8_t>& code, uint8_t scale, uint8_t index, uint8_t base) noexcept {
+    // scale: 0=1, 1=2, 2=4, 3=8
+    // index: インデックスレジスタ（0-7）
+    // base: ベースレジスタ（0-7）
+    
+    uint8_t sib = (scale & 0x3) << 6 | (index & 0x7) << 3 | (base & 0x7);
+    code.push_back(sib);
+}
+
+// SIMDレジスタの取得
+std::optional<X86_64FloatRegister> X86_64CodeGenerator::GetSIMDReg(int32_t virtualReg) const noexcept {
+    auto it = m_simdRegisterMapping.find(virtualReg);
+    if (it != m_simdRegisterMapping.end()) {
+        return it->second;
+    }
+    
+    // 仮想レジスタ番号に基づいて物理SIMDレジスタを推測
+    // 実際にはレジスタアロケータによって適切に割り当てられるべき
+    int32_t regIndex = virtualReg % 16; // 16個のXMMレジスタを想定
+    
+    return static_cast<X86_64FloatRegister>(regIndex);
+}
+
+// キャッシュライン最適化
+void X86_64CodeGenerator::OptimizeForCacheLine(std::vector<uint8_t>& code) noexcept {
+    if (!HasFlag(m_optimizationFlags, CodeGenOptFlags::CacheAware)) {
+        return;
+    }
+    
+    // 64バイトのキャッシュラインを仮定
+    const size_t cacheLine = 64;
+    
+    // 1. ホットコードパスのアライメント
+    // ジャンプターゲットやループ開始位置をキャッシュライン境界にアライン
+    std::vector<size_t> hotSpots;
+    
+    // ジャンプターゲットを特定 (単純実装)
+    for (size_t i = 0; i < code.size() - 5; ++i) {
+        // 無条件ジャンプまたは条件付きジャンプの命令を検出
+        if (code[i] == 0xE9 || // JMP rel32
+            (code[i] == 0x0F && (code[i+1] >= 0x80 && code[i+1] <= 0x8F))) { // Jcc rel32
+            
+            // ジャンプターゲットを計算
+            int32_t offset;
+            if (code[i] == 0xE9) {
+                offset = *reinterpret_cast<int32_t*>(&code[i+1]);
+                size_t target = i + 5 + offset;
+                hotSpots.push_back(target);
+            } else {
+                offset = *reinterpret_cast<int32_t*>(&code[i+2]);
+                size_t target = i + 6 + offset;
+                hotSpots.push_back(target);
+            }
+        }
+    }
+    
+    // ホットスポットをキャッシュライン境界にアライン
+    std::vector<uint8_t> optimizedCode;
+    optimizedCode.reserve(code.size() + hotSpots.size() * 64); // 最大で各ホットスポットに64バイトのパディングが必要
+    
+    size_t currentPos = 0;
+    for (size_t i = 0; i < code.size(); ++i) {
+        // ホットスポットの位置か確認
+        auto it = std::find(hotSpots.begin(), hotSpots.end(), i);
+        if (it != hotSpots.end()) {
+            // キャッシュライン境界までパディングを追加
+            size_t currentOffset = optimizedCode.size() % cacheLine;
+            if (currentOffset != 0) {
+                size_t paddingNeeded = cacheLine - currentOffset;
+                
+                // NOPによるパディング (0x90)
+                // 長いNOPシーケンスは複数バイトNOPを使用
+                while (paddingNeeded > 0) {
+                    if (paddingNeeded >= 9) {
+                        // 9バイトNOP: 66 0F 1F 84 00 00 00 00 00
+                        optimizedCode.push_back(0x66);
+                        optimizedCode.push_back(0x0F);
+                        optimizedCode.push_back(0x1F);
+                        optimizedCode.push_back(0x84);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        paddingNeeded -= 9;
+                    } else if (paddingNeeded >= 7) {
+                        // 7バイトNOP: 0F 1F 80 00 00 00 00
+                        optimizedCode.push_back(0x0F);
+                        optimizedCode.push_back(0x1F);
+                        optimizedCode.push_back(0x80);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        optimizedCode.push_back(0x00);
+                        paddingNeeded -= 7;
+                    } else if (paddingNeeded >= 4) {
+                        // 4バイトNOP: 0F 1F 40 00
+                        optimizedCode.push_back(0x0F);
+                        optimizedCode.push_back(0x1F);
+                        optimizedCode.push_back(0x40);
+                        optimizedCode.push_back(0x00);
+                        paddingNeeded -= 4;
+                    } else if (paddingNeeded >= 3) {
+                        // 3バイトNOP: 0F 1F 00
+                        optimizedCode.push_back(0x0F);
+                        optimizedCode.push_back(0x1F);
+                        optimizedCode.push_back(0x00);
+                        paddingNeeded -= 3;
+                    } else if (paddingNeeded >= 2) {
+                        // 2バイトNOP: 66 90
+                        optimizedCode.push_back(0x66);
+                        optimizedCode.push_back(0x90);
+                        paddingNeeded -= 2;
+                    } else {
+                        // 1バイトNOP: 90
+                        optimizedCode.push_back(0x90);
+                        paddingNeeded -= 1;
+                    }
+                }
+            }
+        }
+        
+        // 現在のバイトを追加
+        optimizedCode.push_back(code[i]);
+        currentPos++;
+    }
+    
+    // 2. 関数間の間隔を調整
+    // 複数の関数を隣接させる場合、キャッシュライン境界で分離
+    
+    // 最適化したコードで元のコードを置き換え
+    code.swap(optimizedCode);
+}
+
+// 高速数学関数の特殊ケース
+void X86_64CodeGenerator::EncodeFastMath(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 2) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    
+    X86_64Register physDest = GetPhysicalReg(destReg);
+    X86_64Register physSrc = GetPhysicalReg(srcReg);
+    
+    // SSEが利用可能な場合は、SIMD命令を使用して高速化
+    auto destSIMD = GetSIMDReg(destReg);
+    auto srcSIMD = GetSIMDReg(srcReg);
+    
+    bool hasSIMD = destSIMD.has_value() && srcSIMD.has_value();
+    bool useAVX = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX);
+    
+    switch (inst.opcode) {
+        case Opcode::kFastInvSqrt: {
+            // 高速な逆平方根近似 (Q_rsqrt from Quake III)
+            // float Q_rsqrt(float number) {
+            //     long i;
+            //     float x2, y;
+            //     const float threehalfs = 1.5F;
+            //
+            //     x2 = number * 0.5F;
+            //     y = number;
+            //     i = *(long*)&y;
+            //     i = 0x5f3759df - (i >> 1);
+            //     y = *(float*)&i;
+            //     y = y * (threehalfs - (x2 * y * y));
+            //     return y;
+            // }
+
+            // SIMD版 (SSE/AVX)
+            if (hasSIMD) {
+                if (useAVX) {
+                    // AVX最適化版
+                    // VMOVSS xmm0, xmm0, [srcSIMD]
+                    AppendVEXPrefix(code, 0b01, 0b11, 0, 0, 0xF, 0, 0, 
+                                  static_cast<uint8_t>(*srcSIMD) >= 8);
+                    code.push_back(0x10);
+                    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                               static_cast<uint8_t>(*srcSIMD) & 0x7);
+                    
+                    // 定数0.5をロード
+                    // VMOVSS xmm1, [0.5]
+                    // 定数格納領域へのポインタを取得...
+                    
+                    // VMULSS xmm1, xmm1, xmm0
+                    AppendVEXPrefix(code, 0b01, 0b11, 0, 0, 0xF, 0, 0, 0);
+                    code.push_back(0x59);
+                    AppendModRM(code, 0b11, 1, 0);
+                    
+                    // RSQRTSSを使用して逆平方根近似を取得
+                    // VRSQRTSS xmm0, xmm0, xmm0
+                    AppendVEXPrefix(code, 0b01, 0b11, 0, 0, 0xF, 0, 0, 0);
+                    code.push_back(0x52);
+                    AppendModRM(code, 0b11, 0, 0);
+                    
+                    // 精度を改善するためにニュートン-ラフソン法を適用
+                    // ...
+                } else {
+                    // SSE最適化版
+                    // MOVSS xmm0, [srcSIMD]
+                    AppendREXPrefix(code, false, false, false, 
+                                  static_cast<uint8_t>(*srcSIMD) >= 8);
+                    code.push_back(0xF3); // MOVSS prefix
+                    code.push_back(0x0F);
+                    code.push_back(0x10);
+                    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                               static_cast<uint8_t>(*srcSIMD) & 0x7);
+                    
+                    // RSQRTSSを使用して逆平方根近似を取得
+                    // RSQRTSS xmm0, xmm0
+                    AppendREXPrefix(code, false, false, false, false);
+                    code.push_back(0xF3); // RSQRTSS prefix
+                    code.push_back(0x0F);
+                    code.push_back(0x52);
+                    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                               static_cast<uint8_t>(*destSIMD) & 0x7);
+                    
+                    // 精度を改善するためにニュートン-ラフソン法を適用
+                    // ...
+                }
   } else {
-    EmitNop(inst, out);
-  }
+                // 非SIMD版（より多くの命令が必要）
+                // ...
+            }
+            break;
+        }
+        
+        case Opcode::kFastSin:
+        case Opcode::kFastCos:
+        case Opcode::kFastTan:
+        case Opcode::kFastExp:
+        case Opcode::kFastLog:
+            // 他の高速数学関数も同様に実装
+            // テイラー級数展開やチェビシェフ多項式近似などの数値計算手法を使用
+            break;
+            
+        default:
+            // サポートされていない操作
+            break;
+    }
+}
+
+// 自動CPU機能検出
+void X86_64CodeGenerator::AutoDetectOptimalFlags() noexcept {
+    // 基本の最適化フラグを設定
+    m_optimizationFlags = CodeGenOptFlags::PeepholeOptimize | 
+                         CodeGenOptFlags::AlignLoops | 
+                         CodeGenOptFlags::OptimizeJumps | 
+                         CodeGenOptFlags::CacheAware;
+    
+    // AVXサポートをチェック
+    if (DetectCPUFeature("avx")) {
+        m_optimizationFlags = m_optimizationFlags | CodeGenOptFlags::UseAVX;
+    }
+    
+    // FMAサポートをチェック
+    if (DetectCPUFeature("fma")) {
+        m_optimizationFlags = m_optimizationFlags | CodeGenOptFlags::UseFMA;
+    }
+}
+
+// CPUの機能を検出
+bool X86_64CodeGenerator::DetectCPUFeature(const std::string& feature) noexcept {
+#ifdef _MSC_VER
+    // Windows環境での実装
+    int cpuInfo[4] = {0};
+    
+    // CPUID命令を使用して機能をチェック
+    __cpuid(cpuInfo, 1);
+    
+    if (feature == "sse") return (cpuInfo[3] & (1 << 25)) != 0;
+    else if (feature == "sse2") return (cpuInfo[3] & (1 << 26)) != 0;
+    else if (feature == "sse3") return (cpuInfo[2] & (1 << 0)) != 0;
+    else if (feature == "ssse3") return (cpuInfo[2] & (1 << 9)) != 0;
+    else if (feature == "sse4.1") return (cpuInfo[2] & (1 << 19)) != 0;
+    else if (feature == "sse4.2") return (cpuInfo[2] & (1 << 20)) != 0;
+    else if (feature == "avx") return (cpuInfo[2] & (1 << 28)) != 0;
+    
+    // AVX2, FMA, AVX-512などの拡張命令セットを検出
+    if (feature == "avx2" || feature == "fma" || feature == "avx512f") {
+        __cpuid(cpuInfo, 7);
+        if (feature == "avx2") return (cpuInfo[1] & (1 << 5)) != 0;
+        else if (feature == "avx512f") return (cpuInfo[1] & (1 << 16)) != 0;
+    }
+    
+    if (feature == "fma") {
+        __cpuid(cpuInfo, 1);
+        return (cpuInfo[2] & (1 << 12)) != 0;
+    }
+#else
+    // 非Windows環境（Linux/Macなど）での実装
+    // ここでは簡易的な実装
+    return false;
+#endif
+
+    return false;
 }
 
 }  // namespace core

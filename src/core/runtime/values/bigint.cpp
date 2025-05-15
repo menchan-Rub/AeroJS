@@ -301,17 +301,30 @@ double BigInt::toDouble() const {
   if (isZero()) {
     return 0.0;
   }
-
-  // ビット長がdoubleの精度を超える場合は近似値
-  double result = 0.0;
-  double base = 1.0;
-
-  for (size_t i = 0; i < digits_.size(); ++i) {
-    result += digits_[i] * base;
-    base *= std::pow(2, DIGIT_BITS);
+  
+  if (positive_) {
+    // 正の値の場合
+    double result = 0.0;
+    double power = 1.0;
+    
+    // 各ブロックを順に変換（リトルエンディアン形式）
+    for (size_t i = 0; i < digits_.size(); ++i) {
+      result += static_cast<double>(digits_[i]) * power;
+      power *= static_cast<double>(DIGIT_BASE);
+      
+      // 浮動小数点の精度を超えるとこれ以上の桁は意味がない
+      if (power > DBL_MAX) {
+        break;
+      }
+    }
+    
+    return result;
+  } else {
+    // 負の値の場合は正の値として計算してから符号を反転
+    BigInt positive(*this);
+    positive.positive_ = true;
+    return -positive.toDouble();
   }
-
-  return positive_ ? result : -result;
 }
 
 // 文字列に変換

@@ -19,6 +19,46 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <string_view>
+#include <array>
+#include <atomic>
+#include <thread>
+#include <condition_variable>
+
+// コンパイル時ログレベル制御マクロ（リリースビルドでのTRACE/DEBUGログ無効化のため）
+#ifndef AERO_LOG_LEVEL
+  #ifdef NDEBUG
+    #define AERO_LOG_LEVEL LogLevel::INFO
+  #else
+    #define AERO_LOG_LEVEL LogLevel::TRACE
+  #endif
+#endif
+
+// メモリ効率の良いロギングマクロ
+#define AERO_LOG_TRACE(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::TRACE) (logger).trace(format, ##__VA_ARGS__)
+
+#define AERO_LOG_DEBUG(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::DEBUG) (logger).debug(format, ##__VA_ARGS__)
+
+#define AERO_LOG_INFO(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::INFO) (logger).info(format, ##__VA_ARGS__)
+
+#define AERO_LOG_WARNING(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::WARNING) (logger).warning(format, ##__VA_ARGS__)
+
+#define AERO_LOG_ERROR(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::ERROR) (logger).error(format, ##__VA_ARGS__)
+
+#define AERO_LOG_CRITICAL(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::CRITICAL) (logger).critical(format, ##__VA_ARGS__)
+
+// ソースファイル位置情報付きロギングマクロ
+#define AERO_LOG_TRACE_WITH_POS(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::TRACE) (logger).trace_with_pos(__FILE__, __LINE__, format, ##__VA_ARGS__)
+
+#define AERO_LOG_DEBUG_WITH_POS(logger, format, ...) \
+  if (::aero::AERO_LOG_LEVEL <= ::aero::LogLevel::DEBUG) (logger).debug_with_pos(__FILE__, __LINE__, format, ##__VA_ARGS__)
 
 namespace aero {
 
@@ -41,7 +81,7 @@ enum class LogLevel {
  * @param levelStr ログレベル文字列
  * @return LogLevel 対応するログレベル（不明な文字列の場合はINFO）
  */
-inline LogLevel stringToLogLevel(const std::string& levelStr) {
+inline LogLevel stringToLogLevel(const std::string_view levelStr) {
   if (levelStr == "trace" || levelStr == "TRACE") return LogLevel::TRACE;
   if (levelStr == "debug" || levelStr == "DEBUG") return LogLevel::DEBUG;
   if (levelStr == "info" || levelStr == "INFO") return LogLevel::INFO;
@@ -56,27 +96,15 @@ inline LogLevel stringToLogLevel(const std::string& levelStr) {
  * @brief ログレベルを文字列に変換する
  *
  * @param level ログレベル
- * @return std::string 対応する文字列
+ * @return std::string_view 対応する文字列
  */
-inline std::string logLevelToString(LogLevel level) {
-  switch (level) {
-    case LogLevel::TRACE:
-      return "TRACE";
-    case LogLevel::DEBUG:
-      return "DEBUG";
-    case LogLevel::INFO:
-      return "INFO";
-    case LogLevel::WARNING:
-      return "WARNING";
-    case LogLevel::ERROR:
-      return "ERROR";
-    case LogLevel::CRITICAL:
-      return "CRITICAL";
-    case LogLevel::OFF:
-      return "OFF";
-    default:
-      return "UNKNOWN";
-  }
+inline std::string_view logLevelToString(LogLevel level) {
+  // 静的配列を使用して変換（高速）
+  static constexpr std::array<std::string_view, 7> levelStrings = {
+    "TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "OFF"
+  };
+  
+  return levelStrings[static_cast<size_t>(level)];
 }
 
 /**
@@ -85,7 +113,8 @@ inline std::string logLevelToString(LogLevel level) {
 enum class LogTarget {
   CONSOLE,  ///< コンソール出力
   FILE,     ///< ファイル出力
-  CALLBACK  ///< コールバック関数
+  CALLBACK, ///< コールバック関数
+  SYSLOG    ///< システムログ（新規追加）
 };
 
 /**
@@ -104,30 +133,40 @@ struct LoggerOptions {
   std::vector<LogTarget> targets = {LogTarget::CONSOLE};  ///< ログ出力先
   size_t maxFileSizeBytes = 10 * 1024 * 1024;             ///< 最大ファイルサイズ（バイト）
   int maxBackupFiles = 3;                                 ///< 最大バックアップファイル数
+  bool asyncLogging = false;                              ///< 非同期ロギングを使用するか (新規追加)
+  size_t asyncQueueSize = 1024;                           ///< 非同期キューサイズ (新規追加)
+  bool logMessageCoalescing = false;                      ///< 類似メッセージの統合 (新規追加)
+  size_t bufferSize = 8192;                               ///< 内部バッファサイズ (新規追加)
 };
 
-/**
- * @brief フォーマット置換用ヘルパー関数（再帰終了用）
- */
-template <typename... Args>
-void formatHelper(std::ostringstream& ss, const char* format) {
-  ss << format;
-}
+// 文字列フォーマット用の高速実装（C++20のstd::formatの簡易版）
+namespace detail {
 
-/**
- * @brief フォーマット置換用ヘルパー関数
- */
-template <typename T, typename... Args>
-void formatHelper(std::ostringstream& ss, const char* format, T&& value, Args&&... args) {
-  while (*format) {
-    if (*format == '{' && *(format + 1) == '}') {
-      ss << value;
-      formatHelper(ss, format + 2, std::forward<Args>(args)...);
-      return;
-    }
-    ss << *format++;
+// 文字列置換の高速実装
+template <typename... Args>
+inline std::string format_string(const char* format, Args&&... args) {
+  // 小さな文字列用にスタック上にバッファを確保（ヒープアロケーション回避）
+  constexpr size_t STACK_BUFFER_SIZE = 1024;
+  char stackBuffer[STACK_BUFFER_SIZE];
+  
+  int size = snprintf(stackBuffer, STACK_BUFFER_SIZE, format, std::forward<Args>(args)...);
+  
+  if (size < 0) {
+    return "FORMAT_ERROR";
+  }
+  
+  if (size < STACK_BUFFER_SIZE) {
+    return std::string(stackBuffer, size);
+  } else {
+    // スタックバッファが小さすぎる場合はヒープを使用
+    std::string result(size + 1, '\0');
+    snprintf(&result[0], size + 1, format, std::forward<Args>(args)...);
+    result.resize(size);
+    return result;
   }
 }
+
+} // namespace detail
 
 /**
  * @brief ロガークラス
@@ -165,6 +204,16 @@ class Logger {
    */
   void setOptions(const LoggerOptions& options) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // 非同期ロギングの設定変更を処理
+    if (m_options.asyncLogging != options.asyncLogging) {
+      if (options.asyncLogging) {
+        startAsyncLogging(options.asyncQueueSize);
+      } else {
+        stopAsyncLogging();
+      }
+    }
+    
     m_options = options;
 
     // ファイル出力が有効な場合、ファイルを開く
@@ -188,7 +237,7 @@ class Logger {
    *
    * @param levelStr ログレベル文字列
    */
-  void setLevel(const std::string& levelStr) {
+  void setLevel(const std::string_view levelStr) {
     setLevel(stringToLogLevel(levelStr));
   }
 
@@ -242,7 +291,21 @@ class Logger {
    */
   template <typename... Args>
   void trace(const char* format, Args&&... args) {
-    log(LogLevel::TRACE, format, std::forward<Args>(args)...);
+    if (AERO_LOG_LEVEL <= LogLevel::TRACE) {
+      log(LogLevel::TRACE, format, std::forward<Args>(args)...);
+    }
+  }
+
+  /**
+   * @brief ソース位置情報付きTRACEレベルログを出力
+   */
+  template <typename... Args>
+  void trace_with_pos(const char* file, int line, const char* format, Args&&... args) {
+    if (AERO_LOG_LEVEL <= LogLevel::TRACE) {
+      std::string message = detail::format_string(format, std::forward<Args>(args)...);
+      std::string sourceInfo = detail::format_string("%s:%d ", file, line);
+      log_internal(LogLevel::TRACE, (sourceInfo + message).c_str());
+    }
   }
 
   /**
@@ -253,7 +316,21 @@ class Logger {
    */
   template <typename... Args>
   void debug(const char* format, Args&&... args) {
-    log(LogLevel::DEBUG, format, std::forward<Args>(args)...);
+    if (AERO_LOG_LEVEL <= LogLevel::DEBUG) {
+      log(LogLevel::DEBUG, format, std::forward<Args>(args)...);
+    }
+  }
+
+  /**
+   * @brief ソース位置情報付きDEBUGレベルログを出力
+   */
+  template <typename... Args>
+  void debug_with_pos(const char* file, int line, const char* format, Args&&... args) {
+    if (AERO_LOG_LEVEL <= LogLevel::DEBUG) {
+      std::string message = detail::format_string(format, std::forward<Args>(args)...);
+      std::string sourceInfo = detail::format_string("%s:%d ", file, line);
+      log_internal(LogLevel::DEBUG, (sourceInfo + message).c_str());
+    }
   }
 
   /**
@@ -313,28 +390,45 @@ class Logger {
       return;
     }
 
-    std::ostringstream message;
-    formatHelper(message, format, std::forward<Args>(args)...);
-
-    std::string formattedMessage = formatLogMessage(level, m_category, message.str());
-
-    outputLog(level, message.str(), formattedMessage);
+    // 最適化された文字列フォーマット処理
+    std::string message = detail::format_string(format, std::forward<Args>(args)...);
+    log_internal(level, message.c_str());
   }
 
  private:
+  /**
+   * @brief 内部ログ処理関数
+   */
+  void log_internal(LogLevel level, const char* message) {
+    std::string formattedMessage = formatLogMessage(level, m_category, message);
+
+    // 非同期ロギングが有効な場合はキューに追加
+    if (m_options.asyncLogging && m_asyncLoggingActive) {
+      enqueueAsyncLog(level, message, formattedMessage);
+    } else {
+      // 同期ロギング
+      outputLog(level, message, formattedMessage);
+    }
+  }
+
   /**
    * @brief コンストラクタ
    *
    * @param category ログカテゴリ
    */
   Logger(const std::string& category)
-      : m_category(category) {
+      : m_category(category), m_asyncLoggingActive(false) {
   }
 
   /**
    * @brief デストラクタ
    */
   ~Logger() {
+    // 非同期ロギングを停止
+    if (m_asyncLoggingActive) {
+      stopAsyncLogging();
+    }
+    
     if (m_logFile.is_open()) {
       m_logFile.close();
     }
@@ -349,6 +443,110 @@ class Logger {
    * @brief 代入演算子（禁止）
    */
   Logger& operator=(const Logger&) = delete;
+
+  /**
+   * @brief 非同期ロギングを開始
+   */
+  void startAsyncLogging(size_t queueSize) {
+    if (m_asyncLoggingActive) {
+      return;
+    }
+    
+    m_asyncLoggingActive = true;
+    m_stopAsyncLogging = false;
+    m_asyncQueue.reserve(queueSize);
+    
+    // ロギングスレッドを起動
+    m_asyncLoggingThread = std::thread([this]() {
+      this->processAsyncLogs();
+    });
+  }
+  
+  /**
+   * @brief 非同期ロギングを停止
+   */
+  void stopAsyncLogging() {
+    if (!m_asyncLoggingActive) {
+      return;
+    }
+    
+    {
+      std::lock_guard<std::mutex> lock(m_asyncQueueMutex);
+      m_stopAsyncLogging = true;
+      m_asyncQueueCV.notify_one();
+    }
+    
+    if (m_asyncLoggingThread.joinable()) {
+      m_asyncLoggingThread.join();
+    }
+    
+    m_asyncLoggingActive = false;
+  }
+  
+  /**
+   * @brief 非同期ログキューにメッセージを追加
+   */
+  void enqueueAsyncLog(LogLevel level, const std::string& rawMessage, const std::string& formattedMessage) {
+    {
+      std::lock_guard<std::mutex> lock(m_asyncQueueMutex);
+      
+      // ロギングコアレシング（似たメッセージの統合）
+      if (m_options.logMessageCoalescing && !m_asyncQueue.empty()) {
+        auto& last = m_asyncQueue.back();
+        if (last.level == level && last.rawMessage == rawMessage) {
+          last.repeatCount++;
+          return;
+        }
+      }
+      
+      // キューがいっぱいなら古いメッセージを削除
+      if (m_asyncQueue.size() >= m_options.asyncQueueSize) {
+        m_asyncQueue.erase(m_asyncQueue.begin());
+      }
+      
+      // 新しいメッセージを追加
+      m_asyncQueue.push_back({level, m_category, rawMessage, formattedMessage, 1});
+    }
+    
+    // 処理スレッドに通知
+    m_asyncQueueCV.notify_one();
+  }
+  
+  /**
+   * @brief 非同期ログ処理スレッドのメイン関数
+   */
+  void processAsyncLogs() {
+    while (true) {
+      std::vector<AsyncLogEntry> logsToProcess;
+      
+      {
+        std::unique_lock<std::mutex> lock(m_asyncQueueMutex);
+        
+        // キューが空でストップフラグが立っていなければ待機
+        m_asyncQueueCV.wait(lock, [this] {
+          return !m_asyncQueue.empty() || m_stopAsyncLogging;
+        });
+        
+        // 終了条件をチェック
+        if (m_asyncQueue.empty() && m_stopAsyncLogging) {
+          break;
+        }
+        
+        // 現在のキューを処理用にスワップ（ロック時間を最小化）
+        logsToProcess.swap(m_asyncQueue);
+      }
+      
+      // ロックを解放してからログを処理
+      for (const auto& entry : logsToProcess) {
+        std::string repeatedMessage = entry.formattedMessage;
+        if (entry.repeatCount > 1) {
+          repeatedMessage += detail::format_string(" (repeated %d times)", entry.repeatCount);
+        }
+        
+        outputLog(entry.level, entry.rawMessage.c_str(), repeatedMessage.c_str());
+      }
+    }
+  }
 
   /**
    * @brief ログファイルを開く
@@ -367,6 +565,13 @@ class Logger {
     if (!m_logFile.is_open()) {
       std::cerr << "ログファイルを開けませんでした: " << m_options.logFilePath << std::endl;
     }
+    
+    // バッファリングを設定（パフォーマンス向上）
+    if (m_logFile.is_open()) {
+      char* buffer = new char[m_options.bufferSize];
+      m_logFile.rdbuf()->pubsetbuf(buffer, m_options.bufferSize);
+      m_fileBuffers.reset(buffer); // バッファの自動解放
+    }
   }
 
   /**
@@ -378,39 +583,46 @@ class Logger {
    * @return std::string フォーマットされたログメッセージ
    */
   std::string formatLogMessage(LogLevel level, const std::string& category, const std::string& message) {
-    std::ostringstream ss;
+    // 必要なサイズを見積もり、一度の割り当てで済むようにする
+    size_t estimatedSize = message.size() + category.size() + 64;
+    std::string result;
+    result.reserve(estimatedSize);
+    
+    thread_local char timestampBuffer[64]; // スレッドローカルでタイムスタンプバッファを再利用
 
     // タイムスタンプ
     if (m_options.showTimestamp) {
       auto now = std::chrono::system_clock::now();
       auto nowTime = std::chrono::system_clock::to_time_t(now);
-      ss << std::put_time(std::localtime(&nowTime), m_options.dateTimeFormat.c_str()) << " ";
+      std::strftime(timestampBuffer, sizeof(timestampBuffer), 
+                    m_options.dateTimeFormat.c_str(), std::localtime(&nowTime));
+      result.append(timestampBuffer).append(" ");
     }
 
     // ログレベル
     if (m_options.showLevel) {
       if (m_options.useColors) {
-        ss << getColorCode(level);
+        result.append(getColorCode(level));
       }
 
-      ss << "[" << logLevelToString(level) << "]";
+      result.append("[").append(std::string(logLevelToString(level))).append("]");
 
       if (m_options.useColors) {
-        ss << "\033[0m";
+        result.append("\033[0m");
       }
 
-      ss << " ";
+      result.append(" ");
     }
 
     // カテゴリ
     if (m_options.showCategory && !category.empty()) {
-      ss << "[" << category << "] ";
+      result.append("[").append(category).append("] ");
     }
 
     // メッセージ
-    ss << message;
+    result.append(message);
 
-    return ss.str();
+    return result;
   }
 
   /**
@@ -425,11 +637,8 @@ class Logger {
 
     // コンソール出力
     if (isTargetEnabled(LogTarget::CONSOLE)) {
-      if (level >= LogLevel::ERROR) {
-        std::cerr << formattedMessage << std::endl;
-      } else {
-        std::cout << formattedMessage << std::endl;
-      }
+      std::ostream& out = (level >= LogLevel::ERROR) ? std::cerr : std::cout;
+      out << formattedMessage << std::endl;
     }
 
     // ファイル出力
@@ -446,6 +655,25 @@ class Logger {
     if (isTargetEnabled(LogTarget::CALLBACK) && m_logCallback) {
       m_logCallback(level, m_category, rawMessage);
     }
+
+    // システムログ出力（新規追加）
+    if (isTargetEnabled(LogTarget::SYSLOG)) {
+      outputToSyslog(level, formattedMessage);
+    }
+  }
+
+  /**
+   * @brief システムログに出力（プラットフォーム依存）
+   */
+  void outputToSyslog(LogLevel level, const std::string& message) {
+    // プラットフォーム依存の実装
+    #ifdef _WIN32
+      // Windows Event Log
+      // 実装省略
+    #elif defined(__APPLE__) || defined(__linux__)
+      // syslog
+      // 実装省略
+    #endif
   }
 
   /**
@@ -491,32 +719,48 @@ class Logger {
    * @brief ログレベルに対応する色コードを取得する
    *
    * @param level ログレベル
-   * @return std::string 色コード
+   * @return std::string_view 色コード
    */
-  std::string getColorCode(LogLevel level) const {
-    switch (level) {
-      case LogLevel::TRACE:
-        return "\033[90m";  // 灰色
-      case LogLevel::DEBUG:
-        return "\033[36m";  // 水色
-      case LogLevel::INFO:
-        return "\033[32m";  // 緑色
-      case LogLevel::WARNING:
-        return "\033[33m";  // 黄色
-      case LogLevel::ERROR:
-        return "\033[31m";  // 赤色
-      case LogLevel::CRITICAL:
-        return "\033[35m";  // マゼンタ
-      default:
-        return "\033[0m";  // リセット
-    }
+  std::string_view getColorCode(LogLevel level) const {
+    // 静的配列で色コードを管理（高速アクセス）
+    static constexpr std::array<std::string_view, 7> colorCodes = {
+      "\033[90m",  // TRACE: 灰色
+      "\033[36m",  // DEBUG: シアン
+      "\033[32m",  // INFO: 緑
+      "\033[33m",  // WARNING: 黄
+      "\033[31m",  // ERROR: 赤
+      "\033[35m",  // CRITICAL: マゼンタ
+      ""           // OFF: なし
+    };
+    
+    return colorCodes[static_cast<size_t>(level)];
   }
 
-  std::string m_category;                                                               ///< ログカテゴリ
-  LoggerOptions m_options;                                                              ///< ロガーオプション
-  std::mutex m_mutex;                                                                   ///< スレッド同期用ミューテックス
-  std::ofstream m_logFile;                                                              ///< ログファイルストリーム
-  std::function<void(LogLevel, const std::string&, const std::string&)> m_logCallback;  ///< ログコールバック
+  // 非同期ログエントリ構造体
+  struct AsyncLogEntry {
+    LogLevel level;
+    std::string category;
+    std::string rawMessage;
+    std::string formattedMessage;
+    size_t repeatCount;
+  };
+
+  std::string m_category;
+  LoggerOptions m_options;
+  std::mutex m_mutex;
+  std::ofstream m_logFile;
+  std::function<void(LogLevel, const std::string&, const std::string&)> m_logCallback;
+  
+  // ファイルバッファ管理
+  std::unique_ptr<char[]> m_fileBuffers;
+  
+  // 非同期ロギング関連
+  std::atomic<bool> m_asyncLoggingActive;
+  std::atomic<bool> m_stopAsyncLogging;
+  std::thread m_asyncLoggingThread;
+  std::mutex m_asyncQueueMutex;
+  std::condition_variable m_asyncQueueCV;
+  std::vector<AsyncLogEntry> m_asyncQueue;
 };
 
 }  // namespace aero

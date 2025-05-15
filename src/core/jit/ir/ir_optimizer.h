@@ -5,6 +5,9 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <unordered_map>
+#include <atomic>
+#include <bitset>
 
 #include "src/core/jit/ir/ir.h"
 #include "src/core/jit/ir/type_analyzer.h"

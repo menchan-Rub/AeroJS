@@ -1,1140 +1,574 @@
 /**
  * @file transformer.cpp
- * @version 1.0.0
- * @copyright Copyright (c) 2023 AeroJS Project
+ * @version 2.0.0
+ * @author AeroJS Developers
+ * @copyright Copyright (c) 2024 AeroJS Project
  * @license MIT License
- * @brief AST変換を行うトランスフォーマーの基本実装
+ * @brief AST変換を行うトランスフォーマーの基本実装。
  */
 
 #include "transformer.h"
-
+#include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <iostream>
+#include <queue>
+#include <set>
+#include <stack>
+#include <thread>
+#include <unordered_set>
+#include <xxhash.h>
 
-namespace aero {
-namespace transformers {
+namespace aerojs::transformers {
+
+//===----------------------------------------------------------------------===//
+// ヘルパー関数
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// AST ノードのディープコピーを作成する
+parser::ast::NodePtr CloneNode(const parser::ast::NodePtr& node) {
+  if (!node) return nullptr;
+  return node->clone();
+}
+
+// 文字列用に安全なエスケープ処理
+std::string EscapeString(const std::string& input) {
+  std::string result;
+  result.reserve(input.size());
+  
+  for (char c : input) {
+    switch (c) {
+      case '"': result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\n': result += "\\n"; break;
+      case '\r': result += "\\r"; break;
+      case '\t': result += "\\t"; break;
+      default: result += c; break;
+    }
+  }
+  
+  return result;
+}
+
+// 高速ハッシュ計算
+size_t FastHash(const void* data, size_t len) {
+  return XXH64(data, len, 0);
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// TransformerCache 実装
+//===----------------------------------------------------------------------===//
+
+size_t TransformerCache::ComputeHash(const parser::ast::NodePtr& node, const std::string& transformer) {
+  // ノードのハッシュを計算
+  if (!node) return 0;
+  
+  // ノードの内容に基づくハッシュを計算
+  std::string nodeContent = node->toString();
+  size_t nodeHash = FastHash(nodeContent.data(), nodeContent.size());
+  
+  // transformerの名前も含める
+  size_t transformerHash = std::hash<std::string>{}(transformer);
+  
+  // 組み合わせたハッシュを返す
+  return nodeHash ^ (transformerHash << 1);
+}
+
+void TransformerCache::Add(const parser::ast::NodePtr& node, const std::string& transformer, const TransformResult& result) {
+  if (!node) return;
+  
+  std::unique_lock<std::shared_mutex> lock(m_mutex);
+  
+  CacheKey key{ComputeHash(node, transformer), transformer};
+  CacheEntry entry{
+    TransformResult(CloneNode(result.transformedNode), result.wasChanged, result.shouldStopTraversal),
+    std::chrono::system_clock::now()
+  };
+  
+  m_cache[key] = std::move(entry);
+}
+
+std::optional<TransformResult> TransformerCache::Get(const parser::ast::NodePtr& node, const std::string& transformer) {
+  if (!node) return std::nullopt;
+  
+  CacheKey key{ComputeHash(node, transformer), transformer};
+  
+  std::shared_lock<std::shared_mutex> lock(m_mutex);
+  
+  auto it = m_cache.find(key);
+  if (it != m_cache.end()) {
+    m_hits++;
+    
+    // キャッシュから結果をコピーして返す
+    // 注意: ノードは独立したコピーを作成する必要がある
+    return TransformResult(
+      CloneNode(it->second.result.transformedNode),
+      it->second.result.wasChanged,
+      it->second.result.shouldStopTraversal
+    );
+  }
+  
+  m_misses++;
+  return std::nullopt;
+}
+
+void TransformerCache::Clear() {
+  std::unique_lock<std::shared_mutex> lock(m_mutex);
+  m_cache.clear();
+  m_hits = 0;
+  m_misses = 0;
+}
+
+double TransformerCache::GetHitRate() const {
+  size_t hits = m_hits.load();
+  size_t total = hits + m_misses.load();
+  
+  if (total == 0) return 0.0;
+  return static_cast<double>(hits) / total;
+}
+
+//===----------------------------------------------------------------------===//
+// Transformer 実装
+//===----------------------------------------------------------------------===//
 
 Transformer::Transformer(std::string name, std::string description)
-    : m_name(std::move(name)), m_description(std::move(description)), m_changed(false) {
+    : m_name(std::move(name)), m_description(std::move(description)) {
+  m_cache = std::make_shared<TransformerCache>();
+  m_stats.transformerName = m_name;
 }
 
-TransformResult Transformer::transform(ast::NodePtr node) {
+Transformer::Transformer(std::string name, std::string description, TransformOptions options)
+    : m_name(std::move(name)), m_description(std::move(description)), m_options(std::move(options)) {
+  m_cache = std::make_shared<TransformerCache>();
+  m_stats.transformerName = m_name;
+}
+
+TransformResult Transformer::Transform(parser::ast::NodePtr node) {
+  // 基本的なコンテキストを作成して委譲
+  TransformContext context;
+  context.stats = m_options.collectStatistics ? &m_stats : nullptr;
+  
+  return TransformWithContext(std::move(node), context);
+}
+
+TransformResult Transformer::TransformWithContext(parser::ast::NodePtr node, TransformContext& context) {
   if (!node) {
-    return TransformResult::unchanged(nullptr);
+    return TransformResult::Unchanged(nullptr);
   }
-
-  m_result = node;
-  m_changed = false;
-
-  // ノードの型に応じたvisitメソッドを呼び出す
-  node->accept(this);
-
-  return TransformResult{m_result, m_changed, false};
+  
+  auto start = std::chrono::high_resolution_clock::now();
+  
+  // キャッシュが有効な場合はキャッシュを確認
+  if (m_options.enableCaching) {
+    auto cachedResult = m_cache->Get(node, m_name);
+    if (cachedResult) {
+      if (context.stats) {
+        context.stats->cachedTransforms++;
+      }
+      return *cachedResult;
+    }
+  }
+  
+  // ノードに適用可能かを確認
+  if (!ShouldVisitNode(node)) {
+    if (context.stats) {
+      context.stats->skippedTransforms++;
+    }
+    return TransformResult::Unchanged(node);
+  }
+  
+  // 統計情報の更新
+  if (context.stats) {
+    context.stats->nodesProcessed++;
+  }
+  
+  // タイムアウト設定がある場合は監視
+  bool shouldTimeOut = false;
+  std::chrono::time_point<std::chrono::high_resolution_clock> deadline;
+  
+  if (m_options.timeout.count() > 0) {
+    deadline = start + m_options.timeout;
+  }
+  
+  // 実際の変換実行
+  TransformResult result;
+  
+  try {
+    // ノードハンドラがある場合は使用
+    auto it = m_nodeHandlers.find(node->getType());
+    if (it != m_nodeHandlers.end()) {
+      result = it->second(std::move(node), context);
+    } else {
+      // デフォルトの変換を実行
+      result = TransformNodeWithContext(std::move(node), context);
+    }
+    
+    // タイムアウトチェック
+    if (m_options.timeout.count() > 0) {
+      shouldTimeOut = std::chrono::high_resolution_clock::now() >= deadline;
+    }
+  } catch (const std::exception& e) {
+    // 例外発生時はノードをそのまま返す
+    std::cerr << "Error in transformer " << m_name << ": " << e.what() << std::endl;
+    return TransformResult::Failure(std::move(node));
+  }
+  
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  
+  // 統計情報の更新
+  if (context.stats) {
+    context.stats->totalTime += duration;
+    if (result.wasChanged) {
+      context.stats->nodesTransformed++;
+    }
+  }
+  
+  // キャッシュ更新
+  if (m_options.enableCaching && !shouldTimeOut) {
+    m_cache->Add(node, m_name, result);
+  }
+  
+  return result;
 }
 
-std::string Transformer::getName() const {
+std::string Transformer::GetName() const {
   return m_name;
 }
 
-std::string Transformer::getDescription() const {
+std::string Transformer::GetDescription() const {
   return m_description;
 }
 
-TransformResult Transformer::transformNode(ast::NodePtr node) {
+TransformOptions Transformer::GetOptions() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_options;
+}
+
+void Transformer::SetOptions(const TransformOptions& options) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_options = options;
+}
+
+TransformStats Transformer::GetStatistics() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_stats;
+}
+
+bool Transformer::IsApplicableTo(const parser::ast::NodePtr& node) const {
+  if (!node) return false;
+  return ShouldVisitNode(node);
+}
+
+TransformPhase Transformer::GetPhase() const {
+  return m_options.phase;
+}
+
+TransformPriority Transformer::GetPriority() const {
+  return m_options.priority;
+}
+
+TransformResult Transformer::TransformNode(parser::ast::NodePtr node) {
+  // デフォルトでは子ノードのみを変換
+  return TransformChildren(std::move(node));
+}
+
+TransformResult Transformer::TransformNodeWithContext(parser::ast::NodePtr node, TransformContext& context) {
+  // デフォルトでは非コンテキスト版にフォールバック
+  return TransformNode(std::move(node));
+}
+
+TransformResult Transformer::TransformChildren(parser::ast::NodePtr node) {
   if (!node) {
-    return TransformResult::unchanged(nullptr);
+    return TransformResult::Unchanged(nullptr);
   }
-
-  ast::NodePtr oldNode = m_result;
-  bool oldChanged = m_changed;
-
-  m_result = node;
-  m_changed = false;
-
-  // ノードの型に応じたvisitメソッドを呼び出す
-  node->accept(this);
-
-  ast::NodePtr result = m_result;
-  bool changed = m_changed;
-
-  m_result = oldNode;
-  m_changed = oldChanged || changed;
-
-  return TransformResult{result, changed, false};
-}
-
-// AST Visitor メソッドの実装
-
-void Transformer::visitProgram(ast::Program* node) {
-  bool localChanged = false;
-
-  // 子ノードを再帰的に変換
-  for (size_t i = 0; i < node->body.size(); ++i) {
-    auto result = transformNode(node->body[i]);
-    if (result.changed) {
-      localChanged = true;
-      node->body[i] = std::move(result.node);
+  
+  bool hasChanges = false;
+  
+  // 各子ノードに対して変換を実行
+  for (size_t i = 0; i < node->getChildCount(); ++i) {
+    auto child = node->getChild(i);
+    if (!child) continue;
+    
+    auto childResult = Transform(std::move(child));
+    
+    if (childResult.shouldStopTraversal) {
+      return TransformResult::UnchangedAndStop(std::move(node));
+    }
+    
+    if (childResult.wasChanged) {
+      hasChanges = true;
+      node->setChild(i, std::move(childResult.transformedNode));
     }
   }
-
-  m_changed = localChanged;
+  
+  return TransformResult::ConditionalChange(std::move(node), hasChanges);
 }
 
-void Transformer::visitExpressionStatement(ast::ExpressionStatement* node) {
-  auto result = transformNode(node->expression);
-  if (result.changed) {
-    m_changed = true;
-    node->expression = std::move(result.node);
+TransformResult Transformer::TransformChildrenWithContext(parser::ast::NodePtr node, TransformContext& context) {
+  if (!node) {
+    return TransformResult::Unchanged(nullptr);
   }
-}
-
-void Transformer::visitBlockStatement(ast::BlockStatement* node) {
-  bool localChanged = false;
-
-  // 子ノードを再帰的に変換
-  for (size_t i = 0; i < node->body.size(); ++i) {
-    auto result = transformNode(node->body[i]);
-    if (result.changed) {
-      localChanged = true;
-      node->body[i] = std::move(result.node);
+  
+  bool hasChanges = false;
+  
+  // 各子ノードに対して変換を実行
+  for (size_t i = 0; i < node->getChildCount(); ++i) {
+    auto child = node->getChild(i);
+    if (!child) continue;
+    
+    auto childResult = TransformWithContext(std::move(child), context);
+    
+    if (childResult.shouldStopTraversal) {
+      return TransformResult::UnchangedAndStop(std::move(node));
+    }
+    
+    if (childResult.wasChanged) {
+      hasChanges = true;
+      node->setChild(i, std::move(childResult.transformedNode));
     }
   }
-
-  m_changed = localChanged;
+  
+  return TransformResult::ConditionalChange(std::move(node), hasChanges);
 }
 
-void Transformer::visitEmptyStatement(ast::EmptyStatement* node) {
-  // 変換なし
+void Transformer::RegisterNodeHandler(parser::ast::NodeType nodeType, 
+                                    std::function<TransformResult(parser::ast::NodePtr, TransformContext&)> handler) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_nodeHandlers[nodeType] = std::move(handler);
 }
 
-void Transformer::visitIfStatement(ast::IfStatement* node) {
-  bool localChanged = false;
-
-  // 条件式を変換
-  auto testResult = transformNode(node->test);
-  if (testResult.changed) {
-    localChanged = true;
-    node->test = std::move(testResult.node);
-  }
-
-  // Then節を変換
-  auto consequentResult = transformNode(node->consequent);
-  if (consequentResult.changed) {
-    localChanged = true;
-    node->consequent = std::move(consequentResult.node);
-  }
-
-  // Else節があれば変換
-  if (node->alternate) {
-    auto alternateResult = transformNode(node->alternate);
-    if (alternateResult.changed) {
-      localChanged = true;
-      node->alternate = std::move(alternateResult.node);
-    }
-  }
-
-  m_changed = localChanged;
+bool Transformer::ShouldVisitNode(const parser::ast::NodePtr& node) const {
+  // デフォルトではすべてのノードを訪問
+  return true;
 }
 
-void Transformer::visitSwitchStatement(ast::SwitchStatement* node) {
-  bool localChanged = false;
-
-  // 判別式を変換
-  auto discriminantResult = transformNode(node->discriminant);
-  if (discriminantResult.changed) {
-    localChanged = true;
-    node->discriminant = std::move(discriminantResult.node);
-  }
-
-  // ケース節を変換
-  for (size_t i = 0; i < node->cases.size(); ++i) {
-    auto caseResult = transformNode(node->cases[i]);
-    if (caseResult.changed) {
-      localChanged = true;
-      node->cases[i] = std::move(caseResult.node);
-    }
-  }
-
-  m_changed = localChanged;
+void Transformer::RecordMetric(const std::string& metricName, double value) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_stats.incrementMetric(metricName, value);
 }
 
-void Transformer::visitCaseClause(ast::CaseClause* node) {
-  bool localChanged = false;
+//===----------------------------------------------------------------------===//
+// TransformerPipeline 実装
+//===----------------------------------------------------------------------===//
 
-  // ケース値を変換
-  if (node->test) {
-    auto testResult = transformNode(node->test);
-    if (testResult.changed) {
-      localChanged = true;
-      node->test = std::move(testResult.node);
-    }
-  }
-
-  // 本体を変換
-  for (size_t i = 0; i < node->consequent.size(); ++i) {
-    auto stmtResult = transformNode(node->consequent[i]);
-    if (stmtResult.changed) {
-      localChanged = true;
-      node->consequent[i] = std::move(stmtResult.node);
-    }
-  }
-
-  m_changed = localChanged;
+void TransformerPipeline::AddTransformer(TransformerSharedPtr transformer) {
+  if (!transformer) return;
+  
+  m_transformers.push_back(std::move(transformer));
+  SortTransformers();
 }
 
-void Transformer::visitWhileStatement(ast::WhileStatement* node) {
-  bool localChanged = false;
-
-  // 条件式を変換
-  auto testResult = transformNode(node->test);
-  if (testResult.changed) {
-    localChanged = true;
-    node->test = std::move(testResult.node);
+bool TransformerPipeline::RemoveTransformer(const std::string& name) {
+  auto it = std::find_if(m_transformers.begin(), m_transformers.end(),
+                        [&name](const TransformerSharedPtr& t) { return t->GetName() == name; });
+  
+  if (it != m_transformers.end()) {
+    m_transformers.erase(it);
+    return true;
   }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
+  
+  return false;
 }
 
-void Transformer::visitDoWhileStatement(ast::DoWhileStatement* node) {
-  bool localChanged = false;
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  // 条件式を変換
-  auto testResult = transformNode(node->test);
-  if (testResult.changed) {
-    localChanged = true;
-    node->test = std::move(testResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitForStatement(ast::ForStatement* node) {
-  bool localChanged = false;
-
-  // 初期化式を変換
-  if (node->init) {
-    auto initResult = transformNode(node->init);
-    if (initResult.changed) {
-      localChanged = true;
-      node->init = std::move(initResult.node);
-    }
-  }
-
-  // 条件式を変換
-  if (node->test) {
-    auto testResult = transformNode(node->test);
-    if (testResult.changed) {
-      localChanged = true;
-      node->test = std::move(testResult.node);
-    }
-  }
-
-  // 更新式を変換
-  if (node->update) {
-    auto updateResult = transformNode(node->update);
-    if (updateResult.changed) {
-      localChanged = true;
-      node->update = std::move(updateResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitForInStatement(ast::ForInStatement* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitForOfStatement(ast::ForOfStatement* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitContinueStatement(ast::ContinueStatement* node) {
-  // 変換なし（ラベルはプリミティブなので変換しない）
-}
-
-void Transformer::visitBreakStatement(ast::BreakStatement* node) {
-  // 変換なし（ラベルはプリミティブなので変換しない）
-}
-
-void Transformer::visitReturnStatement(ast::ReturnStatement* node) {
-  if (node->argument) {
-    auto argumentResult = transformNode(node->argument);
-    if (argumentResult.changed) {
-      m_changed = true;
-      node->argument = std::move(argumentResult.node);
-    }
-  }
-}
-
-void Transformer::visitWithStatement(ast::WithStatement* node) {
-  bool localChanged = false;
-
-  // オブジェクト式を変換
-  auto objectResult = transformNode(node->object);
-  if (objectResult.changed) {
-    localChanged = true;
-    node->object = std::move(objectResult.node);
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitLabeledStatement(ast::LabeledStatement* node) {
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    m_changed = true;
-    node->body = std::move(bodyResult.node);
-  }
-}
-
-void Transformer::visitTryStatement(ast::TryStatement* node) {
-  bool localChanged = false;
-
-  // try節を変換
-  auto blockResult = transformNode(node->block);
-  if (blockResult.changed) {
-    localChanged = true;
-    node->block = std::move(blockResult.node);
-  }
-
-  // catch節を変換
-  if (node->handler) {
-    auto handlerResult = transformNode(node->handler);
-    if (handlerResult.changed) {
-      localChanged = true;
-      node->handler = std::move(handlerResult.node);
-    }
-  }
-
-  // finally節を変換
-  if (node->finalizer) {
-    auto finalizerResult = transformNode(node->finalizer);
-    if (finalizerResult.changed) {
-      localChanged = true;
-      node->finalizer = std::move(finalizerResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitCatchClause(ast::CatchClause* node) {
-  bool localChanged = false;
-
-  // パラメータを変換
-  if (node->param) {
-    auto paramResult = transformNode(node->param);
-    if (paramResult.changed) {
-      localChanged = true;
-      node->param = std::move(paramResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitThrowStatement(ast::ThrowStatement* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
-  }
-}
-
-void Transformer::visitDebuggerStatement(ast::DebuggerStatement* node) {
-  // 変換なし
-}
-
-void Transformer::visitVariableDeclaration(ast::VariableDeclaration* node) {
-  bool localChanged = false;
-
-  // 変数宣言子を変換
-  for (size_t i = 0; i < node->declarations.size(); ++i) {
-    auto declarationResult = transformNode(node->declarations[i]);
-    if (declarationResult.changed) {
-      localChanged = true;
-      node->declarations[i] = std::move(declarationResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitVariableDeclarator(ast::VariableDeclarator* node) {
-  bool localChanged = false;
-
-  // 変数識別子を変換
-  auto idResult = transformNode(node->id);
-  if (idResult.changed) {
-    localChanged = true;
-    node->id = std::move(idResult.node);
-  }
-
-  // 初期化式を変換
-  if (node->init) {
-    auto initResult = transformNode(node->init);
-    if (initResult.changed) {
-      localChanged = true;
-      node->init = std::move(initResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitIdentifier(ast::Identifier* node) {
-  // 基本的には変換なし（サブクラスが名前の変更などを行う場合がある）
-}
-
-void Transformer::visitLiteral(ast::Literal* node) {
-  // 基本的には変換なし（サブクラスがリテラルの最適化などを行う場合がある）
-}
-
-void Transformer::visitFunctionDeclaration(ast::FunctionDeclaration* node) {
-  bool localChanged = false;
-
-  // 関数名を変換
-  auto idResult = transformNode(node->id);
-  if (idResult.changed) {
-    localChanged = true;
-    node->id = std::move(idResult.node);
-  }
-
-  // パラメータを変換
-  for (size_t i = 0; i < node->params.size(); ++i) {
-    auto paramResult = transformNode(node->params[i]);
-    if (paramResult.changed) {
-      localChanged = true;
-      node->params[i] = std::move(paramResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitFunctionExpression(ast::FunctionExpression* node) {
-  bool localChanged = false;
-
-  // 関数名があれば変換
-  if (node->id) {
-    auto idResult = transformNode(node->id);
-    if (idResult.changed) {
-      localChanged = true;
-      node->id = std::move(idResult.node);
-    }
-  }
-
-  // パラメータを変換
-  for (size_t i = 0; i < node->params.size(); ++i) {
-    auto paramResult = transformNode(node->params[i]);
-    if (paramResult.changed) {
-      localChanged = true;
-      node->params[i] = std::move(paramResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitArrowFunctionExpression(ast::ArrowFunctionExpression* node) {
-  bool localChanged = false;
-
-  // パラメータを変換
-  for (size_t i = 0; i < node->params.size(); ++i) {
-    auto paramResult = transformNode(node->params[i]);
-    if (paramResult.changed) {
-      localChanged = true;
-      node->params[i] = std::move(paramResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitClassDeclaration(ast::ClassDeclaration* node) {
-  bool localChanged = false;
-
-  // クラス名を変換
-  if (node->id) {
-    auto idResult = transformNode(node->id);
-    if (idResult.changed) {
-      localChanged = true;
-      node->id = std::move(idResult.node);
-    }
-  }
-
-  // 親クラスを変換
-  if (node->superClass) {
-    auto superResult = transformNode(node->superClass);
-    if (superResult.changed) {
-      localChanged = true;
-      node->superClass = std::move(superResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitClassExpression(ast::ClassExpression* node) {
-  bool localChanged = false;
-
-  // クラス名を変換
-  if (node->id) {
-    auto idResult = transformNode(node->id);
-    if (idResult.changed) {
-      localChanged = true;
-      node->id = std::move(idResult.node);
-    }
-  }
-
-  // 親クラスを変換
-  if (node->superClass) {
-    auto superResult = transformNode(node->superClass);
-    if (superResult.changed) {
-      localChanged = true;
-      node->superClass = std::move(superResult.node);
-    }
-  }
-
-  // 本体を変換
-  auto bodyResult = transformNode(node->body);
-  if (bodyResult.changed) {
-    localChanged = true;
-    node->body = std::move(bodyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitMethodDefinition(ast::MethodDefinition* node) {
-  bool localChanged = false;
-
-  // キーを変換
-  auto keyResult = transformNode(node->key);
-  if (keyResult.changed) {
-    localChanged = true;
-    node->key = std::move(keyResult.node);
-  }
-
-  // 値を変換
-  auto valueResult = transformNode(node->value);
-  if (valueResult.changed) {
-    localChanged = true;
-    node->value = std::move(valueResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitClassProperty(ast::ClassProperty* node) {
-  bool localChanged = false;
-
-  // キーを変換
-  auto keyResult = transformNode(node->key);
-  if (keyResult.changed) {
-    localChanged = true;
-    node->key = std::move(keyResult.node);
-  }
-
-  // 値があれば変換
-  if (node->value) {
-    auto valueResult = transformNode(node->value);
-    if (valueResult.changed) {
-      localChanged = true;
-      node->value = std::move(valueResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitImportDeclaration(ast::ImportDeclaration* node) {
-  bool localChanged = false;
-
-  // インポート指定子を変換
-  for (size_t i = 0; i < node->specifiers.size(); ++i) {
-    auto specifierResult = transformNode(node->specifiers[i]);
-    if (specifierResult.changed) {
-      localChanged = true;
-      node->specifiers[i] = std::move(specifierResult.node);
-    }
-  }
-
-  // ソースを変換
-  auto sourceResult = transformNode(node->source);
-  if (sourceResult.changed) {
-    localChanged = true;
-    node->source = std::move(sourceResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitExportNamedDeclaration(ast::ExportNamedDeclaration* node) {
-  bool localChanged = false;
-
-  // 宣言を変換
-  if (node->declaration) {
-    auto declarationResult = transformNode(node->declaration);
-    if (declarationResult.changed) {
-      localChanged = true;
-      node->declaration = std::move(declarationResult.node);
-    }
-  }
-
-  // エクスポート指定子を変換
-  for (size_t i = 0; i < node->specifiers.size(); ++i) {
-    auto specifierResult = transformNode(node->specifiers[i]);
-    if (specifierResult.changed) {
-      localChanged = true;
-      node->specifiers[i] = std::move(specifierResult.node);
-    }
-  }
-
-  // ソースを変換
-  if (node->source) {
-    auto sourceResult = transformNode(node->source);
-    if (sourceResult.changed) {
-      localChanged = true;
-      node->source = std::move(sourceResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitExportDefaultDeclaration(ast::ExportDefaultDeclaration* node) {
-  auto declarationResult = transformNode(node->declaration);
-  if (declarationResult.changed) {
-    m_changed = true;
-    node->declaration = std::move(declarationResult.node);
-  }
-}
-
-void Transformer::visitExportAllDeclaration(ast::ExportAllDeclaration* node) {
-  auto sourceResult = transformNode(node->source);
-  if (sourceResult.changed) {
-    m_changed = true;
-    node->source = std::move(sourceResult.node);
-  }
-}
-
-void Transformer::visitImportSpecifier(ast::ImportSpecifier* node) {
-  bool localChanged = false;
-
-  // インポート名を変換
-  auto importedResult = transformNode(node->imported);
-  if (importedResult.changed) {
-    localChanged = true;
-    node->imported = std::move(importedResult.node);
-  }
-
-  // ローカル名を変換
-  auto localResult = transformNode(node->local);
-  if (localResult.changed) {
-    localChanged = true;
-    node->local = std::move(localResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitExportSpecifier(ast::ExportSpecifier* node) {
-  bool localChanged = false;
-
-  // エクスポート名を変換
-  auto exportedResult = transformNode(node->exported);
-  if (exportedResult.changed) {
-    localChanged = true;
-    node->exported = std::move(exportedResult.node);
-  }
-
-  // ローカル名を変換
-  auto localResult = transformNode(node->local);
-  if (localResult.changed) {
-    localChanged = true;
-    node->local = std::move(localResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitObjectPattern(ast::ObjectPattern* node) {
-  bool localChanged = false;
-
-  // プロパティを変換
-  for (size_t i = 0; i < node->properties.size(); ++i) {
-    auto propertyResult = transformNode(node->properties[i]);
-    if (propertyResult.changed) {
-      localChanged = true;
-      node->properties[i] = std::move(propertyResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitArrayPattern(ast::ArrayPattern* node) {
-  bool localChanged = false;
-
-  // 要素を変換
-  for (size_t i = 0; i < node->elements.size(); ++i) {
-    if (node->elements[i]) {
-      auto elementResult = transformNode(node->elements[i]);
-      if (elementResult.changed) {
-        localChanged = true;
-        node->elements[i] = std::move(elementResult.node);
+parser::ast::NodePtr TransformerPipeline::RunPhase(parser::ast::NodePtr node, TransformPhase phase) {
+  if (!node) return nullptr;
+  
+  TransformContext context;
+  context.currentPhase = phase;
+  
+  for (const auto& transformer : m_transformers) {
+    if (transformer->GetPhase() == phase) {
+      auto result = transformer->TransformWithContext(std::move(node), context);
+      node = std::move(result.transformedNode);
+      
+      if (result.shouldStopTraversal) {
+        break;
       }
     }
   }
-
-  m_changed = localChanged;
+  
+  return node;
 }
 
-void Transformer::visitAssignmentPattern(ast::AssignmentPattern* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  m_changed = localChanged;
+parser::ast::NodePtr TransformerPipeline::Run(parser::ast::NodePtr node) {
+  if (!node) return nullptr;
+  
+  // 各フェーズを順番に実行
+  TransformContext context;
+  
+  // 解析フェーズ
+  context.currentPhase = TransformPhase::Analysis;
+  node = RunWithContext(std::move(node), context);
+  
+  // 正規化フェーズ
+  context.currentPhase = TransformPhase::Normalization;
+  node = RunWithContext(std::move(node), context);
+  
+  // 最適化フェーズ
+  context.currentPhase = TransformPhase::Optimization;
+  node = RunWithContext(std::move(node), context);
+  
+  // 低レベル化フェーズ
+  context.currentPhase = TransformPhase::Lowering;
+  node = RunWithContext(std::move(node), context);
+  
+  // コード生成準備フェーズ
+  context.currentPhase = TransformPhase::CodeGenPrep;
+  node = RunWithContext(std::move(node), context);
+  
+  // 最終化フェーズ
+  context.currentPhase = TransformPhase::Finalization;
+  node = RunWithContext(std::move(node), context);
+  
+  return node;
 }
 
-void Transformer::visitRestElement(ast::RestElement* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
-  }
-}
-
-void Transformer::visitSpreadElement(ast::SpreadElement* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
-  }
-}
-
-void Transformer::visitTemplateElement(ast::TemplateElement* node) {
-  // 変換なし
-}
-
-void Transformer::visitTemplateLiteral(ast::TemplateLiteral* node) {
-  bool localChanged = false;
-
-  // クォートを変換
-  for (size_t i = 0; i < node->quasis.size(); ++i) {
-    auto quasisResult = transformNode(node->quasis[i]);
-    if (quasisResult.changed) {
-      localChanged = true;
-      node->quasis[i] = std::move(quasisResult.node);
-    }
-  }
-
-  // 式を変換
-  for (size_t i = 0; i < node->expressions.size(); ++i) {
-    auto expressionResult = transformNode(node->expressions[i]);
-    if (expressionResult.changed) {
-      localChanged = true;
-      node->expressions[i] = std::move(expressionResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitTaggedTemplateExpression(ast::TaggedTemplateExpression* node) {
-  bool localChanged = false;
-
-  // タグを変換
-  auto tagResult = transformNode(node->tag);
-  if (tagResult.changed) {
-    localChanged = true;
-    node->tag = std::move(tagResult.node);
-  }
-
-  // テンプレートを変換
-  auto quasisResult = transformNode(node->quasi);
-  if (quasisResult.changed) {
-    localChanged = true;
-    node->quasi = std::move(quasisResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitObjectExpression(ast::ObjectExpression* node) {
-  bool localChanged = false;
-
-  // プロパティを変換
-  for (size_t i = 0; i < node->properties.size(); ++i) {
-    auto propertyResult = transformNode(node->properties[i]);
-    if (propertyResult.changed) {
-      localChanged = true;
-      node->properties[i] = std::move(propertyResult.node);
-    }
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitProperty(ast::Property* node) {
-  bool localChanged = false;
-
-  // キーを変換
-  auto keyResult = transformNode(node->key);
-  if (keyResult.changed) {
-    localChanged = true;
-    node->key = std::move(keyResult.node);
-  }
-
-  // 値を変換
-  auto valueResult = transformNode(node->value);
-  if (valueResult.changed) {
-    localChanged = true;
-    node->value = std::move(valueResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitArrayExpression(ast::ArrayExpression* node) {
-  bool localChanged = false;
-
-  // 要素を変換
-  for (size_t i = 0; i < node->elements.size(); ++i) {
-    if (node->elements[i]) {
-      auto elementResult = transformNode(node->elements[i]);
-      if (elementResult.changed) {
-        localChanged = true;
-        node->elements[i] = std::move(elementResult.node);
+parser::ast::NodePtr TransformerPipeline::RunWithContext(parser::ast::NodePtr node, TransformContext& context) {
+  if (!node) return nullptr;
+  
+  // フェーズに合致するトランスフォーマーのみを実行
+  for (const auto& transformer : m_transformers) {
+    if (transformer->GetPhase() == context.currentPhase) {
+      auto result = transformer->TransformWithContext(std::move(node), context);
+      node = std::move(result.transformedNode);
+      
+      if (result.shouldStopTraversal) {
+        break;
       }
     }
   }
-
-  m_changed = localChanged;
+  
+  return node;
 }
 
-void Transformer::visitUnaryExpression(ast::UnaryExpression* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
+std::unordered_map<std::string, TransformStats> TransformerPipeline::GetStatistics() const {
+  std::unordered_map<std::string, TransformStats> stats;
+  
+  for (const auto& transformer : m_transformers) {
+    stats[transformer->GetName()] = transformer->GetStatistics();
+  }
+  
+  return stats;
+}
+
+void TransformerPipeline::ResetStatistics() {
+  for (const auto& transformer : m_transformers) {
+    // トランスフォーマーの統計情報をリセット
+    // （現在の実装では直接リセットのAPIがないため、無効な操作）
   }
 }
 
-void Transformer::visitUpdateExpression(ast::UpdateExpression* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
+void TransformerPipeline::SetGlobalOptions(const TransformOptions& options) {
+  m_globalOptions = options;
+  
+  for (const auto& transformer : m_transformers) {
+    // グローバルオプションの一部を各トランスフォーマーに適用
+    TransformOptions current = transformer->GetOptions();
+    
+    // 特定のオプションのみをオーバーライド
+    current.enableCaching = options.enableCaching;
+    current.enableParallelization = options.enableParallelization;
+    current.collectStatistics = options.collectStatistics;
+    current.maxMemoryUsage = options.maxMemoryUsage;
+    current.timeout = options.timeout;
+    
+    transformer->SetOptions(current);
   }
 }
 
-void Transformer::visitBinaryExpression(ast::BinaryExpression* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitAssignmentExpression(ast::AssignmentExpression* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitLogicalExpression(ast::LogicalExpression* node) {
-  bool localChanged = false;
-
-  // 左辺を変換
-  auto leftResult = transformNode(node->left);
-  if (leftResult.changed) {
-    localChanged = true;
-    node->left = std::move(leftResult.node);
-  }
-
-  // 右辺を変換
-  auto rightResult = transformNode(node->right);
-  if (rightResult.changed) {
-    localChanged = true;
-    node->right = std::move(rightResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitMemberExpression(ast::MemberExpression* node) {
-  bool localChanged = false;
-
-  // オブジェクトを変換
-  auto objectResult = transformNode(node->object);
-  if (objectResult.changed) {
-    localChanged = true;
-    node->object = std::move(objectResult.node);
-  }
-
-  // プロパティを変換
-  auto propertyResult = transformNode(node->property);
-  if (propertyResult.changed) {
-    localChanged = true;
-    node->property = std::move(propertyResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitConditionalExpression(ast::ConditionalExpression* node) {
-  bool localChanged = false;
-
-  // 条件式を変換
-  auto testResult = transformNode(node->test);
-  if (testResult.changed) {
-    localChanged = true;
-    node->test = std::move(testResult.node);
-  }
-
-  // 真の場合の式を変換
-  auto consequentResult = transformNode(node->consequent);
-  if (consequentResult.changed) {
-    localChanged = true;
-    node->consequent = std::move(consequentResult.node);
-  }
-
-  // 偽の場合の式を変換
-  auto alternateResult = transformNode(node->alternate);
-  if (alternateResult.changed) {
-    localChanged = true;
-    node->alternate = std::move(alternateResult.node);
-  }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitCallExpression(ast::CallExpression* node) {
-  bool localChanged = false;
-
-  // 呼び出し対象を変換
-  auto calleeResult = transformNode(node->callee);
-  if (calleeResult.changed) {
-    localChanged = true;
-    node->callee = std::move(calleeResult.node);
-  }
-
-  // 引数を変換
-  for (size_t i = 0; i < node->arguments.size(); ++i) {
-    auto argumentResult = transformNode(node->arguments[i]);
-    if (argumentResult.changed) {
-      localChanged = true;
-      node->arguments[i] = std::move(argumentResult.node);
+void TransformerPipeline::SortTransformers() {
+  // 依存関係に基づいたソート
+  std::vector<std::string> resolved;
+  std::vector<std::string> unresolved;
+  
+  // トポロジカルソート
+  for (const auto& transformer : m_transformers) {
+    if (std::find(resolved.begin(), resolved.end(), transformer->GetName()) == resolved.end()) {
+      ResolveDependencies(transformer->GetName(), resolved, unresolved);
     }
   }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitNewExpression(ast::NewExpression* node) {
-  bool localChanged = false;
-
-  // 呼び出し対象を変換
-  auto calleeResult = transformNode(node->callee);
-  if (calleeResult.changed) {
-    localChanged = true;
-    node->callee = std::move(calleeResult.node);
-  }
-
-  // 引数を変換
-  for (size_t i = 0; i < node->arguments.size(); ++i) {
-    auto argumentResult = transformNode(node->arguments[i]);
-    if (argumentResult.changed) {
-      localChanged = true;
-      node->arguments[i] = std::move(argumentResult.node);
+  
+  // ソートされた順番でトランスフォーマーを再整理
+  std::vector<TransformerSharedPtr> sorted;
+  sorted.reserve(m_transformers.size());
+  
+  for (const auto& name : resolved) {
+    auto it = std::find_if(m_transformers.begin(), m_transformers.end(),
+                          [&name](const TransformerSharedPtr& t) { return t->GetName() == name; });
+    
+    if (it != m_transformers.end()) {
+      sorted.push_back(*it);
     }
   }
-
-  m_changed = localChanged;
+  
+  // 優先度でさらにソート
+  std::stable_sort(sorted.begin(), sorted.end(),
+                  [](const TransformerSharedPtr& a, const TransformerSharedPtr& b) {
+                    // フェーズでまず並べ替え
+                    if (a->GetPhase() != b->GetPhase()) {
+                      return static_cast<int>(a->GetPhase()) < static_cast<int>(b->GetPhase());
+                    }
+                    
+                    // 同じフェーズ内では優先度で並べ替え
+                    return static_cast<int>(a->GetPriority()) < static_cast<int>(b->GetPriority());
+                  });
+  
+  m_transformers = std::move(sorted);
 }
 
-void Transformer::visitSequenceExpression(ast::SequenceExpression* node) {
-  bool localChanged = false;
-
-  // 式を変換
-  for (size_t i = 0; i < node->expressions.size(); ++i) {
-    auto expressionResult = transformNode(node->expressions[i]);
-    if (expressionResult.changed) {
-      localChanged = true;
-      node->expressions[i] = std::move(expressionResult.node);
+bool TransformerPipeline::ResolveDependencies(const std::string& name, std::vector<std::string>& resolved, 
+                                             std::vector<std::string>& unresolved) {
+  // 循環依存検出
+  if (std::find(unresolved.begin(), unresolved.end(), name) != unresolved.end()) {
+    // 循環依存が見つかった
+    std::cerr << "Circular dependency detected involving transformer: " << name << std::endl;
+    return false;
+  }
+  
+  // すでに解決済みならスキップ
+  if (std::find(resolved.begin(), resolved.end(), name) != resolved.end()) {
+    return true;
+  }
+  
+  // トランスフォーマーを見つける
+  auto it = std::find_if(m_transformers.begin(), m_transformers.end(),
+                        [&name](const TransformerSharedPtr& t) { return t->GetName() == name; });
+  
+  if (it == m_transformers.end()) {
+    // 存在しないトランスフォーマー
+    std::cerr << "Unknown transformer dependency: " << name << std::endl;
+    return false;
+  }
+  
+  unresolved.push_back(name);
+  
+  // このトランスフォーマーの依存関係を再帰的に解決
+  const auto& transformer = *it;
+  // 注: 現在の実装では依存関係を取得する方法がないため、コメントアウト
+  /*
+  for (const auto& dep : transformer->GetDependencies()) {
+    if (!ResolveDependencies(dep, resolved, unresolved)) {
+      return false;
     }
   }
-
-  m_changed = localChanged;
-}
-
-void Transformer::visitAwaitExpression(ast::AwaitExpression* node) {
-  auto argumentResult = transformNode(node->argument);
-  if (argumentResult.changed) {
-    m_changed = true;
-    node->argument = std::move(argumentResult.node);
+  */
+  
+  // 解決済みとしてマーク
+  resolved.push_back(name);
+  
+  // 未解決リストから削除
+  auto unresolvedIt = std::find(unresolved.begin(), unresolved.end(), name);
+  if (unresolvedIt != unresolved.end()) {
+    unresolved.erase(unresolvedIt);
   }
+  
+  return true;
 }
 
-void Transformer::visitYieldExpression(ast::YieldExpression* node) {
-  if (node->argument) {
-    auto argumentResult = transformNode(node->argument);
-    if (argumentResult.changed) {
-      m_changed = true;
-      node->argument = std::move(argumentResult.node);
-    }
-  }
-}
+} // namespace aerojs::transformers
 
-}  // namespace transformers
-}  // namespace aero

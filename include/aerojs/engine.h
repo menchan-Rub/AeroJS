@@ -1,7 +1,7 @@
 /**
  * @file engine.h
- * @brief AeroJS JavaScriptエンジンを管理するためのAPI
- * @version 0.1.0
+ * @brief AeroJS 世界最高性能JavaScriptエンジンを管理するためのAPI
+ * @version 2.0.0
  * @license MIT
  */
 
@@ -126,6 +126,21 @@ typedef struct {
   AerojsUInt64 compileTime;          /* コンパイル累積時間（マイクロ秒） */
   AerojsUInt32 interpreterTime;      /* インタープリタ累積実行時間（ミリ秒） */
   AerojsUInt32 jitTime;              /* JITコード累積実行時間（ミリ秒） */
+  AerojsUInt32 superOptimizedFunctions; /* 超最適化された関数数 */
+  AerojsUInt32 speculativeCompilations; /* スペキュレーティブコンパイル数 */
+  AerojsUInt32 inlinedFunctions;     /* インライン化された関数数 */
+  AerojsUInt32 eliminatedDeadCode;   /* 除去されたデッドコード行数 */
+  AerojsUInt32 hoistedInvariants;    /* ループ外に移動された不変コード数 */
+  AerojsUInt32 vectorizedLoops;      /* ベクトル化されたループ数 */
+  AerojsUInt32 specializationCount;  /* 型特化された関数数 */
+  AerojsUInt32 simdInstructionsCount; /* 生成されたSIMD命令数 */
+  AerojsUInt64 optimizationTimeNs;   /* 最適化に費やされた時間（ナノ秒） */
+  AerojsUInt64 peakMemoryUsage;      /* ピークメモリ使用量（バイト単位） */
+  AerojsUInt32 codeCacheHits;        /* コードキャッシュヒット数 */
+  AerojsUInt32 codeCacheMisses;      /* コードキャッシュミス数 */
+  AerojsUInt32 icHits;               /* インラインキャッシュヒット数 */
+  AerojsUInt32 icMisses;             /* インラインキャッシュミス数 */
+  AerojsUInt32 warmupTime;           /* ウォームアップ時間（ミリ秒） */
 } AerojsJITStats;
 
 /**
@@ -238,6 +253,160 @@ AEROJS_EXPORT AerojsStatus AerojsEnableScriptCache(AerojsEngine* engine,
  * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
  */
 AEROJS_EXPORT AerojsStatus AerojsClearScriptCache(AerojsEngine* engine);
+
+/**
+ * @brief スーパー最適化レベル
+ */
+typedef enum {
+  AEROJS_SUPER_OPT_LEVEL0 = 0,   /* 基本最適化 */
+  AEROJS_SUPER_OPT_LEVEL1 = 1,   /* 高度最適化 */
+  AEROJS_SUPER_OPT_LEVEL2 = 2,   /* 超最適化 */
+  AEROJS_SUPER_OPT_LEVEL3 = 3,   /* 究極最適化 */
+  AEROJS_SUPER_OPT_EXTREME = 4   /* 極限最適化（実験的） */
+} AerojsSuperOptLevel;
+
+/**
+ * @brief 超最適化レベルを設定
+ * @param engine エンジンインスタンス
+ * @param level 超最適化レベル
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsSetSuperOptimizationLevel(AerojsEngine* engine, AerojsSuperOptLevel level);
+
+/**
+ * @brief 超最適化レベルを取得
+ * @param engine エンジンインスタンス
+ * @param level 超最適化レベルを格納するポインタ
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsGetSuperOptimizationLevel(AerojsEngine* engine, AerojsSuperOptLevel* level);
+
+/**
+ * @brief 並列コンパイルスレッド数を設定
+ * @param engine エンジンインスタンス
+ * @param threads スレッド数（0=自動）
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsSetCompilationThreads(AerojsEngine* engine, AerojsUInt32 threads);
+
+/**
+ * @brief ハードウェア固有の最適化を有効/無効化
+ * @param engine エンジンインスタンス
+ * @param enable 有効にする場合はAEROJS_TRUE、無効にする場合はAEROJS_FALSE
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsEnableHardwareOptimizations(AerojsEngine* engine, AerojsBool enable);
+
+/**
+ * @brief 拡張命令セットオプション
+ */
+typedef struct {
+  AerojsBool useCryptoInstructions;      /* 暗号命令（AES, SHA） */
+  AerojsBool useDotProductInstructions;  /* ドット積命令 */
+  AerojsBool useBF16Instructions;        /* BF16命令 */
+  AerojsBool useJSCVTInstructions;       /* JavaScript変換命令 */
+  AerojsBool useLSEInstructions;         /* Large System Extensions */
+  AerojsBool useSVEInstructions;         /* Scalable Vector Extensions */
+  AerojsBool usePAuthInstructions;       /* ポインタ認証 */
+  AerojsBool useBTIInstructions;         /* ブランチターゲット識別 */
+  AerojsBool useMTEInstructions;         /* メモリタグ拡張 */
+} AerojsAdvancedInstructionOptions;
+
+/**
+ * @brief 拡張命令セットオプションを設定
+ * @param engine エンジンインスタンス
+ * @param options オプション構造体
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsSetAdvancedInstructionOptions(AerojsEngine* engine, 
+                                                           const AerojsAdvancedInstructionOptions* options);
+
+/**
+ * @brief 拡張命令セットオプションを取得
+ * @param engine エンジンインスタンス
+ * @param options オプション構造体を格納するポインタ
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsGetAdvancedInstructionOptions(AerojsEngine* engine, 
+                                                           AerojsAdvancedInstructionOptions* options);
+
+/**
+ * @brief メタトレーシング最適化を有効/無効化
+ * @param engine エンジンインスタンス
+ * @param enable 有効にする場合はAEROJS_TRUE、無効にする場合はAEROJS_FALSE
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsEnableMetaTracing(AerojsEngine* engine, AerojsBool enable);
+
+/**
+ * @brief スペキュレーティブ最適化を有効/無効化
+ * @param engine エンジンインスタンス
+ * @param enable 有効にする場合はAEROJS_TRUE、無効にする場合はAEROJS_FALSE
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsEnableSpeculativeOptimizations(AerojsEngine* engine, AerojsBool enable);
+
+/**
+ * @brief プロファイル誘導型最適化を有効/無効化
+ * @param engine エンジンインスタンス
+ * @param enable 有効にする場合はAEROJS_TRUE、無効にする場合はAEROJS_FALSE
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsEnableProfileGuidedOptimization(AerojsEngine* engine, AerojsBool enable);
+
+/**
+ * @brief JITコードキャッシュの最大サイズを設定
+ * @param engine エンジンインスタンス
+ * @param maxSize 最大サイズ（バイト単位）
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsSetMaxCodeCacheSize(AerojsEngine* engine, AerojsSize maxSize);
+
+/**
+ * @brief パフォーマンスチューニングを自動実行
+ * @param engine エンジンインスタンス
+ * @param timeoutMs タイムアウト時間（ミリ秒、0=無制限）
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsAutoTunePerformance(AerojsEngine* engine, AerojsUInt32 timeoutMs);
+
+/**
+ * @brief ホットスポットの最適化を実行
+ * @param engine エンジンインスタンス
+ * @param async 非同期実行する場合はAEROJS_TRUE、同期実行する場合はAEROJS_FALSE
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsOptimizeHotspots(AerojsEngine* engine, AerojsBool async);
+
+/**
+ * @brief JITコンパイラの詳細なデバッグ情報を取得
+ * @param engine エンジンインスタンス
+ * @param functionName 関数名（NULL=すべての関数）
+ * @param buffer 情報を格納するバッファ
+ * @param bufferSize バッファサイズ
+ * @param actualSize 実際のサイズを格納するポインタ
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsGetJITDebugInfo(AerojsEngine* engine, 
+                                                const char* functionName,
+                                                char* buffer, 
+                                                AerojsSize bufferSize,
+                                                AerojsSize* actualSize);
+
+/**
+ * @brief コンパイル済み関数の逆アセンブリコードを取得
+ * @param engine エンジンインスタンス
+ * @param functionName 関数名
+ * @param buffer 情報を格納するバッファ
+ * @param bufferSize バッファサイズ
+ * @param actualSize 実際のサイズを格納するポインタ
+ * @return 成功した場合はAEROJS_SUCCESS、失敗した場合はエラーコード
+ */
+AEROJS_EXPORT AerojsStatus AerojsDisassembleFunction(AerojsEngine* engine, 
+                                                   const char* functionName,
+                                                   char* buffer, 
+                                                   AerojsSize bufferSize,
+                                                   AerojsSize* actualSize);
 
 #ifdef __cplusplus
 }

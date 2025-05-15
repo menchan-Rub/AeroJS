@@ -11,6 +11,7 @@
 
 #include "context.h"
 #include "value.h"
+#include "execution_context.h"
 
 namespace aerojs {
 namespace core {
@@ -24,13 +25,38 @@ Exception* Exception::create(Context* ctx, const std::string& message, ErrorType
   Exception* exception = new Exception(ctx, message, type);
 
   // 現在のコールスタックからスタックトレースを取得
-  // 実際の実装では、コールスタックを取得するロジックを実装する必要がある
-  // ここでは仮実装として現在地点のみを追加
-  exception->addStackTraceElement(StackTraceElement(
-      "<anonymous>",
-      "<native>",
-      1,
-      1));
+  if (ctx) {
+    ExecutionContext* execContext = ctx->currentExecutionContext();
+    if (execContext) {
+      // 現在の実行コンテキストからコールスタックを取得
+      const CallStack& callStack = execContext->getCallStack();
+      for (const CallFrame& frame : callStack.getFrames()) {
+        // 各フレーム情報からスタックトレース要素を作成
+        std::string functionName = frame.getFunctionName();
+        if (functionName.empty()) {
+          functionName = "<anonymous>";
+        }
+        
+        std::string fileName = frame.getFileName();
+        if (fileName.empty()) {
+          fileName = "<native>";
+        }
+        
+        exception->addStackTraceElement(StackTraceElement(
+            functionName,
+            fileName,
+            frame.getLineNumber(),
+            frame.getColumnNumber()));
+      }
+    } else {
+      // 実行コンテキストが取得できない場合は最低限の情報だけ追加
+      exception->addStackTraceElement(StackTraceElement(
+          "<anonymous>",
+          "<native>",
+          0,
+          0));
+    }
+  }
 
   return exception;
 }

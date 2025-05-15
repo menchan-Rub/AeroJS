@@ -983,8 +983,58 @@ void JITProfiler::SetupIRBuilderHooks(IRBuilder* irBuilder) {
     if (!irBuilder) return;
     
     // IRビルダーがフックをサポートする場合の実装
-    // TODO: フックのセットアップコード
-    // irBuilder->SetProfiler(this);
+    irBuilder->SetProfiler(this);
+    
+    // フックの設定
+    irBuilder->SetInstructionEmitCallback([this](uint32_t functionId, IROpcode opcode, uint32_t offset) {
+        // 命令がエミットされるたびに呼び出される
+        if (m_profilingEnabled) {
+            // 特定の命令をプロファイリング
+            if (IsArithmeticOp(opcode)) {
+                RecordArithmeticOperation(functionId, offset, TypeFeedbackRecord::TypeCategory::Unknown);
+            } else if (IsComparisonOp(opcode)) {
+                RecordComparisonOperation(functionId, offset, TypeFeedbackRecord::TypeCategory::Unknown);
+            } else if (IsCallOp(opcode)) {
+                // コール命令を記録（ターゲットは不明の場合があるので別途更新）
+                RecordFunctionCall(functionId, offset, 0);
+            } else if (IsBranchOp(opcode)) {
+                // 分岐命令を記録
+                RegisterBranch(functionId, offset);
+            } else if (IsLoopHeaderOp(opcode)) {
+                // ループ命令を記録
+                RegisterLoopHeader(functionId, offset);
+            }
+        }
+    });
+    
+    // 型推論情報のフックを設定
+    irBuilder->SetTypeInferenceCallback([this](uint32_t functionId, uint32_t varIndex, IRType type) {
+        if (m_profilingEnabled) {
+            // IRTypeからTypeCategory変換
+            TypeFeedbackRecord::TypeCategory category;
+            switch (type) {
+                case IRType::Int32:
+                    category = TypeFeedbackRecord::TypeCategory::Integer;
+                    break;
+                case IRType::Double:
+                    category = TypeFeedbackRecord::TypeCategory::Double;
+                    break;
+                case IRType::Boolean:
+                    category = TypeFeedbackRecord::TypeCategory::Boolean;
+                    break;
+                case IRType::String:
+                    category = TypeFeedbackRecord::TypeCategory::String;
+                    break;
+                case IRType::Object:
+                    category = TypeFeedbackRecord::TypeCategory::Object;
+                    break;
+                default:
+                    category = TypeFeedbackRecord::TypeCategory::Unknown;
+                    break;
+            }
+            RecordVariableType(functionId, varIndex, category, false, false);
+        }
+    });
 }
 
 void JITProfiler::AttachToCompiler(JITCompiler* compiler) {
@@ -992,8 +1042,80 @@ void JITProfiler::AttachToCompiler(JITCompiler* compiler) {
     if (!compiler) return;
     
     // コンパイラがプロファイリングをサポートする場合の実装
-    // TODO: コンパイラへの接続コード
-    // compiler->SetProfiler(this);
+    compiler->SetProfiler(this);
+    
+    // ホットスポット情報を設定
+    compiler->SetHotspotCallback([this](uint32_t functionId) -> std::vector<uint32_t> {
+        return GetHotSpots(functionId, 5); // 上位5つのホットスポット
+    });
+    
+    // 型情報コールバックを設定
+    compiler->SetTypeInfoCallback([this](uint32_t functionId, uint32_t bytecodeOffset) -> TypeFeedbackRecord {
+        auto profile = GetFunctionProfile(functionId);
+        if (!profile) {
+            return TypeFeedbackRecord();
+        }
+        
+        auto it = profile->typeFeedback.find(bytecodeOffset);
+        if (it != profile->typeFeedback.end()) {
+            return it->second;
+        }
+        
+        return TypeFeedbackRecord();
+    });
+    
+    // 分岐予測情報を設定
+    compiler->SetBranchPredictionCallback([this](uint32_t functionId, uint32_t bytecodeOffset) -> double {
+        auto profile = GetFunctionProfile(functionId);
+        if (!profile) {
+            return 0.5; // デフォルトは50%の確率
+        }
+        
+        auto it = profile->branchExecutionCounts.find(bytecodeOffset);
+        if (it != profile->branchExecutionCounts.end()) {
+            const auto& branch = it->second;
+            if (branch.executionCount > 0) {
+                return static_cast<double>(branch.takenCount) / branch.executionCount;
+            }
+        }
+        
+        return 0.5;
+    });
+    
+    // ループ情報を設定
+    compiler->SetLoopInfoCallback([this](uint32_t functionId, uint32_t loopHeaderOffset) -> LoopProfile {
+        LoopProfile result;
+        auto profile = GetFunctionProfile(functionId);
+        if (!profile) {
+            return result;
+        }
+        
+        auto it = profile->loopExecutionCounts.find(loopHeaderOffset);
+        if (it != profile->loopExecutionCounts.end()) {
+            result.iterations = it->second.averageIterations;
+            result.executions = it->second.executionCount;
+        }
+        
+        return result;
+    });
+    
+    // コールサイト情報を設定
+    compiler->SetCallSiteInfoCallback([this](uint32_t functionId, uint32_t callSiteOffset) -> CallSiteProfile {
+        CallSiteProfile result;
+        auto profile = GetFunctionProfile(functionId);
+        if (!profile) {
+            return result;
+        }
+        
+        auto it = profile->callSiteExecutionCounts.find(callSiteOffset);
+        if (it != profile->callSiteExecutionCounts.end()) {
+            result.callCount = it->second.executionCount;
+            result.mostCommonTarget = it->second.mostCommonTarget.first;
+            result.targetCount = it->second.mostCommonTarget.second;
+        }
+        
+        return result;
+    });
 }
 
 std::vector<uint32_t> JITProfiler::GetFunctionsForOptimization(uint32_t threshold) const {
@@ -1018,10 +1140,56 @@ std::vector<uint32_t> JITProfiler::GetFunctionsForDeoptimization() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     // 脱最適化すべき関数を特定するロジック
-    // 現在は仮実装
     std::vector<uint32_t> functionsToDeoptimize;
     
-    // TODO: 型の不安定性や予測が外れた関数を特定するロジック
+    // 型の不安定性や予測が外れた関数を特定
+    for (const auto& pair : m_profileData) {
+        const auto& functionId = pair.first;
+        const auto& profile = pair.second;
+        bool shouldDeoptimize = false;
+        
+        // 型の不安定性をチェック
+        for (const auto& typePair : profile->typeFeedback) {
+            const auto& record = typePair.second;
+            
+            // 型の安定性が低く、かつ十分な観測数がある場合
+            if (record.totalObservations > 10 && record.GetTypeStability() < 0.7) {
+                shouldDeoptimize = true;
+                break;
+            }
+        }
+        
+        // プロパティアクセスの多態性をチェック
+        for (const auto& propPair : profile->propertyAccesses) {
+            const auto& record = propPair.second;
+            
+            // メガモーフィック（非常に不安定）なプロパティアクセスがある場合
+            if (record.accessCount > 20 && record.isMegamorphic) {
+                shouldDeoptimize = true;
+                break;
+            }
+        }
+        
+        // 分岐予測の正確性をチェック
+        for (const auto& branchPair : profile->branchExecutionCounts) {
+            const auto& branch = branchPair.second;
+            
+            // 分岐予測の精度が低く、かつ十分な観測数がある場合
+            if (branch.executionCount > 20) {
+                double takenRatio = static_cast<double>(branch.takenCount) / branch.executionCount;
+                
+                // 分岐が極端に偏っていない（30-70%の範囲）場合、予測が難しい
+                if (takenRatio > 0.3 && takenRatio < 0.7) {
+                    shouldDeoptimize = true;
+                    break;
+                }
+            }
+        }
+        
+        if (shouldDeoptimize) {
+            functionsToDeoptimize.push_back(functionId);
+        }
+    }
     
     return functionsToDeoptimize;
 }
@@ -1031,20 +1199,26 @@ void JITProfiler::UpdateTypeConfidence(TypeFeedbackRecord& record, TypeFeedbackR
     if (record.observationCount == 1) {
         record.category = newType;
         record.confidence = 1.0f;
+        record.totalObservations = 1;
         return;
     }
     
+    // 全観測回数をインクリメント
+    record.totalObservations++;
+    
     // 同じ型が観測された場合は信頼度を上げる
     if (record.category == newType) {
+        // この型の観測回数をインクリメント
+        record.observationCount++;
         // 単純な加重平均で信頼度を更新
-        record.confidence = (record.confidence * (record.observationCount - 1) + 1.0f) / record.observationCount;
+        record.confidence = (record.confidence * (record.totalObservations - 1) + 1.0f) / record.totalObservations;
     } else {
         // 異なる型が観測された場合は信頼度を下げる
-        record.confidence = (record.confidence * (record.observationCount - 1)) / record.observationCount;
+        record.confidence = (record.confidence * (record.totalObservations - 1)) / record.totalObservations;
         
-        // 信頼度が50%を下回った場合は型をUnknownに変更
+        // 信頼度が50%を下回った場合は型をMixedに変更
         if (record.confidence < 0.5f) {
-            record.category = TypeFeedbackRecord::TypeCategory::Unknown;
+            record.category = TypeFeedbackRecord::TypeCategory::Mixed;
         }
     }
 }
@@ -1131,6 +1305,131 @@ float JITProfiler::CalculateTypeStability(const TypeFeedbackRecord& record) cons
         return record.confidence * (static_cast<float>(record.observationCount) / 10.0f);
     }
     return record.confidence;
+}
+
+// IR命令の種類を判定するヘルパー関数
+bool JITProfiler::IsArithmeticOp(IROpcode opcode) const {
+    switch (opcode) {
+        case IROpcode::Add:
+        case IROpcode::Sub:
+        case IROpcode::Mul:
+        case IROpcode::Div:
+        case IROpcode::Mod:
+        case IROpcode::Neg:
+        case IROpcode::Inc:
+        case IROpcode::Dec:
+        case IROpcode::Sqrt:
+        case IROpcode::Abs:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool JITProfiler::IsComparisonOp(IROpcode opcode) const {
+    switch (opcode) {
+        case IROpcode::Eq:
+        case IROpcode::Ne:
+        case IROpcode::Lt:
+        case IROpcode::Le:
+        case IROpcode::Gt:
+        case IROpcode::Ge:
+        case IROpcode::StrictEq:
+        case IROpcode::StrictNe:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool JITProfiler::IsCallOp(IROpcode opcode) const {
+    switch (opcode) {
+        case IROpcode::Call:
+        case IROpcode::CallMethod:
+        case IROpcode::CallConstructor:
+        case IROpcode::CallVirtual:
+        case IROpcode::CallIndirect:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool JITProfiler::IsBranchOp(IROpcode opcode) const {
+    switch (opcode) {
+        case IROpcode::Jump:
+        case IROpcode::JumpIfTrue:
+        case IROpcode::JumpIfFalse:
+        case IROpcode::JumpIfNull:
+        case IROpcode::JumpIfNotNull:
+        case IROpcode::JumpIfUndefined:
+        case IROpcode::JumpIfNotUndefined:
+        case IROpcode::JumpTable:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool JITProfiler::IsLoopHeaderOp(IROpcode opcode) const {
+    switch (opcode) {
+        case IROpcode::LoopHeader:
+        case IROpcode::ForLoopInit:
+        case IROpcode::ForLoopTest:
+        case IROpcode::ForInLoopHeader:
+        case IROpcode::ForOfLoopHeader:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 分岐命令を登録するヘルパー関数
+void JITProfiler::RegisterBranch(uint32_t functionId, uint32_t bytecodeOffset) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // 関数プロファイルが存在することを確認
+    auto it = m_profileData.find(functionId);
+    if (it == m_profileData.end()) {
+        // 新しいプロファイルを作成
+        auto profile = std::make_unique<FunctionProfile>();
+        profile->functionId = functionId;
+        it = m_profileData.emplace(functionId, std::move(profile)).first;
+    }
+    
+    // 分岐命令を記録（初期状態では偏りはない）
+    auto& branchData = it->second->branchExecutionCounts[bytecodeOffset];
+    
+    // 初期化のみ（実際の分岐結果は別途recordBranchメソッドで記録）
+    if (branchData.executionCount == 0) {
+        branchData.executionCount = 0;
+        branchData.takenCount = 0;
+        branchData.notTakenCount = 0;
+    }
+}
+
+// ループヘッダーを登録するヘルパー関数
+void JITProfiler::RegisterLoopHeader(uint32_t functionId, uint32_t loopHeaderOffset) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // 関数プロファイルが存在することを確認
+    auto it = m_profileData.find(functionId);
+    if (it == m_profileData.end()) {
+        // 新しいプロファイルを作成
+        auto profile = std::make_unique<FunctionProfile>();
+        profile->functionId = functionId;
+        it = m_profileData.emplace(functionId, std::move(profile)).first;
+    }
+    
+    // ループヘッダーを記録（初期状態ではカウンターを0に）
+    auto& loopData = it->second->loopExecutionCounts[loopHeaderOffset];
+    
+    // 初期化のみ（実際のループ反復回数は別途recordLoopIterationメソッドで記録）
+    if (loopData.executionCount == 0) {
+        loopData.executionCount = 0;
+        loopData.averageIterations = 0.0f;
+        loopData.hotness = 0.0f;
+    }
 }
 
 } // namespace aerojs::core 

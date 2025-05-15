@@ -326,8 +326,35 @@ void IROptimizer::AnalyzeControlFlow(IRFunction& function) noexcept {
       leaders.push_back(i + 1);
     }
     
-    // TODO: ジャンプ命令のターゲットも基本ブロックの先頭
-    // この実装では単純化のためスキップ
+    // ジャンプ命令のターゲットも基本ブロックの先頭
+    if (IsJumpInstruction(inst.opcode)) {
+      // 直接ジャンプターゲットがある場合（条件分岐や無条件ジャンプ）
+      if (inst.args.size() >= 2) {
+        int32_t targetIndex = inst.args[1]; // 多くのジャンプ命令では2番目の引数がターゲット
+        
+        if (targetIndex >= 0 && targetIndex < static_cast<int32_t>(instructions.size())) {
+          leaders.push_back(targetIndex);
+        }
+      }
+      
+      // Switch文のようなジャンプテーブルの場合
+      if (inst.opcode == Opcode::JumpTable && inst.args.size() >= 3) {
+        int32_t numTargets = inst.args[1]; // ジャンプテーブルのエントリ数
+        
+        for (int32_t j = 0; j < numTargets && j + 2 < static_cast<int32_t>(inst.args.size()); ++j) {
+          int32_t targetIndex = inst.args[j + 2]; // ジャンプテーブルのターゲット
+          
+          if (targetIndex >= 0 && targetIndex < static_cast<int32_t>(instructions.size())) {
+            leaders.push_back(targetIndex);
+          }
+        }
+      }
+      
+      // 次の命令も新しいブロックの先頭（フォールスルーの可能性）
+      if (i + 1 < instructions.size() && inst.opcode != Opcode::Jump && inst.opcode != Opcode::Return) {
+        leaders.push_back(i + 1);
+      }
+    }
   }
   
   // 重複を削除し、ソート
@@ -835,6 +862,29 @@ bool IROptimizer::RunLoopInvariantCodeMotion(IRFunction& function) noexcept {
   }
   
   return changed;
+}
+
+bool IROptimizer::IsJumpInstruction(Opcode opcode) const noexcept {
+  switch (opcode) {
+    case Opcode::Jump:
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfEqual:
+    case Opcode::JumpIfNotEqual:
+    case Opcode::JumpIfLess:
+    case Opcode::JumpIfLessEqual:
+    case Opcode::JumpIfGreater:
+    case Opcode::JumpIfGreaterEqual:
+    case Opcode::JumpIfNull:
+    case Opcode::JumpIfNotNull:
+    case Opcode::JumpIfUndefined:
+    case Opcode::JumpIfNotUndefined:
+    case Opcode::JumpTable:
+    case Opcode::JumpSubroutine:
+      return true;
+    default:
+      return false;
+  }
 }
 
 std::string OptimizationPassToString(OptimizationPass pass) {

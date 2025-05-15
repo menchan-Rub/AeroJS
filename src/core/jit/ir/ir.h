@@ -155,6 +155,13 @@ public:
   }
   
   /**
+   * @brief すべての命令をクリアする
+   */
+  void Clear() {
+    m_instructions.clear();
+  }
+  
+  /**
    * @brief ラベルを登録する
    * @param label ラベル名
    * @return ラベルID
