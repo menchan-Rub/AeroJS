@@ -249,20 +249,91 @@ bool TracingJIT::finishTraceRecording() {
         return false;
     }
     
-    // 生成されたコードを保存
-    compiledTrace.nativeCode = nativeCode;
-    compiledTrace.codeSize = codeSize;
-    compiledTrace.executionTime = trace->executionTimeNs;
+    // サイドエグジットのパッチポイント情報を収集
+    std::vector<size_t> sideExitOffsets;
+    for (size_t i = 0; i < trace->sideExits.size(); i++) {
+        // IRノードのオフセットからネイティブコードでのオフセットを取得
+        size_t offset = m_codeGenerator->getOffsetForLabel(trace->sideExits[i].label);
+        sideExitOffsets.push_back(offset);
+    }
     
-    // サイドエグジット情報を設定
+    // ネイティブコードにサイドエグジットパッチを適用
     for (size_t i = 0; i < trace->sideExits.size(); i++) {
         const auto& srcExit = trace->sideExits[i];
         auto& destExit = compiledTrace.sideExits[i];
         
+        // サイドエグジット情報を設定
         destExit.location = srcExit.location;
         destExit.type = srcExit.type;
-        destExit.nativeOffset = 0; // コード生成時に設定
+        destExit.nativeOffset = sideExitOffsets[i];
+        
+        // パッチのためのトランポリンコードを生成
+        // これにより、JITコードからインタプリタに戻る際の状態遷移を処理
+        uint8_t* patchLocation = nativeCode + destExit.nativeOffset;
+        
+        // ターゲットアドレスをサイドエグジットハンドラとして設定
+        uintptr_t handlerAddr = reinterpret_cast<uintptr_t>(handleSideExit);
+        
+        // サイドエグジットIDをレジスタに設定するコードを生成
+        // mov rax, exit_index
+        *patchLocation++ = 0x48;  // REX.W
+        *patchLocation++ = 0xB8;  // MOV RAX, imm64
+        *reinterpret_cast<uint64_t*>(patchLocation) = i;
+        patchLocation += 8;
+        
+        // トレースIDをセット
+        // mov rdx, trace_id
+        *patchLocation++ = 0x48;  // REX.W
+        *patchLocation++ = 0xBA;  // MOV RDX, imm64
+        *reinterpret_cast<uint64_t*>(patchLocation) = compiledTrace.traceId;
+        patchLocation += 8;
+        
+        // ジャンプ先をサイドエグジットハンドラに設定
+        // jmp handler_addr
+        *patchLocation++ = 0xFF;  // JMP r/m64
+        *patchLocation++ = 0x25;  // RIP-relative
+        *reinterpret_cast<uint32_t*>(patchLocation) = 0;  // オフセット
+        patchLocation += 4;
+        *reinterpret_cast<uint64_t*>(patchLocation) = handlerAddr;
     }
+    
+    // エントリーポイントのホットパッチングを設定
+    // これにより、バイトコードの特定位置でトレースを開始できるように
+    // インタプリタコードにパッチを適用
+    if (trace->entryPoint) {
+        auto bytecodeAddr = *trace->entryPoint;
+        auto& interpreter = m_context->getVM()->getInterpreter();
+        
+        // バイトコードオペレーションのディスパッチテーブルに
+        // トレースエントリポイントとしてネイティブコードを登録
+        interpreter.registerTraceEntryPoint(
+            bytecodeAddr,
+            reinterpret_cast<void*>(nativeCode)
+        );
+    }
+    
+    // トレースの内部最適化情報を格納
+    compiledTrace.optimizationInfo.inlinedCalls = trace->inlinedCalls.size();
+    compiledTrace.optimizationInfo.guardCount = trace->guardPoints.size();
+    compiledTrace.optimizationInfo.eliminatedBoundsChecks = trace->eliminatedBoundsChecks;
+    compiledTrace.optimizationInfo.eliminatedNullChecks = trace->eliminatedNullChecks;
+    compiledTrace.optimizationInfo.hoistedInstructions = trace->hoistedInstructions;
+    
+    // プロファイル情報を設定
+    m_profileInfo[compiledTrace.traceId] = TraceProfileInfo{
+        .compilationTimeUs = trace->compilationTimeUs,
+        .originalInstructions = trace->originalInstructionCount,
+        .optimizedInstructions = trace->optimizedInstructionCount,
+        .irNodes = allocatedIR->getNodeCount(),
+        .machineCodeSize = codeSize,
+        .guardCount = trace->guardPoints.size(),
+        .sideExitCount = trace->sideExits.size()
+    };
+    
+    // 生成されたコードを保存
+    compiledTrace.nativeCode = nativeCode;
+    compiledTrace.codeSize = codeSize;
+    compiledTrace.executionTime = trace->executionTimeNs;
     
     // 使用メモリを追跡
     m_usedMemory += codeSize;

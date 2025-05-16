@@ -5,13 +5,16 @@
  * @license MIT
  */
 
-#pragma once
+#ifndef AEROJS_WASM_MODULE_H
+#define AEROJS_WASM_MODULE_H
 
 #include <vector>
 #include <string>
-#include <unordered_map>
 #include <memory>
+#include <unordered_map>
 #include <functional>
+#include <optional>
+#include "../../utils/memory/smart_ptr.h"
 #include "../values/value.h"
 #include "../context/execution_context.h"
 
@@ -20,44 +23,67 @@ namespace core {
 namespace runtime {
 namespace wasm {
 
+// 前方宣言
+class WasmModuleInstance;
+class WasmMemory;
+class WasmTable;
+class WasmGlobal;
+class ExecutionContext;
+
 // WebAssembly値型
 enum class WasmValueType {
   I32,
   I64,
   F32,
   F64,
-  ExternRef,
-  FuncRef,
-  V128  // SIMD
+  V128,
+  ANYREF,
+  FUNCREF
 };
 
 // WebAssembly値
-struct WasmValue {
-  WasmValueType type;
+class WasmValue {
+public:
+  // 各型のコンストラクタ
+  static WasmValue createI32(int32_t value);
+  static WasmValue createI64(int64_t value);
+  static WasmValue createF32(float value);
+  static WasmValue createF64(double value);
+  static WasmValue createAnyRef(Value value);
+  static WasmValue createFuncRef(Value func);
+  static WasmValue createV128(const uint8_t* data);
+
+  // 値の取得
+  int32_t asI32() const;
+  int64_t asI64() const;
+  float asF32() const;
+  double asF64() const;
+  Value asAnyRef() const;
+  Value asFuncRef() const;
+  void getV128(uint8_t* dest) const;
+
+  // 型の取得
+  WasmValueType type() const;
+  
+  // JavaScriptの値に変換
+  Value toJSValue(ExecutionContext* context) const;
+  
+  // JavaScriptの値から変換
+  static WasmValue fromJSValue(const Value& value, WasmValueType targetType);
+
+private:
+  WasmValueType type_;
   union {
     int32_t i32Value;
     int64_t i64Value;
     float f32Value;
     double f64Value;
-    void* externRef;
-    uint32_t funcRef;
+    uint64_t refValue; // 参照値のポインタ
     uint8_t v128Value[16];
-  };
-  
-  // コンストラクタ
-  static WasmValue createI32(int32_t value);
-  static WasmValue createI64(int64_t value);
-  static WasmValue createF32(float value);
-  static WasmValue createF64(double value);
-  static WasmValue createExternRef(void* value);
-  static WasmValue createFuncRef(uint32_t value);
-  static WasmValue createV128(const uint8_t* value);
-  
-  // JavaScriptの値に変換
-  Value toJSValue(execution::ExecutionContext* context) const;
-  
-  // JavaScriptの値から変換
-  static WasmValue fromJSValue(const Value& value, WasmValueType targetType);
+  } value_;
+
+  // プライベートコンストラクタ
+  WasmValue(WasmValueType type);
 };
 
 // WebAssembly関数型
@@ -66,6 +92,7 @@ struct WasmFunctionType {
   std::vector<WasmValueType> results;
   
   bool operator==(const WasmFunctionType& other) const;
+  size_t hash() const;
 };
 
 // WebAssembly関数インターフェース
@@ -81,13 +108,89 @@ public:
   
   // 名前取得
   virtual const std::string& getName() const = 0;
+  
+  // JavaScriptの関数に変換
+  virtual Value toJSFunction(ExecutionContext* context) = 0;
 };
 
-// WebAssemblyメモリインターフェース
-class WasmMemory {
-public:
-  virtual ~WasmMemory() = default;
+// WebAssemblyモジュール記述子
+struct WasmModuleDescriptor {
+  std::vector<uint8_t> binary;        // WebAssemblyバイナリ
+  std::string name;                   // モジュール名
+  bool streaming;                     // ストリーミングコンパイル
+  bool debug;                         // デバッグ情報あり
+};
+
+// WebAssemblyインポート記述子
+struct WasmImportDescriptor {
+  std::string module;                 // インポート元モジュール名
+  std::string name;                   // インポート名
+  enum Kind {
+    FUNCTION,
+    TABLE,
+    MEMORY,
+    GLOBAL
+  } kind;                             // インポート種類
   
+  // インポート情報（共用体の代わりに個別フィールドで管理）
+  WasmFunctionType functionType;      // 関数の場合
+  
+  struct {
+    uint32_t min;
+    std::optional<uint32_t> max;
+    WasmValueType elemType;
+  } tableType;                        // テーブルの場合
+  
+  struct {
+    uint32_t min;
+    std::optional<uint32_t> max;
+    bool shared;
+  } memoryType;                       // メモリの場合
+  
+  struct {
+    WasmValueType type;
+    bool mutable_;
+  } globalType;                       // グローバル変数の場合
+};
+
+// WebAssemblyエクスポート記述子
+struct WasmExportDescriptor {
+  std::string name;                   // エクスポート名
+  enum Kind {
+    FUNCTION,
+    TABLE,
+    MEMORY,
+    GLOBAL
+  } kind;                             // エクスポート種類
+  uint32_t index;                     // エクスポート対象のインデックス
+};
+
+// WebAssemblyモジュールクラス
+class WasmModule : public RefCounted {
+public:
+  // モジュール作成
+  static RefPtr<WasmModule> compile(const WasmModuleDescriptor& descriptor);
+  
+  // インスタンス化
+  RefPtr<WasmModuleInstance> instantiate(ExecutionContext* context, const std::unordered_map<std::string, Value>& importObject);
+  
+  // モジュール情報取得
+  const std::vector<WasmImportDescriptor>& imports() const;
+  const std::vector<WasmExportDescriptor>& exports() const;
+  std::string name() const;
+  size_t codeSize() const;
+  bool hasDebugInfo() const;
+  
+  // カスタムセクション取得
+  std::optional<std::vector<uint8_t>> customSection(const std::string& name) const;
+  
+  // 検証済みかどうか
+  bool isValid() const;
+  
+  // シリアライズ
+  std::vector<uint8_t> serialize() const;
+  
+  // デシリアライズ
   // メモリアクセス
   virtual uint8_t* getData() = 0;
   virtual size_t getSize() const = 0;

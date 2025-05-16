@@ -886,5 +886,377 @@ void BaselineJIT::emitProfilingHooks(Function* function, std::vector<uint8_t>& b
     // 実際の実装は省略
 }
 
+// レジスタ割り当ての表現
+class RegisterMapping {
+public:
+  RegisterMapping(Context* context) : m_context(context) {}
+  
+  // 各種アーキテクチャ用のネイティブコード生成
+  void generatePrologue(NativeCodeBuffer& codeBuffer) {
+#ifdef __x86_64__
+    // x86_64用のプロローグコード生成
+    // スタックフレーム設定
+    // push rbp
+    codeBuffer.emit8(0x55);
+    // mov rbp, rsp
+    codeBuffer.emit8(0x48);
+    codeBuffer.emit8(0x89);
+    codeBuffer.emit8(0xE5);
+    
+    // 使用するレジスタの退避
+    // push rbx
+    codeBuffer.emit8(0x53);
+    // push r12
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x54);
+    // push r13
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x55);
+    // push r14
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x56);
+    // push r15
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x57);
+    
+    // ローカル変数用のスタック領域確保
+    // sub rsp, 64
+    codeBuffer.emit8(0x48);
+    codeBuffer.emit8(0x83);
+    codeBuffer.emit8(0xEC);
+    codeBuffer.emit8(0x40); // 64バイト
+#elif defined(__aarch64__)
+    // ARM64用のプロローグコード生成
+    // スタックフレーム設定とレジスタ退避
+    // stp x29, x30, [sp, #-16]!
+    codeBuffer.emit32(0xA9BF7BFD);
+    // mov x29, sp
+    codeBuffer.emit32(0x910003FD);
+    
+    // 使用するレジスタの退避
+    // stp x19, x20, [sp, #-16]!
+    codeBuffer.emit32(0xA9BF13F3);
+    // stp x21, x22, [sp, #-16]!
+    codeBuffer.emit32(0xA9BF17F5);
+    // stp x23, x24, [sp, #-16]!
+    codeBuffer.emit32(0xA9BF1BF7);
+    // stp x25, x26, [sp, #-16]!
+    codeBuffer.emit32(0xA9BF1FF9);
+    
+    // ローカル変数用のスタック領域確保
+    // sub sp, sp, #64
+    codeBuffer.emit32(0xD10103FF);
+#elif defined(__riscv)
+    // RISC-V用のプロローグコード生成
+    // スタックフレーム設定
+    // addi sp, sp, -64
+    codeBuffer.emit32(0xFC010113);
+    // sd ra, 56(sp)
+    codeBuffer.emit32(0x02113C23);
+    // sd s0, 48(sp)
+    codeBuffer.emit32(0x02813823);
+    // addi s0, sp, 64
+    codeBuffer.emit32(0x04010413);
+    
+    // 使用するレジスタの退避
+    // sd s1, 40(sp)
+    codeBuffer.emit32(0x02913423);
+    // sd s2, 32(sp)
+    codeBuffer.emit32(0x00913C23);
+    // sd s3, 24(sp)
+    codeBuffer.emit32(0x01213823);
+#endif
+  }
+  
+  void generateEpilogue(NativeCodeBuffer& codeBuffer) {
+#ifdef __x86_64__
+    // x86_64用のエピローグコード生成
+    // スタック領域解放
+    // add rsp, 64
+    codeBuffer.emit8(0x48);
+    codeBuffer.emit8(0x83);
+    codeBuffer.emit8(0xC4);
+    codeBuffer.emit8(0x40); // 64バイト
+    
+    // 退避したレジスタの復元
+    // pop r15
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x5F);
+    // pop r14
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x5E);
+    // pop r13
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x5D);
+    // pop r12
+    codeBuffer.emit8(0x41);
+    codeBuffer.emit8(0x5C);
+    // pop rbx
+    codeBuffer.emit8(0x5B);
+    
+    // スタックフレーム後処理
+    // leave (mov rsp, rbp; pop rbp)
+    codeBuffer.emit8(0xC9);
+    // ret
+    codeBuffer.emit8(0xC3);
+#elif defined(__aarch64__)
+    // ARM64用のエピローグコード生成
+    // スタック領域解放
+    // add sp, sp, #64
+    codeBuffer.emit32(0x910103FF);
+    
+    // 退避したレジスタの復元
+    // ldp x25, x26, [sp], #16
+    codeBuffer.emit32(0xA8C11FF9);
+    // ldp x23, x24, [sp], #16
+    codeBuffer.emit32(0xA8C11BF7);
+    // ldp x21, x22, [sp], #16
+    codeBuffer.emit32(0xA8C117F5);
+    // ldp x19, x20, [sp], #16
+    codeBuffer.emit32(0xA8C113F3);
+    
+    // スタックフレーム後処理
+    // ldp x29, x30, [sp], #16
+    codeBuffer.emit32(0xA8C17BFD);
+    // ret
+    codeBuffer.emit32(0xD65F03C0);
+#elif defined(__riscv)
+    // RISC-V用のエピローグコード生成
+    // 退避したレジスタの復元
+    // ld s3, 24(sp)
+    codeBuffer.emit32(0x01813983);
+    // ld s2, 32(sp)
+    codeBuffer.emit32(0x02013903);
+    // ld s1, 40(sp)
+    codeBuffer.emit32(0x02813483);
+    // ld s0, 48(sp)
+    codeBuffer.emit32(0x03013403);
+    // ld ra, 56(sp)
+    codeBuffer.emit32(0x03813083);
+    
+    // スタックフレーム解放と復帰
+    // addi sp, sp, 64
+    codeBuffer.emit32(0x04010113);
+    // ret
+    codeBuffer.emit32(0x00008067);
+#endif
+  }
+  
+  void generateCall(NativeCodeBuffer& codeBuffer, void* target) {
+#ifdef __x86_64__
+    // x86_64用の関数呼び出しコード生成
+    // mov rax, target
+    codeBuffer.emit8(0x48);
+    codeBuffer.emit8(0xB8);
+    codeBuffer.emitPtr(target);
+    
+    // call rax
+    codeBuffer.emit8(0xFF);
+    codeBuffer.emit8(0xD0);
+#elif defined(__aarch64__)
+    // ARM64用の関数呼び出しコード生成
+    // 関数ポインタをx16に移動（一時レジスタ）
+    // movz x16, #(target & 0xFFFF)
+    codeBuffer.emit32(0xD2800010 | ((reinterpret_cast<uintptr_t>(target) & 0xFFFF) << 5));
+    // movk x16, #((target >> 16) & 0xFFFF), lsl #16
+    codeBuffer.emit32(0xF2A00010 | (((reinterpret_cast<uintptr_t>(target) >> 16) & 0xFFFF) << 5));
+    // movk x16, #((target >> 32) & 0xFFFF), lsl #32
+    codeBuffer.emit32(0xF2C00010 | (((reinterpret_cast<uintptr_t>(target) >> 32) & 0xFFFF) << 5));
+    // movk x16, #((target >> 48) & 0xFFFF), lsl #48
+    codeBuffer.emit32(0xF2E00010 | (((reinterpret_cast<uintptr_t>(target) >> 48) & 0xFFFF) << 5));
+    
+    // 呼び出し
+    // blr x16
+    codeBuffer.emit32(0xD63F0200);
+#elif defined(__riscv)
+    // RISC-V用の関数呼び出しコード生成
+    // lui t0, %hi(target)
+    uint32_t hi = (reinterpret_cast<uintptr_t>(target) >> 12) & 0xFFFFF;
+    codeBuffer.emit32(0x00000297 | (hi << 12));
+    
+    // addi t0, t0, %lo(target)
+    uint32_t lo = reinterpret_cast<uintptr_t>(target) & 0xFFF;
+    codeBuffer.emit32(0x00028293 | (lo << 20));
+    
+    // jalr ra, 0(t0)
+    codeBuffer.emit32(0x000280E7);
+#endif
+  }
+  
+private:
+  Context* m_context;
+};
+
+// BaselineJITの具体的実装部分
+bool BaselineJIT::compileFunction(Context* context, Function* function) {
+  if (!context || !function || !function->isJSFunction()) {
+    return false;
+  }
+  
+  // すでにコンパイル済みならスキップ
+  if (function->hasNativeCode()) {
+    return true;
+  }
+  
+  // バイトコード生成
+  std::vector<uint8_t> bytecodeBuffer;
+  BytecodeEmitter emitter(context);
+  if (!emitter.lower(function, bytecodeBuffer)) {
+    return false;
+  }
+  
+  // バイトコードパーサー作成
+  BytecodeDecoder decoder(bytecodeBuffer);
+  if (!decoder.isValid()) {
+    return false;
+  }
+  
+  // 関数情報取得
+  uint32_t functionId = function->id();
+  uint32_t paramCount = function->getParameters().size();
+  bool hasVariadicParams = function->hasRestParameter();
+  
+  // レジスタアロケータ初期化
+  RegisterAllocator regAllocator(context);
+  regAllocator.initialize(decoder.getLocalVarCount(), paramCount);
+  
+  // ネイティブコードバッファ初期化
+  NativeCodeBuffer codeBuffer;
+  
+  // レジスタマッピング設定
+  RegisterMapping registerMap(context);
+  
+  // 関数プロローグの生成
+  registerMap.generatePrologue(codeBuffer);
+  
+  // バイトコード命令ループ
+  while (decoder.hasMoreInstructions()) {
+    BytecodeInstruction instr = decoder.nextInstruction();
+    
+    // オペコードごとの処理
+    switch (instr.opcode) {
+      case BytecodeOpcode::LoadConstant: {
+        uint32_t constIndex = instr.operand1;
+        // 定数テーブルからロード
+        x86_64::emitLoadConstant(codeBuffer, constIndex, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::LoadUndefined: {
+        // undefined値をロード
+        x86_64::emitLoadUndefined(codeBuffer, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::LoadNull: {
+        // null値をロード
+        x86_64::emitLoadNull(codeBuffer, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::LoadTrue: {
+        // true値をロード
+        x86_64::emitLoadBoolean(codeBuffer, true, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::LoadFalse: {
+        // false値をロード
+        x86_64::emitLoadBoolean(codeBuffer, false, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::GetLocal: {
+        uint32_t localIndex = instr.operand1;
+        // ローカル変数から値をロード
+        x86_64::emitGetLocal(codeBuffer, localIndex, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::SetLocal: {
+        uint32_t localIndex = instr.operand1;
+        Register srcReg = regAllocator.getTopRegister();
+        // ローカル変数に値を格納
+        x86_64::emitSetLocal(codeBuffer, localIndex, srcReg);
+        regAllocator.freeRegister(); // 使用済みレジスタ解放
+        break;
+      }
+      
+      case BytecodeOpcode::GetParameter: {
+        uint32_t paramIndex = instr.operand1;
+        // 引数から値をロード
+        x86_64::emitGetParameter(codeBuffer, paramIndex, regAllocator.allocateRegister());
+        break;
+      }
+      
+      case BytecodeOpcode::BinaryOperation: {
+        BinaryOperationType opType = static_cast<BinaryOperationType>(instr.operand1);
+        Register right = regAllocator.getTopRegister();
+        regAllocator.freeRegister();
+        Register left = regAllocator.getTopRegister();
+        Register result = regAllocator.allocateRegister();
+        // 二項演算を実行
+        x86_64::emitBinaryOperation(codeBuffer, opType, left, right, result);
+        break;
+      }
+      
+      case BytecodeOpcode::Call: {
+        uint32_t argCount = instr.operand1;
+        // 関数呼び出し
+        x86_64::emitCall(codeBuffer, argCount, regAllocator);
+        break;
+      }
+      
+      case BytecodeOpcode::Return: {
+        Register retReg = regAllocator.getTopRegister();
+        // 戻り値設定
+        x86_64::emitPrepareReturn(codeBuffer, retReg);
+        // 関数のエピローグを生成
+        registerMap.generateEpilogue(codeBuffer);
+        break;
+      }
+      
+      // その他の命令も同様に実装...
+      default:
+        context->logError("サポートされていないバイトコード命令: %d", static_cast<int>(instr.opcode));
+        return false;
+    }
+  }
+  
+  // 正常終了しない場合のフォールスルーパス
+  if (decoder.hasReachedEnd()) {
+    // デフォルトの戻り値（undefined）を設定
+    x86_64::emitLoadUndefined(codeBuffer, regAllocator.allocateRegister());
+    // エピローグを生成
+    registerMap.generateEpilogue(codeBuffer);
+  }
+  
+  // コード生成完了
+  NativeCode* nativeCode = new NativeCode();
+  nativeCode->buffer = std::move(codeBuffer);
+  nativeCode->entryPoint = nativeCode->buffer.getBufferStart();
+  nativeCode->size = nativeCode->buffer.getBufferSize();
+  
+  // メモリ実行権限の設定
+  nativeCode->buffer.makeExecutable();
+  
+  // 関数にネイティブコードを関連付け
+  function->setNativeCode(nativeCode);
+  
+  // 最適化パスをかける（オプション）
+  if (m_optimizeBaseline) {
+    optimizeNativeCode(context, function, nativeCode);
+  }
+  
+  // プロファイラにコード生成を通知
+  m_profiler.recordNativeCodeGeneration(functionId, nativeCode->size, bytecodeBuffer.size());
+  
+  // コード統計の更新
+  m_totalCompiledFunctions++;
+  m_totalNativeCodeSize += nativeCode->size;
+  
+  return true;
+}
+
 }  // namespace core
 }  // namespace aerojs

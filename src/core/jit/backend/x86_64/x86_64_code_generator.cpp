@@ -88,25 +88,63 @@ bool X86_64CodeGenerator::Generate(const IRFunction& function, std::vector<uint8
                 EncodeReturn(inst, outCode);
                 break;
             case Opcode::kSIMDLoad:
-                EncodeSIMDLoad(inst, outCode);
+                // SIMD読み込み - CPU機能に基づいて最適な実装を使用
+                if (HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512)) {
+                    EncodeAVX512Load(inst, outCode);
+                } else {
+                    EncodeSIMDLoad(inst, outCode);
+                }
                 break;
             case Opcode::kSIMDStore:
-                EncodeSIMDStore(inst, outCode);
+                // SIMD書き込み - CPU機能に基づいて最適な実装を使用
+                if (HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512)) {
+                    EncodeAVX512Store(inst, outCode);
+                } else {
+                    EncodeSIMDStore(inst, outCode);
+                }
                 break;
             case Opcode::kSIMDArithmetic:
-                EncodeSIMDArithmetic(inst, outCode);
+                // SIMD算術演算 - CPU機能に基づいて最適な実装を使用
+                if (HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512)) {
+                    EncodeAVX512Arithmetic(inst, outCode);
+                } else {
+                    EncodeSIMDArithmetic(inst, outCode);
+                }
                 break;
             case Opcode::kFMA:
-                EncodeFMA(inst, outCode);
+                // FMA演算 - CPU機能に基づいて最適な実装を使用
+                if (HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512) && 
+                    HasFlag(m_optimizationFlags, CodeGenOptFlags::UseFMA)) {
+                    EncodeAVX512FMA(inst, outCode);
+                } else {
+                    EncodeFMA(inst, outCode);
+                }
                 break;
             case Opcode::kFastMath:
                 EncodeFastMath(inst, outCode);
+                break;
+            case Opcode::kAVX512Compress:
+                EncodeAVX512Compress(inst, outCode);
+                break;
+            case Opcode::kAVX512Expand:
+                EncodeAVX512Expand(inst, outCode);
+                break;
+            case Opcode::kAVX512Blend:
+                EncodeAVX512Blend(inst, outCode);
+                break;
+            case Opcode::kAVX512Permute:
+                EncodeAVX512Permute(inst, outCode);
                 break;
             default:
                 // 未サポートの命令
                 // エラーログを出力などの処理を入れるとよい
                 return false;
         }
+    }
+    
+    // キャッシュライン最適化を適用（オプション）
+    if (HasFlag(m_optimizationFlags, CodeGenOptFlags::CacheAware)) {
+        OptimizeForCacheLine(outCode);
     }
     
     // エピローグコードを生成
@@ -134,67 +172,6 @@ X86_64Register X86_64CodeGenerator::GetPhysicalReg(int32_t virtualReg) const noe
     if (regIndex >= 5) regIndex += 1;
     
     return static_cast<X86_64Register>(regIndex);
-}
-
-void X86_64CodeGenerator::EncodePrologue(std::vector<uint8_t>& code) noexcept {
-    // プロローグの実装
-    // PUSH RBP
-    code.push_back(0x55);
-    
-    // MOV RBP, RSP
-    code.push_back(0x48); // REX.W
-    code.push_back(0x89);
-    code.push_back(0xE5);
-    
-    // SUB RSP, 128 (スタックフレーム確保)
-    code.push_back(0x48); // REX.W
-    code.push_back(0x81);
-    code.push_back(0xEC);
-    code.push_back(0x80); // 0x80 = 128
-    code.push_back(0x00);
-    code.push_back(0x00);
-    code.push_back(0x00);
-    
-    // 保存が必要なレジスタをプッシュ
-    // PUSH RBX
-    code.push_back(0x53);
-    
-    // PUSH R12-R15
-    code.push_back(0x41); // REX.B for R12
-    code.push_back(0x54);
-    code.push_back(0x41); // REX.B for R13
-    code.push_back(0x55);
-    code.push_back(0x41); // REX.B for R14
-    code.push_back(0x56);
-    code.push_back(0x41); // REX.B for R15
-    code.push_back(0x57);
-}
-
-void X86_64CodeGenerator::EncodeEpilogue(std::vector<uint8_t>& code) noexcept {
-    // エピローグの実装
-    // POP R15-R12
-    code.push_back(0x41); // REX.B for R15
-    code.push_back(0x5F);
-    code.push_back(0x41); // REX.B for R14
-    code.push_back(0x5E);
-    code.push_back(0x41); // REX.B for R13
-    code.push_back(0x5D);
-    code.push_back(0x41); // REX.B for R12
-    code.push_back(0x5C);
-    
-    // POP RBX
-    code.push_back(0x5B);
-    
-    // MOV RSP, RBP
-    code.push_back(0x48); // REX.W
-    code.push_back(0x89);
-    code.push_back(0xEC);
-    
-    // POP RBP
-    code.push_back(0x5D);
-    
-    // RET
-    code.push_back(0xC3);
 }
 
 // ヘルパー関数
@@ -1023,7 +1000,7 @@ void X86_64CodeGenerator::EncodeFastMath(const IRInstruction& inst, std::vector<
                     // 精度を改善するためにニュートン-ラフソン法を適用
                     // ...
                 }
-  } else {
+            } else {
                 // 非SIMD版（より多くの命令が必要）
                 // ...
             }
@@ -1099,6 +1076,455 @@ bool X86_64CodeGenerator::DetectCPUFeature(const std::string& feature) noexcept 
 #endif
 
     return false;
+}
+
+// EVEX プレフィックスの追加ヘルパー
+void X86_64CodeGenerator::AppendEVEXPrefix(std::vector<uint8_t>& code, uint8_t m, uint8_t p, uint8_t l, uint8_t w, 
+                                          uint8_t vvvv, uint8_t aaa, uint8_t z, uint8_t b, 
+                                          uint8_t v2, uint8_t k, bool broadcast) noexcept {
+    // EVEX プレフィックス (4バイト)
+    // 62 R X B R' 00 mm vvvv W v2 0 pp z L' b V' aaa
+    
+    // 1バイト目: 常に 0x62
+    code.push_back(0x62);
+    
+    // 2バイト目: R, X, B, R' と mm フィールド
+    // R' = 0 (AVX-512でのみ使用)
+    uint8_t byte2 = (~b & 1) << 5 | (~x & 1) << 6 | (~r & 1) << 7;
+    byte2 |= (0 & 1) << 4 | m;
+    code.push_back(byte2);
+    
+    // 3バイト目: vvvv, W, v2と予約ビット
+    uint8_t byte3 = (w & 1) << 7 | ((~vvvv) & 0xF) << 3 | (v2 & 1) << 2;
+    code.push_back(byte3);
+    
+    // 4バイト目: z, L, b, V, aaa (マスクレジスタ)
+    // V' = 0 (AVX-512でのみ使用)
+    uint8_t byte4 = (z & 1) << 7 | (l & 3) << 5 | (broadcast ? 1 : 0) << 4;
+    byte4 |= (0 & 1) << 3 | (aaa & 7);
+    code.push_back(byte4);
+}
+
+// AVX-512算術演算
+void X86_64CodeGenerator::EncodeAVX512Arithmetic(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t src1Reg = inst.args[1];
+    int32_t src2Reg = inst.args[2];
+    
+    // マスクレジスタ (オプション)
+    uint8_t mask = 0; // k0 = no masking
+    bool isZeroMasking = false;
+    if (inst.args.size() >= 4) {
+        mask = static_cast<uint8_t>(inst.args[3] & 0x7); // k1-k7
+        if (inst.args.size() >= 5) {
+            isZeroMasking = inst.args[4] != 0;
+        }
+    }
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto src1SIMD = GetSIMDReg(src1Reg);
+    auto src2SIMD = GetSIMDReg(src2Reg);
+    
+    if (!destSIMD.has_value() || !src1SIMD.has_value() || !src2SIMD.has_value()) return;
+    
+    // AVX-512が使用可能かチェック
+    bool useAVX512 = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512);
+    if (!useAVX512) {
+        // AVX-512がサポートされていない場合は通常のAVXを使用
+        EncodeSIMDArithmetic(inst, code);
+        return;
+    }
+    
+    uint8_t opcode = 0;
+    uint8_t prefix = 0;
+    
+    // 命令タイプを決定
+    switch (inst.opcode) {
+        case Opcode::kSIMDAdd:
+            opcode = 0x58; // ADDPS
+            break;
+        case Opcode::kSIMDSub:
+            opcode = 0x5C; // SUBPS
+            break;
+        case Opcode::kSIMDMul:
+            opcode = 0x59; // MULPS
+            break;
+        case Opcode::kSIMDDiv:
+            opcode = 0x5E; // DIVPS
+            break;
+        case Opcode::kSIMDMin:
+            opcode = 0x5D; // MINPS
+            break;
+        case Opcode::kSIMDMax:
+            opcode = 0x5F; // MAXPS
+            break;
+        case Opcode::kSIMDAnd:
+            opcode = 0x54; // ANDPS
+            break;
+        case Opcode::kSIMDOr:
+            opcode = 0x56; // ORPS
+            break;
+        case Opcode::kSIMDXor:
+            opcode = 0x57; // XORPS
+            break;
+        default:
+            return; // サポートされていない操作
+    }
+    
+    // EVEX.512.0F.W0 58 /r VADDPS zmm1 {k1}{z}, zmm2, zmm3/m512/m32bcst
+    AppendEVEXPrefix(code, 0b01, 0b00, 0b10, 0,
+                     static_cast<uint8_t>(*src1SIMD) ^ 0xF, // EVEX.vvvv = src1 (反転)
+                     mask, isZeroMasking ? 1 : 0,
+                     static_cast<uint8_t>(*src2SIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0, 
+                     mask, false);
+    
+    code.push_back(opcode);
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*src2SIMD) & 0x7);
+}
+
+// AVX-512 FMA操作
+void X86_64CodeGenerator::EncodeAVX512FMA(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 4) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t src1Reg = inst.args[1];
+    int32_t src2Reg = inst.args[2];
+    int32_t src3Reg = inst.args[3];
+    
+    // マスクレジスタ (オプション)
+    uint8_t mask = 0; // k0 = no masking
+    bool isZeroMasking = false;
+    if (inst.args.size() >= 5) {
+        mask = static_cast<uint8_t>(inst.args[4] & 0x7); // k1-k7
+        if (inst.args.size() >= 6) {
+            isZeroMasking = inst.args[5] != 0;
+        }
+    }
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto src1SIMD = GetSIMDReg(src1Reg);
+    auto src2SIMD = GetSIMDReg(src2Reg);
+    auto src3SIMD = GetSIMDReg(src3Reg);
+    
+    if (!destSIMD.has_value() || !src1SIMD.has_value() || 
+        !src2SIMD.has_value() || !src3SIMD.has_value()) return;
+    
+    // AVX-512とFMAが使用可能かチェック
+    bool useAVX512 = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512);
+    bool useFMA = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseFMA);
+    
+    if (!useAVX512 || !useFMA) {
+        // AVX-512またはFMAがサポートされていない場合は通常のFMAを使用
+        EncodeFMA(inst, code);
+        return;
+    }
+    
+    // EVEX.DDS.512.66.0F38.W0 B8 /r VFMADD231PS zmm1 {k1}{z}, zmm2, zmm3/m512/m32bcst
+    AppendEVEXPrefix(code, 0b10, 0b01, 0b10, 0,
+                     static_cast<uint8_t>(*src2SIMD) ^ 0xF, // EVEX.vvvv = src2 (反転)
+                     mask, isZeroMasking ? 1 : 0,
+                     static_cast<uint8_t>(*src3SIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0,
+                     mask, false);
+    
+    code.push_back(0xB8); // VFMADD231PS opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*src3SIMD) & 0x7);
+}
+
+// AVX-512ロード操作
+void X86_64CodeGenerator::EncodeAVX512Load(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t addrReg = inst.args[1];
+    int32_t offset = inst.args[2];
+    
+    // マスクレジスタ (オプション)
+    uint8_t mask = 0; // k0 = no masking
+    bool isZeroMasking = false;
+    if (inst.args.size() >= 4) {
+        mask = static_cast<uint8_t>(inst.args[3] & 0x7); // k1-k7
+        if (inst.args.size() >= 5) {
+            isZeroMasking = inst.args[4] != 0;
+        }
+    }
+    
+    auto simdReg = GetSIMDReg(destReg);
+    if (!simdReg.has_value()) return;
+    
+    X86_64Register addrRegPhysical = GetPhysicalReg(addrReg);
+    
+    // AVX-512が使用可能かチェック
+    bool useAVX512 = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512);
+    if (!useAVX512) {
+        // AVX-512がサポートされていない場合は通常のAVXを使用
+        EncodeSIMDLoad(inst, code);
+        return;
+    }
+    
+    // EVEX.512.0F.W0 10 /r VMOVUPS zmm1 {k1}{z}, m512
+    AppendEVEXPrefix(code, 0b01, 0b00, 0b10, 0, 0b1111, 
+                    mask, isZeroMasking ? 1 : 0, 
+                    static_cast<uint8_t>(addrRegPhysical) >= 8,
+                    static_cast<uint8_t>(*simdReg) >= 16 ? 1 : 0, 
+                    mask, false);
+    
+    code.push_back(0x10); // MOVUPS opcode
+    
+    // ModRM: [addrReg + offset]
+    if (offset == 0) {
+        // レジスタ間接アドレッシング
+        AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+    } else if (offset >= -128 && offset <= 127) {
+        // 1バイト変位付きアドレッシング
+        AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        code.push_back(static_cast<uint8_t>(offset));
+    } else {
+        // 4バイト変位付きアドレッシング
+        AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        AppendImmediate32(code, offset);
+    }
+}
+
+// AVX-512ストア操作
+void X86_64CodeGenerator::EncodeAVX512Store(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t srcReg = inst.args[0];
+    int32_t addrReg = inst.args[1];
+    int32_t offset = inst.args[2];
+    
+    // マスクレジスタ (オプション)
+    uint8_t mask = 0; // k0 = no masking
+    bool isZeroMasking = false;
+    if (inst.args.size() >= 4) {
+        mask = static_cast<uint8_t>(inst.args[3] & 0x7); // k1-k7
+    }
+    
+    auto simdReg = GetSIMDReg(srcReg);
+    if (!simdReg.has_value()) return;
+    
+    X86_64Register addrRegPhysical = GetPhysicalReg(addrReg);
+    
+    // AVX-512が使用可能かチェック
+    bool useAVX512 = HasFlag(m_optimizationFlags, CodeGenOptFlags::UseAVX512);
+    if (!useAVX512) {
+        // AVX-512がサポートされていない場合は通常のAVXを使用
+        EncodeSIMDStore(inst, code);
+        return;
+    }
+    
+    // EVEX.512.0F.W0 11 /r VMOVUPS m512 {k1}, zmm1
+    AppendEVEXPrefix(code, 0b01, 0b00, 0b10, 0, 0b1111, 
+                    mask, 0, // ストア操作にはゼロマスキングなし
+                    static_cast<uint8_t>(addrRegPhysical) >= 8,
+                    static_cast<uint8_t>(*simdReg) >= 16 ? 1 : 0, 
+                    mask, false);
+    
+    code.push_back(0x11); // MOVUPS opcode (store)
+    
+    // ModRM: [addrReg + offset]
+    if (offset == 0) {
+        AppendModRM(code, 0b00, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+    } else if (offset >= -128 && offset <= 127) {
+        AppendModRM(code, 0b01, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        code.push_back(static_cast<uint8_t>(offset));
+    } else {
+        AppendModRM(code, 0b10, static_cast<uint8_t>(*simdReg) & 0x7, 
+                    static_cast<uint8_t>(addrRegPhysical) & 0x7);
+        AppendImmediate32(code, offset);
+    }
+}
+
+// AVX-512マスク操作
+void X86_64CodeGenerator::EncodeAVX512MaskOp(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destMaskReg = inst.args[0]; // k1-k7
+    int32_t src1MaskReg = inst.args[1]; // k1-k7
+    int32_t src2MaskReg = inst.args[2]; // k1-k7
+    
+    uint8_t dest = static_cast<uint8_t>(destMaskReg & 0x7);
+    uint8_t src1 = static_cast<uint8_t>(src1MaskReg & 0x7);
+    uint8_t src2 = static_cast<uint8_t>(src2MaskReg & 0x7);
+    
+    uint8_t opcode = 0;
+    
+    // 命令タイプを決定
+    switch (inst.opcode) {
+        case Opcode::kMaskAnd:
+            opcode = 0x42; // KANDW
+            break;
+        case Opcode::kMaskOr:
+            opcode = 0x45; // KORW
+            break;
+        case Opcode::kMaskXor:
+            opcode = 0x46; // KXORW
+            break;
+        case Opcode::kMaskNot:
+            opcode = 0x44; // KNOTW
+            break;
+        default:
+            return; // サポートされていない操作
+    }
+    
+    // VEX.L0.0F.W0 42 /r KANDW k1, k2, k3
+    AppendVEXPrefix(code, 0b10, 0b00, 0, 0, 
+                   src1 ^ 0xF, // VEX.vvvv = src1 (反転)
+                   0, 0, 0);
+    
+    code.push_back(opcode);
+    
+    // ModRM
+    AppendModRM(code, 0b11, dest, src2);
+}
+
+// AVX-512マスクを使用したブレンド操作
+void X86_64CodeGenerator::EncodeAVX512Blend(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 4) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t src1Reg = inst.args[1];
+    int32_t src2Reg = inst.args[2];
+    int32_t maskReg = inst.args[3]; // k1-k7
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto src1SIMD = GetSIMDReg(src1Reg);
+    auto src2SIMD = GetSIMDReg(src2Reg);
+    
+    if (!destSIMD.has_value() || !src1SIMD.has_value() || !src2SIMD.has_value()) return;
+    
+    uint8_t mask = static_cast<uint8_t>(maskReg & 0x7);
+    
+    // EVEX.NDS.512.0F.W0 C6 /r VSHUFPS zmm1 {k1}, zmm2, zmm3/m512/m32bcst, imm8
+    AppendEVEXPrefix(code, 0b01, 0b00, 0b10, 0,
+                     static_cast<uint8_t>(*src1SIMD) ^ 0xF, // EVEX.vvvv = src1 (反転)
+                     mask, 0,
+                     static_cast<uint8_t>(*src2SIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0,
+                     mask, false);
+    
+    code.push_back(0xC4); // VPSHUFB opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*src2SIMD) & 0x7);
+}
+
+// AVX-512データパーミュテーション
+void X86_64CodeGenerator::EncodeAVX512Permute(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    int32_t immValue = inst.args[2]; // インデックステーブル
+    
+    // マスクレジスタ (オプション)
+    uint8_t mask = 0; // k0 = no masking
+    bool isZeroMasking = false;
+    if (inst.args.size() >= 4) {
+        mask = static_cast<uint8_t>(inst.args[3] & 0x7); // k1-k7
+        if (inst.args.size() >= 5) {
+            isZeroMasking = inst.args[4] != 0;
+        }
+    }
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto srcSIMD = GetSIMDReg(srcReg);
+    
+    if (!destSIMD.has_value() || !srcSIMD.has_value()) return;
+    
+    // EVEX.512.66.0F3A.W0 00 /r VPERMQ zmm1 {k1}{z}, zmm2/m512/m64bcst, imm8
+    AppendEVEXPrefix(code, 0b11, 0b01, 0b10, 0,
+                     0b1111, // EVEX.vvvv = 0xF (未使用)
+                     mask, isZeroMasking ? 1 : 0,
+                     static_cast<uint8_t>(*srcSIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0,
+                     mask, false);
+    
+    code.push_back(0x00); // VPERMQ opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*srcSIMD) & 0x7);
+    
+    // インデックステーブル (8ビット即値)
+    code.push_back(static_cast<uint8_t>(immValue & 0xFF));
+}
+
+// AVX-512データ圧縮
+void X86_64CodeGenerator::EncodeAVX512Compress(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    int32_t maskReg = inst.args[2]; // k1-k7
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto srcSIMD = GetSIMDReg(srcReg);
+    
+    if (!destSIMD.has_value() || !srcSIMD.has_value()) return;
+    
+    uint8_t mask = static_cast<uint8_t>(maskReg & 0x7);
+    
+    // EVEX.512.66.0F38.W0 8B /r VCOMPRESSPS zmm1 {k1}{z}, zmm2
+    AppendEVEXPrefix(code, 0b10, 0b01, 0b10, 0,
+                     0b1111, // EVEX.vvvv = 0xF (未使用)
+                     mask, 0, // Zマスキングなし
+                     static_cast<uint8_t>(*srcSIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0,
+                     mask, false);
+    
+    code.push_back(0x8B); // VCOMPRESSPS opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*srcSIMD) & 0x7);
+}
+
+// AVX-512データ展開
+void X86_64CodeGenerator::EncodeAVX512Expand(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept {
+    if (inst.args.size() < 3) return;
+    
+    int32_t destReg = inst.args[0];
+    int32_t srcReg = inst.args[1];
+    int32_t maskReg = inst.args[2]; // k1-k7
+    
+    auto destSIMD = GetSIMDReg(destReg);
+    auto srcSIMD = GetSIMDReg(srcReg);
+    
+    if (!destSIMD.has_value() || !srcSIMD.has_value()) return;
+    
+    uint8_t mask = static_cast<uint8_t>(maskReg & 0x7);
+    bool isZeroMasking = true; // 展開では通常ゼロマスキングを使用
+    
+    // EVEX.512.66.0F38.W0 89 /r VEXPANDPS zmm1 {k1}{z}, zmm2
+    AppendEVEXPrefix(code, 0b10, 0b01, 0b10, 0,
+                     0b1111, // EVEX.vvvv = 0xF (未使用)
+                     mask, isZeroMasking ? 1 : 0,
+                     static_cast<uint8_t>(*srcSIMD) >= 8,
+                     static_cast<uint8_t>(*destSIMD) >= 16 ? 1 : 0,
+                     mask, false);
+    
+    code.push_back(0x89); // VEXPANDPS opcode
+    
+    // ModRM
+    AppendModRM(code, 0b11, static_cast<uint8_t>(*destSIMD) & 0x7, 
+                static_cast<uint8_t>(*srcSIMD) & 0x7);
 }
 
 }  // namespace core

@@ -10,263 +10,167 @@
  * @copyright MIT License
  */
 
-#ifndef AEROJS_CORE_JIT_METATRACING_TRACE_OPTIMIZER_H
-#define AEROJS_CORE_JIT_METATRACING_TRACE_OPTIMIZER_H
+#ifndef AEROJS_TRACE_OPTIMIZER_H
+#define AEROJS_TRACE_OPTIMIZER_H
 
+#include <unordered_map>
 #include <vector>
 #include <memory>
-#include <unordered_map>
 #include <functional>
-#include <optional>
-#include <bitset>
-#include <array>
-
-#include "../ir/ir_node.h"
-#include "../ir/ir_builder.h"
+#include "../ir/ir_instruction.h"
 #include "../../runtime/values/value.h"
-#include "trace_recorder.h"
+#include "../../utils/bitset.h"
 
 namespace aerojs {
 namespace core {
-namespace jit {
-namespace metatracing {
 
-// 前方宣言
-class TracingJIT;
+class ExecutionTrace;
+class IRBuilder;
+class IRFunction;
 
-/**
- * @brief 最適化パスを表す列挙型
- */
-enum class OptimizationPass {
-    // 基本的な最適化
-    ConstantFolding,        ///< 定数畳み込み
-    DeadCodeElimination,    ///< 不要コード削除
-    CommonSubexprElimination, ///< 共通部分式の削除
-    InstructionCombining,   ///< 命令結合
-    
-    // 型特化の最適化
-    TypeSpecialization,     ///< 型に基づく特殊化
-    GuardElimination,       ///< 不要なガード命令の削除
-    BoxingElimination,      ///< 不要なボクシング/アンボクシングの削除
-    
-    // メモリ関連の最適化
-    EscapeAnalysis,         ///< エスケープ解析
-    AllocationSinking,      ///< アロケーション沈下
-    LoadElimination,        ///< 冗長なロード除去
-    
-    // ループ最適化
-    LoopInvariantCodeMotion, ///< ループ不変コード移動
-    LoopUnrolling,          ///< ループ展開
-    VectorizationAnalysis,  ///< ベクトル化解析
-    SIMDTransformation,     ///< SIMD変換
-    
-    // 高度な最適化
-    InliningAnalysis,       ///< インライン化解析
-    TailCallOptimization,   ///< 末尾呼び出し最適化
-    PartialEvaluation,      ///< 部分評価
-    SpeculativeDevirtualization, ///< 投機的な仮想関数の具体化
-    
-    // メタトレース特有の最適化
-    TraceSegmentMerging,    ///< トレースセグメントの結合
-    ContinuationSpecialization, ///< 継続特化
-    HotPathDuplication,     ///< ホットパス複製
-    ContextSpecialization,  ///< コンテキスト特化
-    
-    // バックエンド最適化
-    RegisterAllocation,     ///< レジスタ割り当て
-    InstructionScheduling,  ///< 命令スケジューリング
-    PeepholeOptimization,   ///< 覗き穴最適化
-    
-    NumPasses               ///< パスの総数（常に列挙型の最後に置く）
+// トレース最適化フェーズの種類
+enum class OptimizationPhase {
+    REDUNDANCY_ELIMINATION,    // 冗長命令の削除
+    CONSTANT_FOLDING,          // 定数畳み込み
+    DEAD_CODE_ELIMINATION,     // 不要コード削除
+    TYPE_SPECIALIZATION,       // 型特殊化
+    LOOP_INVARIANT_HOISTING,   // ループ不変式の移動
+    COMMON_SUBEXPRESSION,      // 共通部分式の排除
+    STRENGTH_REDUCTION,        // 強度削減
+    INLINING,                  // インライン化
+    ESCAPE_ANALYSIS,           // エスケープ解析
+    TAIL_CALL_OPTIMIZATION,    // 末尾呼び出し最適化
+    VECTORIZATION              // ベクトル化
 };
 
-/**
- * @brief 最適化パスの依存関係を表すビットセット
- */
-using PassDependencySet = std::bitset<static_cast<size_t>(OptimizationPass::NumPasses)>;
-
-/**
- * @brief 最適化パスの設定を表す構造体
- */
-struct OptimizationPassConfig {
-    OptimizationPass pass;
-    bool enabled;
-    int priority;
-    PassDependencySet dependencies;
-    std::function<void(ir::IRNode*)> optimizeFunc;
+// 最適化適用結果
+struct OptimizationResult {
+    bool changed = false;
+    int eliminatedInstructions = 0;
+    int specializedTypes = 0;
+    int vectorizedLoops = 0;
+    int inlinedFunctions = 0;
 };
 
-/**
- * @brief 最適化の適用レベルを表す列挙型
- */
-enum class OptimizationLevel {
-    O0,  ///< 最適化なし
-    O1,  ///< 基本的な最適化
-    O2,  ///< 中レベルの最適化
-    O3,  ///< 高度な最適化
-    Os,  ///< サイズ優先の最適化
-    Oz   ///< 超サイズ優先の最適化
-};
-
-/**
- * @brief トレース最適化器クラス
- * 
- * メタトレーシングJITのトレース最適化を担当するクラスです。
- * 記録されたトレースを解析し、様々な最適化を適用します。
- */
+// トレース最適化クラス
 class TraceOptimizer {
 public:
-    /**
-     * @brief コンストラクタ
-     * @param jit 親となるTracingJITへの参照
-     */
-    explicit TraceOptimizer(TracingJIT& jit);
+    TraceOptimizer() = default;
+    ~TraceOptimizer() = default;
     
-    /**
-     * @brief デストラクタ
-     */
-    ~TraceOptimizer();
+    // 実行トレースを最適化
+    std::unique_ptr<IRFunction> OptimizeTrace(const ExecutionTrace& trace);
     
-    /**
-     * @brief 最適化レベルを設定
-     * @param level 適用する最適化レベル
-     */
-    void setOptimizationLevel(OptimizationLevel level);
+    // 既存のIR関数を最適化
+    OptimizationResult OptimizeIR(IRFunction& function);
     
-    /**
-     * @brief 特定の最適化パスの有効/無効を設定
-     * @param pass 設定する最適化パス
-     * @param enabled 有効にする場合はtrue
-     */
-    void setPassEnabled(OptimizationPass pass, bool enabled);
+    // 最適化フェーズの有効/無効を設定
+    void EnableOptimization(OptimizationPhase phase, bool enable = true) {
+        enabledPhases_[static_cast<int>(phase)] = enable;
+    }
     
-    /**
-     * @brief トレースを最適化
-     * @param trace 最適化対象のトレース
-     * @return 最適化されたIRノードのルート
-     * 
-     * 記録されたトレースを解析し、設定された最適化パスを適用して
-     * 最適化されたIRノードを返します。
-     */
-    std::unique_ptr<ir::IRNode> optimizeTrace(const TraceRecorder::Trace& trace);
-    
-    /**
-     * @brief 最適化されたトレースのパフォーマンス予測を行う
-     * @param optimizedIR 最適化されたIRノード
-     * @return 予測される実行時間（ナノ秒単位）
-     * 
-     * 最適化されたIRノードの実行時間を予測します。
-     * この情報はJITコンパイラのヒューリスティクスに使用されます。
-     */
-    uint64_t predictPerformance(const ir::IRNode* optimizedIR) const;
-    
-    /**
-     * @brief トレースの型情報を推論
-     * @param trace 対象のトレース
-     * @return 各命令ノードに対する型情報のマップ
-     * 
-     * トレースの各命令に対する型情報を推論し、マップとして返します。
-     */
-    std::unordered_map<uint32_t, runtime::ValueType> inferTypes(const TraceRecorder::Trace& trace);
-    
-    /**
-     * @brief トレースを検証
-     * @param trace 検証対象のトレース
-     * @return トレースが有効な場合はtrue
-     * 
-     * トレースの整合性を検証し、最適化に適しているかどうかを判断します。
-     */
-    bool validateTrace(const TraceRecorder::Trace& trace);
-    
-    /**
-     * @brief 最適化統計を取得
-     * @return 各最適化パスの適用回数と効果のマップ
-     */
-    std::unordered_map<OptimizationPass, std::pair<uint32_t, double>> getOptimizationStats() const;
-    
+    // トレース中の型を専門化するハンドラの登録
+    using TypeSpecializationHandler = std::function<IRInstruction(const IRInstruction&, ValueType)>;
+    void RegisterTypeSpecialization(ValueType type, TypeSpecializationHandler handler) {
+        typeHandlers_[type] = std::move(handler);
+    }
+
 private:
-    // 親となるJITエンジンへの参照
-    TracingJIT& m_jit;
+    // 冗長命令の削除
+    OptimizationResult EliminateRedundancy(IRFunction& function);
     
-    // 現在の最適化レベル
-    OptimizationLevel m_optimizationLevel;
+    // 定数畳み込み
+    OptimizationResult FoldConstants(IRFunction& function);
     
-    // 最適化パスの設定マップ
-    std::array<OptimizationPassConfig, static_cast<size_t>(OptimizationPass::NumPasses)> m_passConfigs;
+    // 不要コード削除
+    OptimizationResult EliminateDeadCode(IRFunction& function);
     
-    // 型情報キャッシュ
-    std::unordered_map<uint32_t, runtime::ValueType> m_typeCache;
+    // 型特殊化
+    OptimizationResult SpecializeTypes(IRFunction& function);
     
-    // 最適化統計
-    std::unordered_map<OptimizationPass, std::pair<uint32_t, double>> m_optimizationStats;
+    // ループ不変式の移動
+    OptimizationResult HoistLoopInvariants(IRFunction& function);
     
-    /**
-     * @brief トレースをIRに変換
-     * @param trace 変換対象のトレース
-     * @return IRノードのルート
-     */
-    std::unique_ptr<ir::IRNode> traceToIR(const TraceRecorder::Trace& trace);
+    // 共通部分式の排除
+    OptimizationResult EliminateCommonSubexpressions(IRFunction& function);
     
-    /**
-     * @brief 最適化パスの順序を決定
-     * @return 実行すべき最適化パスのリスト
-     */
-    std::vector<OptimizationPass> determinePassOrder() const;
+    // 強度削減
+    OptimizationResult ReduceStrength(IRFunction& function);
     
-    /**
-     * @brief IRに特定の最適化パスを適用
-     * @param ir 最適化対象のIRノード
-     * @param pass 適用する最適化パス
-     * @return 最適化が適用された場合はtrue
-     */
-    bool applyPass(ir::IRNode* ir, OptimizationPass pass);
+    // インライン化
+    OptimizationResult InlineFunctions(IRFunction& function);
     
-    /**
-     * @brief 最適化パスの初期化
-     * 各最適化パスの設定を初期化します。
-     */
-    void initializePasses();
+    // エスケープ解析
+    OptimizationResult AnalyzeEscape(IRFunction& function);
     
-    /**
-     * @brief 特定の最適化レベルに基づいてパスを設定
-     * @param level 設定する最適化レベル
-     */
-    void configurePassesForLevel(OptimizationLevel level);
+    // 末尾呼び出し最適化
+    OptimizationResult OptimizeTailCalls(IRFunction& function);
     
-    // 各最適化パスの実装
-    void applyConstantFolding(ir::IRNode* ir);
-    void applyDeadCodeElimination(ir::IRNode* ir);
-    void applyCommonSubexprElimination(ir::IRNode* ir);
-    void applyInstructionCombining(ir::IRNode* ir);
-    void applyTypeSpecialization(ir::IRNode* ir);
-    void applyGuardElimination(ir::IRNode* ir);
-    void applyBoxingElimination(ir::IRNode* ir);
-    void applyEscapeAnalysis(ir::IRNode* ir);
-    void applyAllocationSinking(ir::IRNode* ir);
-    void applyLoadElimination(ir::IRNode* ir);
-    void applyLoopInvariantCodeMotion(ir::IRNode* ir);
-    void applyLoopUnrolling(ir::IRNode* ir);
-    void applyVectorizationAnalysis(ir::IRNode* ir);
-    void applySIMDTransformation(ir::IRNode* ir);
-    void applyInliningAnalysis(ir::IRNode* ir);
-    void applyTailCallOptimization(ir::IRNode* ir);
-    void applyPartialEvaluation(ir::IRNode* ir);
-    void applySpeculativeDevirtualization(ir::IRNode* ir);
-    void applyTraceSegmentMerging(ir::IRNode* ir);
-    void applyContinuationSpecialization(ir::IRNode* ir);
-    void applyHotPathDuplication(ir::IRNode* ir);
-    void applyContextSpecialization(ir::IRNode* ir);
+    // ベクトル化
+    OptimizationResult Vectorize(IRFunction& function);
     
-    // その他の内部ヘルパーメソッド
-    bool isEligibleForOptimization(const TraceRecorder::Trace& trace) const;
-    bool hasExceptionHandlers(const TraceRecorder::Trace& trace) const;
-    bool containsUnsafeOperations(const TraceRecorder::Trace& trace) const;
-    double estimateOptimizationBenefit(const ir::IRNode* before, const ir::IRNode* after) const;
+    // 命令のデータフロー解析
+    void AnalyzeDataFlow(IRFunction& function);
+    
+    // 命令の依存関係グラフ構築
+    void BuildDependencyGraph(IRFunction& function);
+    
+    // ループ検出
+    void DetectLoops(IRFunction& function);
+    
+    // 型推論
+    void InferTypes(IRFunction& function);
+    
+    // 型情報の伝播
+    void PropagateTypes(IRFunction& function);
+    
+    // バリアント命令の検出（例：整数加算と浮動小数点加算）
+    bool AreVariantInstructions(const IRInstruction& a, const IRInstruction& b);
+    
+    // 最適化フェーズの有効/無効フラグ
+    std::array<bool, 11> enabledPhases_ = {true, true, true, true, true, true, true, true, true, true, true};
+    
+    // 型特殊化ハンドラのマップ
+    std::unordered_map<ValueType, TypeSpecializationHandler> typeHandlers_;
+    
+    // 命令の到達可能性情報
+    std::vector<bool> reachableInstructions_;
+    
+    // ループヘッダの集合
+    std::unordered_set<size_t> loopHeaders_;
+    
+    // 各命令のループネスト深度
+    std::vector<int> loopNestDepth_;
+    
+    // 制御フロー解析情報
+    std::vector<std::vector<size_t>> predecessors_;
+    std::vector<std::vector<size_t>> successors_;
+    
+    // データフロー解析情報
+    std::vector<std::vector<size_t>> uses_;
+    std::vector<std::vector<size_t>> defs_;
+    
+    // 命令の型情報
+    std::vector<ValueType> inferredTypes_;
+    
+    // SSA形式の変数生存期間
+    std::vector<std::pair<size_t, size_t>> liveRanges_;
+    
+    // メモリ依存解析情報
+    std::vector<std::vector<size_t>> memoryDependencies_;
+    
+    // ホットパス情報
+    std::vector<double> executionFrequencies_;
+    
+    // 仮想レジスタ割り当て情報
+    std::vector<int> registerAssignments_;
+    
+    // 最適化適用回数の記録（無限ループ防止用）
+    int optimizationPassCount_ = 0;
+    static constexpr int MAX_OPTIMIZATION_PASSES = 20;
 };
 
-} // namespace metatracing
-} // namespace jit
 } // namespace core
 } // namespace aerojs
 
-#endif // AEROJS_CORE_JIT_METATRACING_TRACE_OPTIMIZER_H 
+#endif // AEROJS_TRACE_OPTIMIZER_H 

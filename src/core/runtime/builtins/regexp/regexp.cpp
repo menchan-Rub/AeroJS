@@ -411,28 +411,78 @@ Value regexpMatchAll(ExecutionContext* ctx, Value thisValue, const std::vector<V
   auto* newRegexp = new RegExpObject(regexp->getPattern(), flags);
   newRegexp->setPrototype(ctx->regexpPrototype());
 
-  // マッチ結果を反復処理するイテレータオブジェクトを作成
-  // 注: 実際の実装ではイテレータオブジェクトを作成する必要があります
-  // ここではダミーの配列を返しています
-
-  auto* result = ctx->createArray();
-  size_t index = 0;
-
-  // lastIndexを0に設定
-  newRegexp->setLastIndex(0);
-
-  // すべてのマッチを検索
-  while (true) {
-    auto* match = newRegexp->exec(str);
-    if (!match) {
-      break;
+  // RegExpStringIteratorオブジェクトを作成
+  auto* iteratorProto = ctx->objectPrototype();
+  auto* iterator = ctx->createObject();
+  iterator->setPrototype(iteratorProto);
+  
+  // イテレータの内部状態を設定
+  iterator->defineProperty("__regexp", PropertyDescriptor(Value(newRegexp), false, false, true));
+  iterator->defineProperty("__string", PropertyDescriptor(Value(ctx->createString(str)), false, false, true));
+  iterator->defineProperty("__done", PropertyDescriptor(Value(false), false, true, true));
+  
+  // next メソッドを実装
+  auto* nextFunc = ctx->createFunction([](ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) -> Value {
+    if (!thisValue.isObject()) {
+      return ctx->throwTypeError("RegExp String Iterator next called on non-object");
     }
+    
+    auto* iterator = thisValue.asObject();
+    
+    // イテレータの状態を取得
+    Value doneValue = iterator->get("__done");
+    if (doneValue.toBoolean()) {
+      // イテレーションが完了している場合
+      auto* result = ctx->createObject();
+      result->defineProperty("done", PropertyDescriptor(Value(true), true, true, true));
+      result->defineProperty("value", PropertyDescriptor(Value::undefined(), true, true, true));
+      return Value(result);
+    }
+    
+    Value regexpValue = iterator->get("__regexp");
+    Value strValue = iterator->get("__string");
+    
+    if (!regexpValue.isObject() || !regexpValue.asObject()->isRegExp() || !strValue.isString()) {
+      // 内部状態が無効な場合
+      iterator->defineProperty("__done", PropertyDescriptor(Value(true), false, true, true));
+      auto* result = ctx->createObject();
+      result->defineProperty("done", PropertyDescriptor(Value(true), true, true, true));
+      result->defineProperty("value", PropertyDescriptor(Value::undefined(), true, true, true));
+      return Value(result);
+    }
+    
+    auto* regexp = static_cast<RegExpObject*>(regexpValue.asObject());
+    std::string str = strValue.toString()->value();
+    
+    // 次のマッチを検索
+    auto* match = regexp->exec(str);
+    
+    if (!match) {
+      // マッチングが終了した場合
+      iterator->defineProperty("__done", PropertyDescriptor(Value(true), false, true, true));
+      auto* result = ctx->createObject();
+      result->defineProperty("done", PropertyDescriptor(Value(true), true, true, true));
+      result->defineProperty("value", PropertyDescriptor(Value::undefined(), true, true, true));
+      return Value(result);
+    }
+    
+    // マッチング結果を返す
+    auto* result = ctx->createObject();
+    result->defineProperty("done", PropertyDescriptor(Value(false), true, true, true));
+    result->defineProperty("value", PropertyDescriptor(Value(match), true, true, true));
+    return Value(result);
+  }, "next", 0);
+  
+  iterator->defineProperty("next", PropertyDescriptor(Value(nextFunc), true, false, true));
+  
+  // Symbol.iteratorメソッドを実装（自分自身を返す）
+  auto* symbolIteratorFunc = ctx->createFunction([](ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) -> Value {
+    return thisValue;
+  }, "[Symbol.iterator]", 0);
+  
+  iterator->defineProperty(Symbol::for_("iterator").description(), PropertyDescriptor(Value(symbolIteratorFunc), true, false, true));
 
-    // マッチ結果を配列に追加
-    result->defineProperty(std::to_string(index++), PropertyDescriptor(Value(match), true, true, true));
-  }
-
-  return Value(result);
+  return Value(iterator);
 }
 
 Value regexpReplace(ExecutionContext* ctx, Value thisValue, const std::vector<Value>& args) {
@@ -451,15 +501,8 @@ Value regexpReplace(ExecutionContext* ctx, Value thisValue, const std::vector<Va
   // 文字列の取得
   std::string str = args[0].isUndefined() ? "undefined" : args[0].toString()->value();
 
-  // 置換値の取得
-  std::string replacement;
-  if (args[1].isFunction()) {
-    // 関数を使用した置換（詳細な実装は省略）
-    // 実際の実装では、マッチごとに関数を呼び出し、返り値で置換する必要があります
-    replacement = "$&";
-  } else {
-    replacement = args[1].toString()->value();
-  }
+  // 置換関数オブジェクトまたは置換文字列
+  Value replacer = args[1];
 
   // グローバルフラグがある場合は、すべてのマッチを置換
   if (regexp->global()) {
@@ -467,7 +510,7 @@ Value regexpReplace(ExecutionContext* ctx, Value thisValue, const std::vector<Va
     regexp->setLastIndex(0);
 
     std::string result = str;
-    size_t lastEnd = 0;
+    size_t offset = 0; // 置換による長さの変化を補正するオフセット
 
     // すべてのマッチを検索して置換
     while (true) {
@@ -479,16 +522,43 @@ Value regexpReplace(ExecutionContext* ctx, Value thisValue, const std::vector<Va
       // マッチ情報を取得
       size_t matchIndex = static_cast<size_t>(match->get("index").toNumber());
       std::string matchStr = match->get("0").toString()->value();
-
-      // 置換処理
-      // 実際の実装では、$&, $`, $', $n などの特殊文字を処理する必要があります
-      std::string currentReplacement = replacement;
+      
+      // 置換文字列を取得
+      std::string replacement;
+      
+      if (replacer.isFunction()) {
+        // 関数を使用した置換
+        std::vector<Value> callArgs;
+        
+        // 最初の引数はマッチした文字列全体
+        callArgs.push_back(Value(ctx->createString(matchStr)));
+        
+        // キャプチャグループを引数として追加
+        size_t groupCount = static_cast<size_t>(match->get("length").toNumber()) - 1;
+        for (size_t i = 1; i <= groupCount; ++i) {
+          callArgs.push_back(match->get(std::to_string(i)));
+        }
+        
+        // マッチしたインデックスを引数として追加
+        callArgs.push_back(Value(static_cast<double>(matchIndex)));
+        
+        // 入力文字列全体を引数として追加
+        callArgs.push_back(Value(ctx->createString(str)));
+        
+        // 置換関数を呼び出す
+        Value replacementValue = ctx->callFunction(replacer, Value::undefined(), callArgs);
+        replacement = replacementValue.toString()->value();
+      } else {
+        // 文字列を使用した置換
+        replacement = processReplacement(replacer.toString()->value(), match, str, matchIndex);
+      }
 
       // 置換を適用
-      result = result.substr(0, matchIndex) + currentReplacement + result.substr(matchIndex + matchStr.length());
-
-      // 次の検索位置を更新
-      lastEnd = matchIndex + currentReplacement.length();
+      size_t resultMatchIndex = matchIndex + offset;
+      result = result.substr(0, resultMatchIndex) + replacement + result.substr(resultMatchIndex + matchStr.length());
+      
+      // オフセットを更新
+      offset += replacement.length() - matchStr.length();
     }
 
     return Value(ctx->createString(result));
@@ -504,13 +574,39 @@ Value regexpReplace(ExecutionContext* ctx, Value thisValue, const std::vector<Va
     // マッチ情報を取得
     size_t matchIndex = static_cast<size_t>(match->get("index").toNumber());
     std::string matchStr = match->get("0").toString()->value();
-
-    // 置換処理
-    // 実際の実装では、$&, $`, $', $n などの特殊文字を処理する必要があります
-    std::string currentReplacement = replacement;
+    
+    // 置換文字列を取得
+    std::string replacement;
+    
+    if (replacer.isFunction()) {
+      // 関数を使用した置換
+      std::vector<Value> callArgs;
+      
+      // 最初の引数はマッチした文字列全体
+      callArgs.push_back(Value(ctx->createString(matchStr)));
+      
+      // キャプチャグループを引数として追加
+      size_t groupCount = static_cast<size_t>(match->get("length").toNumber()) - 1;
+      for (size_t i = 1; i <= groupCount; ++i) {
+        callArgs.push_back(match->get(std::to_string(i)));
+      }
+      
+      // マッチしたインデックスを引数として追加
+      callArgs.push_back(Value(static_cast<double>(matchIndex)));
+      
+      // 入力文字列全体を引数として追加
+      callArgs.push_back(Value(ctx->createString(str)));
+      
+      // 置換関数を呼び出す
+      Value replacementValue = ctx->callFunction(replacer, Value::undefined(), callArgs);
+      replacement = replacementValue.toString()->value();
+    } else {
+      // 文字列を使用した置換
+      replacement = processReplacement(replacer.toString()->value(), match, str, matchIndex);
+    }
 
     // 置換を適用
-    std::string result = str.substr(0, matchIndex) + currentReplacement + str.substr(matchIndex + matchStr.length());
+    std::string result = str.substr(0, matchIndex) + replacement + str.substr(matchIndex + matchStr.length());
 
     return Value(ctx->createString(result));
   }
@@ -698,6 +794,77 @@ void registerRegExpObject(ExecutionContext* ctx, Object* global) {
   // コンテキストに保存
   ctx->setRegexpPrototype(regexpProto);
   ctx->setRegexpConstructor(regexpConstructorObj);
+}
+
+// 置換文字列内の特殊パターンを処理するヘルパー関数
+std::string processReplacement(const std::string& replacement, Object* match, const std::string& str, size_t position) {
+  std::string result;
+  bool inEscape = false;
+  
+  for (size_t i = 0; i < replacement.length(); i++) {
+    char c = replacement[i];
+    
+    if (inEscape) {
+      // エスケープシーケンスの処理
+      inEscape = false;
+      
+      if (c == '&') {
+        // $& - マッチした文字列全体
+        result += match->get("0").toString()->value();
+      } else if (c == '`') {
+        // $` - マッチ前の文字列
+        result += str.substr(0, position);
+      } else if (c == '\'') {
+        // $' - マッチ後の文字列
+        std::string matchStr = match->get("0").toString()->value();
+        result += str.substr(position + matchStr.length());
+      } else if (isdigit(c)) {
+        // $n または $nn - キャプチャグループ
+        size_t groupNum = c - '0';
+        
+        // 2桁の数字をチェック
+        if (i + 1 < replacement.length() && isdigit(replacement[i + 1])) {
+          size_t nextDigit = replacement[i + 1] - '0';
+          size_t twoDigitNum = groupNum * 10 + nextDigit;
+          
+          // グループ番号が有効範囲内かつ存在するか確認
+          Value groupValue = match->get(std::to_string(twoDigitNum));
+          if (!groupValue.isUndefined()) {
+            result += groupValue.toString()->value();
+            i++; // 2桁目の数字をスキップ
+            continue;
+          }
+        }
+        
+        // 1桁の数字の処理
+        Value groupValue = match->get(std::to_string(groupNum));
+        if (!groupValue.isUndefined()) {
+          result += groupValue.toString()->value();
+        } else {
+          // 無効なグループ番号は文字としてそのまま出力
+          result += '$';
+          result += c;
+        }
+      } else {
+        // 認識されないエスケープシーケンスは文字としてそのまま出力
+        result += '$';
+        result += c;
+      }
+    } else if (c == '$') {
+      // エスケープシーケンスの開始
+      inEscape = true;
+    } else {
+      // 通常の文字
+      result += c;
+    }
+  }
+  
+  // 最後に$が残っていた場合はそのまま出力
+  if (inEscape) {
+    result += '$';
+  }
+  
+  return result;
 }
 
 }  // namespace aero

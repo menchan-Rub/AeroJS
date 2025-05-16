@@ -10,6 +10,7 @@
 #include <array>
 
 #include "../../ir/ir.h"
+#include "../../ir/ir_instruction.h"
 
 namespace aerojs {
 namespace core {
@@ -209,6 +210,56 @@ public:
      */
     bool IsFeatureSupported(RiscVFeature feature) const;
     
+    // 関数をRISC-V機械語にコンパイル
+    void CompileFunction(const IRFunction& func, std::vector<uint8_t>& out) noexcept;
+    
+    // 即値ロード命令の生成
+    void EmitLoadImmediate(int reg, int64_t value, std::vector<uint8_t>& out) noexcept;
+    
+    // メモリロード命令の生成
+    void EmitLoadMemory(int reg, int base, int offset, std::vector<uint8_t>& out) noexcept;
+    
+    // メモリストア命令の生成
+    void EmitStoreMemory(int reg, int base, int offset, std::vector<uint8_t>& out) noexcept;
+    
+    // 浮動小数点命令の生成
+    void EmitFloatOperation(IROpcode opcode, int dest, int src1, int src2, std::vector<uint8_t>& out) noexcept;
+    
+    // ベクトル命令の生成
+    void EmitVectorOperation(IROpcode opcode, int vd, int vs1, int vs2, int vlmax, std::vector<uint8_t>& out) noexcept;
+    
+    // ベクトルロード命令の生成
+    void EmitVectorLoad(int vd, int rs, int32_t offset, int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
+    
+    // ベクトルストア命令の生成
+    void EmitVectorStore(int vs, int rs, int32_t offset, int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
+    
+    // アトミック命令の生成
+    void EmitAtomicOperation(IROpcode opcode, int dest, int src, int addr, bool acquire, bool release, std::vector<uint8_t>& out) noexcept;
+    
+    // コンパイラフェンスの生成
+    void EmitFence(bool i, bool o, bool r, bool w, std::vector<uint8_t>& out) noexcept;
+    
+    // 命令セットタイプ（拡張を含む）
+    enum class ISAExtension {
+        RV64I,      // 基本命令セット
+        RV64M,      // 整数乗除算拡張
+        RV64A,      // アトミック拡張
+        RV64F,      // 単精度浮動小数点拡張
+        RV64D,      // 倍精度浮動小数点拡張
+        RV64V       // ベクトル拡張
+    };
+    
+    // 利用可能な命令セット拡張を設定
+    void EnableExtension(ISAExtension ext, bool enable = true) noexcept {
+        extensions_[static_cast<int>(ext)] = enable;
+    }
+    
+    // 命令セット拡張が有効かどうかをチェック
+    bool IsExtensionEnabled(ISAExtension ext) const noexcept {
+        return extensions_[static_cast<int>(ext)];
+    }
+
 private:
     // コード生成オプション
     RiscVJITCompileOptions m_options;
@@ -256,6 +307,30 @@ private:
     
     // 命令最適化
     void OptimizeCode(std::vector<uint8_t>& code);
+    
+    // 利用可能な命令セット拡張
+    bool extensions_[6] = {true, true, false, false, false, false};
+    
+    // エミッタテーブルの初期化
+    void Initialize();
+    
+    // レジスタ保存
+    void SaveRegisters(std::vector<uint8_t>& out) noexcept;
+    
+    // スタックフレーム設定
+    void SetupFrame(std::vector<uint8_t>& out, int frameSize) noexcept;
+    
+    // スタックフレーム解放
+    void TearDownFrame(std::vector<uint8_t>& out, int frameSize) noexcept;
+    
+    // JITキャッシュ最適化
+    void OptimizeCodeLayout(std::vector<uint8_t>& code) noexcept;
+    
+    // 命令スケジューリング
+    void ScheduleInstructions(std::vector<IRInstruction>& instructions) noexcept;
+    
+    // ベクトル長と要素幅を設定する命令の生成
+    void EmitVectorConfiguration(int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
 };
 
 } // namespace core

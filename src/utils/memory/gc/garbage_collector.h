@@ -64,81 +64,93 @@ public:
    * @brief WeakRefのプロバイダコールバックを登録
    * @param provider プロバイダコールバック
    */
-  void registerWeakRefProvider(std::function<void()> provider) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_weakRefProviders.push_back(provider);
-  }
+  void registerWeakRefProvider(std::function<void()> provider);
 
   /**
    * @brief Finalizationコールバックを登録
    * @param callback Finalizationコールバック
    */
-  void registerFinalizationCallback(std::function<void()> callback) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_finalizationCallbacks.push_back(callback);
-  }
+  void registerFinalizationCallback(std::function<void()> callback);
 
   /**
    * @brief GCをトリガー
    * @param force 強制的にGCを実行する場合はtrue
    */
-  void triggerGC(bool force = false) {
-    // GCが既に実行中ならスキップ
-    bool expected = false;
-    if (!m_isCollecting.compare_exchange_strong(expected, true)) {
-      return;
-    }
-
-    // 並列コレクションが設定されている場合は別スレッドで実行
-    if (m_parallelCollection && !force) {
-      std::thread collector([this]() {
-        this->collectGarbage();
-        m_isCollecting.store(false);
-      });
-      collector.detach();
-    } else {
-      // 直接実行
-      collectGarbage();
-      m_isCollecting.store(false);
-    }
-  }
+  void triggerGC(bool force = false);
 
   /**
    * @brief FinalizationRegistryの処理
    * ガベージコレクション後にFinalizationRegistryのコールバックを実行
    */
-  void processFinalizationRegistries() {
-    std::vector<std::function<void()>> callbacks;
-    
-    {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      callbacks = m_finalizationCallbacks;
-    }
-    
-    // 各コールバックを実行
-    for (const auto& callback : callbacks) {
-      try {
-        callback();
-      } catch (...) {
-        // エラーを無視（コールバックチェーンを中断しない）
-      }
-    }
-  }
+  void processFinalizationRegistries();
 
   /**
    * @brief 並列コレクションの設定
    * @param enabled 有効にする場合はtrue
    */
-  void setParallelCollection(bool enabled) {
-    m_parallelCollection = enabled;
-  }
+  void setParallelCollection(bool enabled);
 
   /**
    * @brief デバッグモードの設定
    * @param enabled 有効にする場合はtrue
    */
-  void setDebugMode(bool enabled) {
-    m_debugMode = enabled;
+  void setDebugMode(bool enabled);
+
+  /**
+   * @brief オブジェクトをGC管理対象として登録
+   * @param obj 管理対象のオブジェクト
+   */
+  void registerObject(Object* obj) {
+    if (obj) {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_managedObjects.insert(obj);
+    }
+  }
+
+  /**
+   * @brief ルートオブジェクトを登録
+   * @param root ルートオブジェクトへのポインタ
+   */
+  void addRoot(Object** root) {
+    if (root) {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_roots.push_back(root);
+    }
+  }
+
+  /**
+   * @brief ルートオブジェクトの登録解除
+   * @param root 登録解除するルートオブジェクトへのポインタ
+   */
+  void removeRoot(Object** root) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_roots.erase(
+      std::remove(m_roots.begin(), m_roots.end(), root),
+      m_roots.end()
+    );
+  }
+
+  /**
+   * @brief グローバルハンドルを登録
+   * @param handle グローバルハンドルへのポインタ
+   */
+  void addGlobalHandle(Object** handle) {
+    if (handle) {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_globalHandles.push_back(handle);
+    }
+  }
+
+  /**
+   * @brief グローバルハンドルの登録解除
+   * @param handle 登録解除するグローバルハンドルへのポインタ
+   */
+  void removeGlobalHandle(Object** handle) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_globalHandles.erase(
+      std::remove(m_globalHandles.begin(), m_globalHandles.end(), handle),
+      m_globalHandles.end()
+    );
   }
 
 private:
@@ -159,72 +171,38 @@ private:
    * @brief ガベージコレクション処理
    * オブジェクトの収集と解放を行う
    */
-  void collectGarbage() {
-    if (m_debugMode) {
-      printf("GC: Starting garbage collection\n");
-    }
-
-    // フェーズ1: マーク処理（WeakRefオブジェクトの特定を含む）
-    markPhase();
-
-    // フェーズ2: スイープ処理（オブジェクトの解放）
-    std::vector<Object*> collectedObjects = sweepPhase();
-
-    // フェーズ3: WeakRefの更新
-    updateWeakRefs();
-
-    // フェーズ4: Finalizationコールバックの実行
-    if (!collectedObjects.empty()) {
-      processFinalizationRegistries();
-    }
-
-    if (m_debugMode) {
-      printf("GC: Completed garbage collection, collected %zu objects\n", 
-             collectedObjects.size());
-    }
-  }
+  void collectGarbage();
 
   /**
    * @brief マーク処理
    * 到達可能なオブジェクトをマークする
    */
-  void markPhase() {
-    // 実際の実装では、到達可能なオブジェクトをマークする処理が入る
-    // ここではモックアップとして空の実装
-  }
+  void markPhase();
 
   /**
    * @brief スイープ処理
    * マークされていないオブジェクトを解放する
    * @return 収集されたオブジェクトのリスト
    */
-  std::vector<Object*> sweepPhase() {
-    // 実際の実装では、マークされていないオブジェクトを解放する処理が入る
-    // ここではモックアップとして空のリストを返す
-    return std::vector<Object*>();
-  }
+  std::vector<Object*> sweepPhase();
 
   /**
    * @brief WeakRefの更新
    * GC後にWeakRefオブジェクトを更新する
    */
-  void updateWeakRefs() {
-    std::vector<std::function<void()>> providers;
-    
-    {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      providers = m_weakRefProviders;
-    }
-    
-    // 各プロバイダを実行
-    for (const auto& provider : providers) {
-      try {
-        provider();
-      } catch (...) {
-        // エラーを無視
-      }
-    }
-  }
+  void updateWeakRefs();
+
+  /**
+   * @brief WeakRefオブジェクトの処理
+   * 生存しているオブジェクトを参照するWeakRefのみ有効にする
+   */
+  void processWeakReferences();
+
+  /**
+   * @brief WeakHandleの無効化
+   * @param obj 無効化の対象となるオブジェクト
+   */
+  void invalidateWeakHandles(Object* obj);
 
   /**
    * @brief ミューテックス
@@ -260,6 +238,21 @@ private:
    * @brief Finalizationコールバックのリスト
    */
   std::vector<std::function<void()>> m_finalizationCallbacks;
+
+  /**
+   * @brief 管理対象オブジェクトのセット
+   */
+  std::unordered_set<Object*> m_managedObjects;
+
+  /**
+   * @brief ルートオブジェクトリスト
+   */
+  std::vector<Object**> m_roots;
+
+  /**
+   * @brief グローバルハンドルリスト
+   */
+  std::vector<Object**> m_globalHandles;
 };
 
 } // namespace aero

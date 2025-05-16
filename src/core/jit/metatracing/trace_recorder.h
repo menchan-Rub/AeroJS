@@ -643,292 +643,38 @@ private:
   
   // トレースノードの型推論
   void inferTypes(Trace* trace);
-};
-
-} // namespace metatracing
-} // namespace jit
-} // namespace core
-} // namespace aerojs
-
-    // 定数定義
-    static constexpr size_t MAX_TRACE_LENGTH = 10000;     ///< 最大トレース長
-    static constexpr size_t MAX_GUARD_FAILURES = 10;      ///< 最大ガード失敗数
-    static constexpr size_t MAX_SIDE_EXITS = 20;          ///< 最大サイドエグジット数
-    static constexpr size_t MAX_NESTED_TRACE_DEPTH = 5;   ///< 最大ネストトレース深度
-    static constexpr size_t MAX_LOOP_ITERATIONS = 100;    ///< 最大ループ反復回数
-    static constexpr size_t MAX_INLINE_CALL_DEPTH = 3;    ///< 最大インライン呼び出し深度
-    
-    /**
-     * @brief スタックスナップショット
-     */
-    struct StackSnapshot {
-        std::vector<runtime::Value> values;  ///< スタック値
-        size_t stackPointer;                 ///< スタックポインタ
-        size_t framePointer;                 ///< フレームポインタ
-    };
-    
-    /**
-     * @brief トレース命令
-     */
-    struct TraceInstruction {
-        TraceOpcode opcode;                  ///< トレースオペコード
-        vm::bytecode::BytecodeAddress location; ///< バイトコード位置
-        vm::bytecode::Opcode bytecodeOp;     ///< バイトコードオペコード
-        std::vector<runtime::Value> operands; ///< オペランド
-        uint64_t timestamp;                  ///< タイムスタンプ
-        
-        // ガード関連情報
-        GuardCondition guardCondition;       ///< ガード条件
-        runtime::ValueType expectedType;     ///< 期待される型
-        
-        // サイドエグジット関連情報
-        SideExitType sideExitType;           ///< サイドエグジットタイプ
-        
-        // 最適化ヒント関連情報
-        OptimizationHint optimizationHint;   ///< 最適化ヒント
-        
-        // スタックスナップショット
-        bool hasStackSnapshot = false;       ///< スナップショットがあるかどうか
-        StackSnapshot stackSnapshot;         ///< スタックスナップショット
-    };
-    
-    /**
-     * @brief コンテキストスナップショット
-     */
-    struct ContextSnapshot {
-        vm::bytecode::BytecodeAddress instruction; ///< 現在の命令
-        std::vector<runtime::Value> stackValues;   ///< スタック値
-        size_t stackPointer;                    ///< スタックポインタ
-        size_t framePointer;                    ///< フレームポインタ
-        
-        /**
-         * @brief コンストラクタ
-         * @param context 実行コンテキスト
-         */
-        explicit ContextSnapshot(runtime::execution::ExecutionContext* context);
-        
-        /**
-         * @brief コピーコンストラクタ
-         */
-        ContextSnapshot(const ContextSnapshot& other);
-        
-        /**
-         * @brief デストラクタ
-         */
-        ~ContextSnapshot();
-    };
-    
-    /**
-     * @brief サイドエグジット情報
-     */
-    struct SideExit {
-        vm::bytecode::BytecodeAddress location; ///< バイトコード位置
-        SideExitType type;                    ///< サイドエグジットタイプ
-        size_t instructionIndex;              ///< トレース命令インデックス
-        std::unique_ptr<ContextSnapshot> contextSnapshot; ///< コンテキストスナップショット
-        
-        // ガード失敗情報（ガード失敗によるサイドエグジットの場合）
-        GuardCondition guardCondition;        ///< ガード条件
-        runtime::ValueType expectedType;      ///< 期待される型
-        runtime::Value actualValue;           ///< 実際の値
-    };
-    
-    /**
-     * @brief トレース情報
-     */
-    struct Trace {
-        vm::bytecode::BytecodeAddress* entryPoint; ///< トレース開始位置
-        vm::bytecode::BytecodeAddress* exitPoint;  ///< トレース終了位置
-        uint64_t startTimestamp;                ///< 開始タイムスタンプ
-        uint64_t executionTimeNs;               ///< 実行時間（ナノ秒）
-        std::vector<TraceInstruction> instructions; ///< トレース命令列
-        std::vector<SideExit> sideExits;        ///< サイドエグジット情報
-        std::unique_ptr<ContextSnapshot> contextSnapshot; ///< コンテキストスナップショット
-        ExitReason exitReason;                  ///< 終了理由
-        size_t executedBytecodes;               ///< 実行されたバイトコード数
-    };
-    
-    /**
-     * @brief コンストラクタ
-     * @param jit トレーシングJITエンジンへの参照
-     */
-    explicit TraceRecorder(TracingJIT& jit);
-    
-    /**
-     * @brief デストラクタ
-     */
-    ~TraceRecorder();
-    
-    /**
-     * @brief トレース記録を開始する
-     * @param context 実行コンテキスト
-     * @param entryPoint トレース開始位置
-     * @return 記録開始に成功したらtrue
-     */
-    bool startRecording(runtime::execution::ExecutionContext* context, 
-                         const vm::bytecode::BytecodeAddress& entryPoint);
-    
-    /**
-     * @brief トレース記録を強制終了する
-     * @param reason 終了理由
-     */
-    void abortRecording(ExitReason reason);
-    
-    /**
-     * @brief トレース記録を完了する
-     * @return 記録されたトレース
-     */
-    std::unique_ptr<Trace> finishRecording();
-    
-    /**
-     * @brief バイトコード命令の実行を記録する
-     * @param context 実行コンテキスト
-     * @param location バイトコードの位置
-     * @param opcode バイトコードのオペコード
-     * @param operands オペランドリスト
-     */
-    void recordBytecodeExecution(runtime::execution::ExecutionContext* context,
-                                  const vm::bytecode::BytecodeAddress& location,
-                                  vm::bytecode::Opcode opcode,
-                                  const std::vector<runtime::Value>& operands);
-    
-    /**
-     * @brief ガード条件を記録する
-     * @param context 実行コンテキスト
-     * @param location バイトコードの位置
-     * @param condition ガード条件
-     * @param expectedType 期待される値の型
-     * @param actualValue 実際の値
-     * @return ガードが成功した場合はtrue
-     */
-    bool recordGuardCondition(runtime::execution::ExecutionContext* context,
-                               const vm::bytecode::BytecodeAddress& location,
-                               GuardCondition condition,
-                               runtime::ValueType expectedType,
-                               const runtime::Value& actualValue);
-    
-    /**
-     * @brief サイドエグジットを記録する
-     * @param context 実行コンテキスト
-     * @param location バイトコードの位置
-     * @param exitType サイドエグジットのタイプ
-     */
-    void recordSideExit(runtime::execution::ExecutionContext* context,
-                         const vm::bytecode::BytecodeAddress& location,
-                         SideExitType exitType);
-    
-    /**
-     * @brief 最適化条件のヒントを記録する
-     * @param location バイトコードの位置
-     * @param hint 最適化ヒント
-     * @param data 追加データ
-     */
-    void recordOptimizationHint(const vm::bytecode::BytecodeAddress& location,
-                                 OptimizationHint hint,
-                                 const runtime::Value& data);
-    
-    /**
-     * @brief トレースレコーダーをリセットする
-     */
-    void reset();
-    
-    /**
-     * @brief トレース記録中かどうかを返す
-     */
-    bool isRecording() const;
-    
-    /**
-     * @brief 現在の記録深度を返す
-     */
-    int getRecordingDepth() const;
-    
-    /**
-     * @brief 最後のエントリーポイントを返す
-     */
-    const vm::bytecode::BytecodeAddress* getLastEntryPoint() const;
-    
-    /**
-     * @brief 統計情報の収集を有効化/無効化する
-     */
-    void enableStatistics(bool enable);
-    
-private:
-    TracingJIT& m_jit;                       ///< トレーシングJITエンジンへの参照
-    
-    bool m_isRecording;                      ///< 記録中フラグ
-    Trace m_currentTrace;                    ///< 現在のトレース
-    ExitReason m_exitReason;                 ///< 終了理由
-    
-    int m_guardFailureCount;                 ///< ガード失敗カウント
-    int m_recordingDepth;                    ///< 記録深度
-    int m_loopIterationCount;                ///< ループ反復カウント
-    
-    const vm::bytecode::BytecodeAddress* m_lastEntryPoint; ///< 最後のエントリーポイント
-    
-    bool m_statisticsEnabled;                ///< 統計情報収集フラグ
-    
-    /**
-     * @brief ガード失敗を記録する
-     * @param context 実行コンテキスト
-     * @param location バイトコードの位置
-     * @param condition ガード条件
-     * @param expectedType 期待される値の型
-     * @param actualValue 実際の値
-     */
-    void recordGuardFailure(runtime::execution::ExecutionContext* context,
-                             const vm::bytecode::BytecodeAddress& location,
-                             GuardCondition condition,
-                             runtime::ValueType expectedType,
-                             const runtime::Value& actualValue);
-    
-    /**
-     * @brief ガード条件を評価する
-     * @param condition ガード条件
-     * @param expectedType 期待される値の型
-     * @param actualValue 実際の値
-     * @return ガードが成功した場合はtrue
-     */
-    bool evaluateGuard(GuardCondition condition,
-                        runtime::ValueType expectedType,
-                        const runtime::Value& actualValue);
-    
-    /**
-     * @brief 現在のタイムスタンプを取得する
-     */
-    uint64_t getCurrentTimestamp();
-    
-    /**
-     * @brief スタックスナップショットを取得する
-     * @param context 実行コンテキスト
-     * @return スタックスナップショット
-     */
-    StackSnapshot captureStackSnapshot(runtime::execution::ExecutionContext* context);
-    
-    /**
-     * @brief 空のトレースを初期化する
-     */
-    void initializeEmptyTrace();
-    
-    /**
-     * @brief 後方ジャンプかどうかをチェックする
-     * @param current 現在の位置
-     * @param target ジャンプ先
-     * @return 後方ジャンプならtrue
-     */
-    bool isBackwardJump(const vm::bytecode::BytecodeAddress& current,
-                         const vm::bytecode::BytecodeAddress& target);
-    
-    /**
-     * @brief バイトコードのジャンプターゲットを取得する
-     * @param location 現在の位置
-     * @param opcode バイトコードのオペコード
-     * @param operands オペランドリスト
-     * @return ジャンプ先アドレス
-     */
-    vm::bytecode::BytecodeAddress getBytecodeJumpTarget(
-        const vm::bytecode::BytecodeAddress& location,
-        vm::bytecode::Opcode opcode,
-        const std::vector<runtime::Value>& operands);
+  
+  /**
+   * @brief 三角関数の最適化を行う
+   * @param trace 対象トレース
+   * @param loopNodes ループ内のノード
+   * @param masterNode マスターノード
+   */
+  void optimizeTrigonometricFunctions(Trace* trace, 
+                                    const std::vector<TraceNode*>& loopNodes, 
+                                    OperationNode* masterNode);
+  
+  /**
+   * @brief 指数関数と累乗演算の最適化を行う
+   * @param trace 対象トレース
+   * @param loopNodes ループ内のノード
+   * @param masterNode マスターノード
+   */
+  void optimizeExponentiationOperations(Trace* trace, 
+                                      const std::vector<TraceNode*>& loopNodes, 
+                                      OperationNode* masterNode);
+  
+  /**
+   * @brief 複雑な算術演算の最適化を行う
+   * @param trace 対象トレース
+   * @param loopNodes ループ内のノード
+   * @param masterNode マスターノード
+   * @param dominantOpKind 主要な演算種別
+   */
+  void optimizeComplexArithmetic(Trace* trace, 
+                                const std::vector<TraceNode*>& loopNodes, 
+                                OperationNode* masterNode,
+                                OpKind dominantOpKind);
 };
 
 } // namespace metatracing

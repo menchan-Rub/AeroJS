@@ -27,23 +27,45 @@ enum class CellState {
   Black  // マーク済み
 };
 
+// 世代の定義
+enum class Generation {
+  Young, // 若い世代（新しいオブジェクト）
+  Old    // 古い世代（長寿命オブジェクト）
+};
+
+// 弱参照構造体
+struct WeakRef {
+  GCCell* target;
+  bool isValid;
+  
+  WeakRef(GCCell* obj) : target(obj), isValid(true) {}
+  void invalidate() { isValid = false; target = nullptr; }
+};
+
 // GCセル（ガベージコレクション管理対象）
 class GCCell {
 public:
-  GCCell() : state(CellState::White), age(0) {}
+  GCCell() 
+    : state(CellState::White), 
+      age(0), 
+      generation(Generation::Young),
+      forwardingAddress(nullptr) {}
+      
   virtual ~GCCell() = default;
   
   virtual void trace(class GarbageCollector* gc) = 0;
   virtual size_t getSize() const = 0;
   
+  // GCセルが持つ参照をすべて辿るメソッド
+  virtual void visitReferences(std::function<void(GCCell*)> visitor) = 0;
+  
+  // GCセルが持つ書き換え可能な参照をすべて辿るメソッド
+  virtual void visitMutableReferences(std::function<void(GCCell**)> visitor) = 0;
+  
   CellState state;
   uint8_t age;
-};
-
-// 世代の定義
-enum class Generation {
-  Young, // 若い世代（新しいオブジェクト）
-  Old    // 古い世代（長寿命オブジェクト）
+  Generation generation;
+  void* forwardingAddress; // 移動後のアドレス（コンパクション用）
 };
 
 // ガベージコレクション設定
@@ -78,6 +100,12 @@ struct GCStats {
   
   size_t freedObjects = 0;                    // 解放されたオブジェクト数
   size_t freedBytes = 0;                      // 解放されたバイト数
+  
+  size_t promotedObjects = 0;                 // 昇格されたオブジェクト数
+  size_t promotedBytes = 0;                   // 昇格されたバイト数
+  
+  size_t relocatedObjects = 0;                // 再配置されたオブジェクト数
+  size_t relocatedBytes = 0;                  // 再配置されたバイト数
 };
 
 // 世代別ガベージコレクタークラス
@@ -107,6 +135,10 @@ public:
   // 統計情報
   const GCStats& getStats() const { return stats; }
   
+  // 弱参照管理
+  WeakRef* createWeakRef(GCCell* target);
+  void releaseWeakRef(WeakRef* ref);
+  
 private:
   // GC内部処理
   void mark(GCCell* root);
@@ -114,6 +146,7 @@ private:
   void sweep();
   void compact();
   void promoteObject(GCCell* object);
+  void updateReferences(GCCell* oldPtr, GCCell* newPtr);
   
   // ルート設定
   void addRoot(GCCell** root);
@@ -131,6 +164,7 @@ private:
   std::unordered_set<GCCell*> remembered;
   
   std::vector<GCCell**> roots;
+  std::vector<WeakRef> weakRefs;
   std::mutex rootsMutex;
   
   std::atomic<bool> gcEnabled;

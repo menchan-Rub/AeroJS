@@ -94,9 +94,19 @@ void GenerationalGC::writeBarrier(GCCell* object, const core::runtime::Value& va
     return;
   }
   
-  // 以下は実際の実装では正しく参照を取得する必要がある
-  // （サンプルコードなのでここでは簡略化）
+  // Valueオブジェクトから内部ポインタを取得
   GCCell* childObj = nullptr;
+  
+  // タグ付きポインタから実際のオブジェクトを取得
+  if (value.isObject()) {
+    childObj = static_cast<GCCell*>(value.asObject());
+  } else if (value.isString()) {
+    childObj = static_cast<GCCell*>(value.asString());
+  } else if (value.isArray()) {
+    childObj = static_cast<GCCell*>(value.asArray());
+  } else if (value.isFunction()) {
+    childObj = static_cast<GCCell*>(value.asFunction());
+  }
   
   if (childObj) {
     writeBarrier(object, childObj);
@@ -315,8 +325,95 @@ void GenerationalGC::compact() {
 }
 
 // オブジェクト昇格処理
-void GenerationalGC::promoteObject(GCCell* object) {
-  oldGeneration.push_back(object);
+void GenerationalGC::promoteObject(GCCell* obj) {
+  // 古い世代へ移動
+  oldGeneration.push_back(obj);
+  
+  // 世代情報を更新
+  obj->generation = Generation::Old;
+  
+  // メトリクスを更新
+  stats.promotedObjects++;
+  stats.promotedBytes += obj->getSize();
+  
+  // 実際の実装ではオブジェクトの再配置とポインタの修正が必要
+  // 1. 移動先のメモリ領域を確保
+  void* newLocation = nullptr;
+  size_t objSize = obj->getSize();
+  
+  // 古い世代用のメモリプールから割り当て
+  // ここではシンプルにmallocを使用しているが、実際には専用アロケータを使用
+  newLocation = malloc(objSize);
+  if (!newLocation) {
+    // メモリ確保に失敗した場合の処理
+    // エラーログを出力し、昇格をキャンセル
+    std::cerr << "メモリ確保に失敗しました。サイズ: " << objSize << " バイト" << std::endl;
+    return;
+  }
+  
+  // 2. オブジェクトをコピー
+  memcpy(newLocation, obj, objSize);
+  
+  // 3. フォワーディングポインタを設定
+  // 元のオブジェクトに新しい場所を記録
+  obj->forwardingAddress = newLocation;
+  
+  // 4. 参照を更新
+  // 一時的に新しいオブジェクトを取得
+  GCCell* newObj = static_cast<GCCell*>(newLocation);
+  
+  // 5. 内部の参照を修正（再帰的にforwardingAddressをチェック）
+  newObj->visitMutableReferences([this](GCCell** ref) {
+    if (*ref && (*ref)->forwardingAddress) {
+      // 参照先が既に移動していれば、フォワーディングポインタに更新
+      *ref = static_cast<GCCell*>((*ref)->forwardingAddress);
+    }
+  });
+  
+  // 6. グローバルレジストリの参照を更新
+  updateReferences(obj, newObj);
+  
+  // 7. 統計情報を更新
+  stats.relocatedObjects++;
+  stats.relocatedBytes += objSize;
+}
+
+// 全ての参照を更新
+void GenerationalGC::updateReferences(GCCell* oldPtr, GCCell* newPtr) {
+  // ルート参照の更新
+  for (auto& root : roots) {
+    if (*root == oldPtr) {
+      *root = newPtr;
+    }
+  }
+  
+  // 弱参照の更新
+  for (auto& weakRef : weakRefs) {
+    if (weakRef.target == oldPtr) {
+      weakRef.target = newPtr;
+    }
+  }
+  
+  // 管理対象オブジェクト内の参照も更新
+  for (auto* managedObj : youngGeneration) {
+    if (managedObj != oldPtr) { // 自分自身は更新しない
+      managedObj->visitMutableReferences([oldPtr, newPtr](GCCell** ref) {
+        if (*ref == oldPtr) {
+          *ref = newPtr;
+        }
+      });
+    }
+  }
+  
+  for (auto* managedObj : oldGeneration) {
+    if (managedObj != oldPtr) { // 自分自身は更新しない
+      managedObj->visitMutableReferences([oldPtr, newPtr](GCCell** ref) {
+        if (*ref == oldPtr) {
+          *ref = newPtr;
+        }
+      });
+    }
+  }
 }
 
 // ルート追加
@@ -360,21 +457,62 @@ void GenerationalGC::scheduleMinorGC() {
   }
 }
 
-// GCワーカースレッド処理
-void GenerationalGC::gcThread() {
-  while (!shouldStop) {
-    // マイナーGC定期実行
-    std::this_thread::sleep_for(std::chrono::milliseconds(config.minorGCInterval));
-    if (shouldStop) break;
-    
-    scheduleMinorGC();
-    
-    // メジャーGC定期実行
-    static int minorCount = 0;
-    if (++minorCount >= config.majorGCInterval / config.minorGCInterval) {
-      minorCount = 0;
-      scheduleMajorGC();
+// 弱参照管理
+WeakRef* GenerationalGC::createWeakRef(GCCell* target) {
+  if (!target) {
+    return nullptr;
+  }
+  
+  std::lock_guard<std::mutex> lock(gcMutex);
+  
+  // 新しい弱参照を作成
+  weakRefs.emplace_back(target);
+  
+  // 最後に追加した要素へのポインタを返す
+  return &weakRefs.back();
+}
+
+void GenerationalGC::releaseWeakRef(WeakRef* ref) {
+  if (!ref) {
+    return;
+  }
+  
+  std::lock_guard<std::mutex> lock(gcMutex);
+  
+  // 指定された弱参照を検索
+  for (auto it = weakRefs.begin(); it != weakRefs.end(); ++it) {
+    if (&(*it) == ref) {
+      // 見つかったら削除
+      weakRefs.erase(it);
+      return;
     }
+  }
+}
+
+// GCスレッド処理
+void GenerationalGC::gcThread() {
+  auto lastMinorGC = std::chrono::steady_clock::now();
+  auto lastMajorGC = lastMinorGC;
+  
+  while (!shouldStop) {
+    auto now = std::chrono::steady_clock::now();
+    
+    // マイナーGCの実行判定
+    if (gcEnabled && 
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMinorGC).count() >= config.minorGCInterval) {
+      minorCollection();
+      lastMinorGC = std::chrono::steady_clock::now();
+    }
+    
+    // メジャーGCの実行判定
+    if (gcEnabled && 
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMajorGC).count() >= config.majorGCInterval) {
+      majorCollection();
+      lastMajorGC = std::chrono::steady_clock::now();
+    }
+    
+    // スリープ（短時間）
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 }
 

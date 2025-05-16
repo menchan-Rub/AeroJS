@@ -256,14 +256,90 @@ Value ProxyObject::getOwnPropertyDescriptor(const PropertyKey& key) {
     // 結果の検証
     if (!trapResult.isObject() && !trapResult.isUndefined()) {
       // TypeError: getOwnPropertyDescriptor trap returned non-object and non-undefined
-      return Value::createUndefined(); // エラーの代わり
+      context->throwTypeError("getOwnPropertyDescriptor trap returned non-object and non-undefined");
+      return Value::createUndefined();
     }
     
     // ターゲットのプロパティディスクリプタを取得
     Value targetDesc = target.getOwnPropertyDescriptor(context, keyValue);
     
     // 不変性チェック
-    // 実際の実装では複雑な不変性チェックが必要
+    if (trapResult.isUndefined()) {
+      // トラップがundefinedを返した場合
+      if (targetDesc.isObject()) {
+        // ターゲットに存在するプロパティが設定不可の場合は違反
+        bool configurable = targetDesc.getProperty(context, "configurable").toBoolean();
+        if (!configurable) {
+          context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: cannot report non-configurable property as non-existent");
+          return targetDesc;
+        }
+        
+        // 非拡張オブジェクトの場合も違反
+        if (!target.isExtensible(context)) {
+          context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: cannot report existing property as non-existent on non-extensible object");
+          return targetDesc;
+        }
+      }
+    } else {
+      // トラップがオブジェクトを返した場合
+      if (targetDesc.isObject()) {
+        // 設定可能性のチェック
+        bool targetConfigurable = targetDesc.getProperty(context, "configurable").toBoolean();
+        bool resultConfigurable = trapResult.getProperty(context, "configurable").toBoolean();
+        
+        if (!targetConfigurable && resultConfigurable) {
+          context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: cannot report non-configurable property as configurable");
+          return targetDesc;
+        }
+        
+        // 書き込み可能性のチェック（データプロパティの場合）
+        if (targetDesc.hasProperty(context, "value")) {
+          bool targetWritable = targetDesc.getProperty(context, "writable").toBoolean();
+          
+          if (!targetConfigurable && !targetWritable) {
+            // 設定不可で書き込み不可の場合
+            if (trapResult.hasProperty(context, "writable") && 
+                trapResult.getProperty(context, "writable").toBoolean()) {
+              context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: cannot report non-configurable, non-writable property as writable");
+              return targetDesc;
+            }
+            
+            // 値の一致もチェック
+            Value targetValue = targetDesc.getProperty(context, "value");
+            Value resultValue = trapResult.getProperty(context, "value");
+            
+            if (!targetValue.equals(resultValue)) {
+              context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: non-configurable, non-writable property value must match");
+              return targetDesc;
+            }
+          }
+        }
+        
+        // アクセサプロパティのチェック
+        if (targetDesc.hasProperty(context, "get") || targetDesc.hasProperty(context, "set")) {
+          if (!targetConfigurable) {
+            // getter, setterの一致チェック
+            Value targetGetter = targetDesc.getProperty(context, "get");
+            Value resultGetter = trapResult.getProperty(context, "get");
+            Value targetSetter = targetDesc.getProperty(context, "set");
+            Value resultSetter = trapResult.getProperty(context, "set");
+            
+            if (!targetGetter.equals(resultGetter) || !targetSetter.equals(resultSetter)) {
+              context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: non-configurable accessor property must report same accessors");
+              return targetDesc;
+            }
+          }
+        }
+      } else {
+        // ターゲットに存在しないプロパティの場合
+        
+        // 非拡張オブジェクトには新しいプロパティを報告できない
+        if (!target.isExtensible(context)) {
+          context->throwTypeError("getOwnPropertyDescriptor trap violated invariant: cannot report new property on non-extensible object");
+          return Value::createUndefined();
+        }
+      }
+    }
     
     return trapResult;
   }
@@ -300,7 +376,83 @@ bool ProxyObject::defineProperty(const PropertyKey& key, const Value& descriptor
     }
     
     // 不変性チェック
-    // 実際の実装では複雑な不変性チェックが必要
+    Value targetDesc = target.getOwnPropertyDescriptor(context, keyValue);
+    
+    // 設定不可プロパティの存在チェック
+    if (targetDesc.isObject()) {
+      bool targetConfigurable = targetDesc.getProperty(context, "configurable").toBoolean();
+      
+      if (!targetConfigurable) {
+        // 既存の設定不可プロパティを変更できない
+        
+        // ディスクリプタ（引数）から情報を取得
+        bool descConfigurable = descriptor.hasProperty(context, "configurable") ? 
+                              descriptor.getProperty(context, "configurable").toBoolean() : true;
+                              
+        // 設定不可プロパティを設定可能に変更することはできない
+        if (descConfigurable) {
+          context->throwTypeError("defineProperty trap violated invariant: cannot change configurable attribute of non-configurable property");
+          return false;
+        }
+        
+        // データプロパティのチェック
+        if (targetDesc.hasProperty(context, "value")) {
+          bool targetWritable = targetDesc.getProperty(context, "writable").toBoolean();
+          
+          if (!targetWritable) {
+            // 書き込み不可プロパティを書き込み可能に変更できない
+            bool descWritable = descriptor.hasProperty(context, "writable") ?
+                              descriptor.getProperty(context, "writable").toBoolean() : false;
+                              
+            if (descWritable) {
+              context->throwTypeError("defineProperty trap violated invariant: cannot change writable attribute of non-writable property");
+              return false;
+            }
+            
+            // 値の変更も不可
+            if (descriptor.hasProperty(context, "value")) {
+              Value targetValue = targetDesc.getProperty(context, "value");
+              Value descValue = descriptor.getProperty(context, "value");
+              
+              if (!targetValue.equals(descValue)) {
+                context->throwTypeError("defineProperty trap violated invariant: cannot change value of non-writable property");
+                return false;
+              }
+            }
+          }
+        }
+        
+        // アクセサプロパティのチェック
+        if (targetDesc.hasProperty(context, "get") || targetDesc.hasProperty(context, "set")) {
+          // getter, setterの変更不可
+          if (descriptor.hasProperty(context, "get")) {
+            Value targetGetter = targetDesc.getProperty(context, "get");
+            Value descGetter = descriptor.getProperty(context, "get");
+            
+            if (!targetGetter.equals(descGetter)) {
+              context->throwTypeError("defineProperty trap violated invariant: cannot change getter of non-configurable property");
+              return false;
+            }
+          }
+          
+          if (descriptor.hasProperty(context, "set")) {
+            Value targetSetter = targetDesc.getProperty(context, "set");
+            Value descSetter = descriptor.getProperty(context, "set");
+            
+            if (!targetSetter.equals(descSetter)) {
+              context->throwTypeError("defineProperty trap violated invariant: cannot change setter of non-configurable property");
+              return false;
+            }
+          }
+        }
+      }
+    }
+    
+    // 非拡張オブジェクトの新規プロパティ定義チェック
+    if (!target.isExtensible(context) && targetDesc.isUndefined()) {
+      context->throwTypeError("defineProperty trap violated invariant: cannot define property on non-extensible object");
+      return false;
+    }
     
     return true;
   }
@@ -535,17 +687,109 @@ Value ProxyObject::ownKeys() {
     
     // 結果の検証
     if (!trapResult.isObject()) {
-      // TypeError: ownKeys trap returned non-object
-      return Value::createArray(context); // エラーの代わり
+      context->throwTypeError("ownKeys trap returned non-object");
+      return Value::createArray(context);
     }
     
     // 配列に変換
-    // 実際の実装では配列を適切に変換する必要がある
+    Value resultArray = Value::createArray(context);
+    
+    // trapResultが配列の場合
+    if (trapResult.isArray()) {
+      uint32_t length = trapResult.getArrayLength(context);
+      
+      // 各要素をチェック
+      for (uint32_t i = 0; i < length; i++) {
+        Value element = trapResult.getProperty(context, std::to_string(i));
+        
+        // 要素が文字列またはシンボルであることを確認
+        if (!element.isString() && !element.isSymbol()) {
+          context->throwTypeError("ownKeys trap result element must be a string or symbol");
+          continue;
+        }
+        
+        // 結果配列に追加
+        resultArray.setProperty(context, std::to_string(i), element);
+      }
+    } else {
+      // イテラブルな場合の処理（省略）
+      // JavaScriptのオブジェクト列挙順序に従って処理する必要がある
+      
+      // この実装では単純にプロパティを列挙
+      Value keys = trapResult.getOwnPropertyKeys(context);
+      if (keys.isArray()) {
+        uint32_t length = keys.getArrayLength(context);
+        
+        uint32_t resultIndex = 0;
+        for (uint32_t i = 0; i < length; i++) {
+          Value key = keys.getProperty(context, std::to_string(i));
+          Value element = trapResult.getProperty(context, key);
+          
+          if (!element.isString() && !element.isSymbol()) {
+            continue;
+          }
+          
+          resultArray.setProperty(context, std::to_string(resultIndex++), element);
+        }
+      }
+    }
     
     // 不変性チェック
-    // 実際の実装では複雑な不変性チェックが必要
+    // 1. 非拡張オブジェクトの場合、すべての非設定可能プロパティが結果に含まれる必要がある
+    if (!target.isExtensible(context)) {
+      Value targetKeys = target.getOwnPropertyKeys(context);
+      uint32_t targetLength = targetKeys.getArrayLength(context);
+      
+      // ターゲットの各プロパティについてチェック
+      for (uint32_t i = 0; i < targetLength; i++) {
+        Value targetKey = targetKeys.getProperty(context, std::to_string(i));
+        Value targetDesc = target.getOwnPropertyDescriptor(context, targetKey);
+        
+        // 非設定可能プロパティの場合
+        if (targetDesc.isObject() && !targetDesc.getProperty(context, "configurable").toBoolean()) {
+          // 結果に含まれているか確認
+          bool found = false;
+          uint32_t resultLength = resultArray.getArrayLength(context);
+          
+          for (uint32_t j = 0; j < resultLength; j++) {
+            Value resultKey = resultArray.getProperty(context, std::to_string(j));
+            if (targetKey.equals(resultKey)) {
+              found = true;
+              break;
+            }
+          }
+          
+          if (!found) {
+            context->throwTypeError("ownKeys trap violated invariant: non-configurable property must be included");
+            break;
+          }
+        }
+      }
+      
+      // 2. 非拡張オブジェクトの場合、結果に新しいプロパティを含めることはできない
+      uint32_t resultLength = resultArray.getArrayLength(context);
+      
+      for (uint32_t i = 0; i < resultLength; i++) {
+        Value resultKey = resultArray.getProperty(context, std::to_string(i));
+        
+        // ターゲットに存在するかチェック
+        bool found = false;
+        for (uint32_t j = 0; j < targetLength; j++) {
+          Value targetKey = targetKeys.getProperty(context, std::to_string(j));
+          if (resultKey.equals(targetKey)) {
+            found = true;
+            break;
+          }
+        }
+        
+        if (!found) {
+          context->throwTypeError("ownKeys trap violated invariant: cannot report new property on non-extensible object");
+          break;
+        }
+      }
+    }
     
-    return trapResult;
+    return resultArray;
   }
   
   // デフォルト: ターゲットのプロパティキーを返す

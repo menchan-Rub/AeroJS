@@ -412,10 +412,70 @@ std::unique_ptr<uint8_t[]> OptimizingJIT::generateMachineCode(std::unique_ptr<IR
     
 #ifdef __x86_64__
     codeGenerator = std::make_unique<X86_64CodeGenerator>(m_context, std::move(irFunction));
+    
+    // x86_64固有の最適化オプションを設定
+    auto* x86_64CodeGen = static_cast<X86_64CodeGenerator*>(codeGenerator.get());
+    
+    // SSEまたはAVX命令セットの使用設定
+    if (m_optimizationLevel >= OptimizationLevel::O2) {
+        x86_64CodeGen->setUseAVX(true);
+        x86_64CodeGen->setUseSSE4(true);
+    } else {
+        x86_64CodeGen->setUseAVX(false);
+        x86_64CodeGen->setUseSSE4(true); // SSE4はO1以上で常に有効
+    }
+    
+    // レジスタ割り当て戦略を設定
+    if (m_optimizationLevel == OptimizationLevel::O3) {
+        x86_64CodeGen->setRegisterAllocationStrategy(RegisterAllocationStrategy::Graph);
+    } else {
+        x86_64CodeGen->setRegisterAllocationStrategy(RegisterAllocationStrategy::LinearScan);
+    }
+    
+    // プロファイルを基にしたコード配置最適化
+    if (options.profileData && m_optimizationLevel >= OptimizationLevel::O2) {
+        x86_64CodeGen->enableProfileGuidedCodeLayout(true);
+        x86_64CodeGen->setProfileData(options.profileData);
+    }
+    
+    // インラインキャッシュのパッチポイント生成を設定
+    x86_64CodeGen->setGenerateICPatchPoints(options.enableInlining);
+    
 #elif defined(__aarch64__)
     codeGenerator = std::make_unique<ARM64CodeGenerator>(m_context, std::move(irFunction));
+    
+    // ARM64固有の最適化オプションを設定
+    auto* arm64CodeGen = static_cast<ARM64CodeGenerator*>(codeGenerator.get());
+    
+    // NEON/SVE命令セットの使用設定
+    if (m_optimizationLevel >= OptimizationLevel::O2) {
+        arm64CodeGen->setUseNEON(true);
+        arm64CodeGen->setUseSVE(m_optimizationLevel == OptimizationLevel::O3);
+    }
+    
+    // レジスタ割り当て戦略を設定
+    arm64CodeGen->setRegisterAllocationStrategy(
+        m_optimizationLevel == OptimizationLevel::O3 ? 
+        RegisterAllocationStrategy::Graph : 
+        RegisterAllocationStrategy::LinearScan);
+    
 #elif defined(__riscv)
     codeGenerator = std::make_unique<RISCVCodeGenerator>(m_context, std::move(irFunction));
+    
+    // RISC-V固有の最適化オプションを設定
+    auto* riscvCodeGen = static_cast<RISCVCodeGenerator*>(codeGenerator.get());
+    
+    // ベクトル拡張命令の使用設定
+    if (m_optimizationLevel >= OptimizationLevel::O2) {
+        riscvCodeGen->setUseVectorExtensions(true);
+    }
+    
+    // レジスタ割り当て戦略を設定
+    riscvCodeGen->setRegisterAllocationStrategy(
+        m_optimizationLevel == OptimizationLevel::O3 ? 
+        RegisterAllocationStrategy::Graph : 
+        RegisterAllocationStrategy::LinearScan);
+    
 #else
     setError("サポートされていないターゲットアーキテクチャです");
     *outCodeSize = 0;
@@ -426,13 +486,71 @@ std::unique_ptr<uint8_t[]> OptimizingJIT::generateMachineCode(std::unique_ptr<IR
     if (options.enableDeoptimizationSupport) {
         codeGenerator->setDeoptimizationSupport(true);
         codeGenerator->setTypeGuards(m_typeGuards);
+        
+        // ランタイムチェックポイントの生成
+        if (m_optimizationLevel >= OptimizationLevel::O2) {
+            const uint32_t HOT_CODE_CHECK_INTERVAL = 100;  // 100命令ごとにホットコードパスのチェック
+            codeGenerator->setRuntimeCheckInterval(HOT_CODE_CHECK_INTERVAL);
+        }
     }
     
     // 最適化レベルを設定
     codeGenerator->setOptimizationLevel(static_cast<int>(m_optimizationLevel));
     
+    // 例外ハンドリング情報の生成を設定
+    codeGenerator->setGenerateExceptionInfo(options.enableExceptionHandling);
+    
+    // ループアライメントとブランチプレディクションヒントを追加（高度な最適化時）
+    if (m_optimizationLevel >= OptimizationLevel::O2) {
+        codeGenerator->setLoopAlignment(16);  // 16バイトアライメント
+        codeGenerator->setUseBranchHints(true);
+    }
+    
+    // GC相互運用性のためのセーフポイントを生成
+    if (options.enableGCSupport) {
+        codeGenerator->setGenerateGCSafePoints(true);
+        
+        // GCセーフポイントの頻度を制御
+        if (m_optimizationLevel == OptimizationLevel::O3) {
+            codeGenerator->setGCSafePointInterval(200);  // 命令数
+        } else {
+            codeGenerator->setGCSafePointInterval(100);  // 命令数
+        }
+    }
+    
+    // プリアロケートモードでは必要以上に大きいバッファを割り当て、後で縮小
+    const bool usePreallocatedBuffer = true;
+    if (usePreallocatedBuffer) {
+        // 予想される最大コードサイズ（関数IRサイズの10倍程度）
+        size_t estimatedMaxCodeSize = irFunction->getInstructionCount() * 10;
+        codeGenerator->setPreallocatedBufferSize(estimatedMaxCodeSize);
+    }
+    
     // マシンコードの生成
-    return codeGenerator->generate(outCodeSize);
+    std::unique_ptr<uint8_t[]> machineCode = codeGenerator->generate(outCodeSize);
+    
+    // 生成されたICパッチポイント情報を保存
+    if (machineCode && *outCodeSize > 0) {
+        m_icPatchPoints = codeGenerator->getICPatchPoints();
+    }
+    
+    // コードサイズが0の場合はエラー
+    if (!machineCode || *outCodeSize == 0) {
+        setError("マシンコード生成に失敗しました");
+        return nullptr;
+    }
+    
+    // コード最適化指標の更新
+    m_stats.lastGeneratedCodeSize = *outCodeSize;
+    m_stats.lastBytecodeToBinaryRatio = 
+        static_cast<double>(*outCodeSize) / irFunction->getOriginalBytecodeSizeBytes();
+    
+    // 追加情報の保存（デバッグ用）
+    if (options.saveGeneratedCodeInfo) {
+        saveGeneratedCodeInfo(machineCode.get(), *outCodeSize, irFunction.get());
+    }
+    
+    return machineCode;
 }
 
 void OptimizingJIT::configureOptionsForOptimizationLevel(CompileOptions& options) {

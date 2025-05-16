@@ -20,6 +20,28 @@ namespace core {
 namespace jit {
 
 /**
+ * @brief コード生成の最適化フラグ
+ */
+enum class CodeGenOptFlags : uint32_t {
+  None = 0,
+  UseAVX = 1 << 0,        // AVX命令を使用
+  UseFMA = 1 << 1,        // FMA命令を使用
+  UseAVX512 = 1 << 2,     // AVX-512命令を使用
+  UseBMI = 1 << 3,        // BMI命令を使用
+  UseCLMUL = 1 << 4,      // CLMUL命令を使用
+  UseLZCNT = 1 << 5,      // LZCNT命令を使用
+  UsePOPCNT = 1 << 6,     // POPCNT命令を使用
+  CacheAware = 1 << 7,    // キャッシュラインを意識した最適化
+  BranchHints = 1 << 8,   // 分岐予測ヒントを使用
+  UseCPUSpecific = 1 << 9 // CPU固有の最適化を適用
+};
+
+// フラグチェックのためのヘルパー関数
+inline bool HasFlag(uint32_t flags, CodeGenOptFlags flag) {
+  return (flags & static_cast<uint32_t>(flag)) != 0;
+}
+
+/**
  * @brief コードの位置情報を保持する構造体
  */
 struct CodeLocation {
@@ -224,6 +246,36 @@ public:
   // 命令エンコーディング - その他
   void EmitNOP(uint8_t size = 1);
   void EmitINT3();
+  
+  // VEXプレフィックスの追加ヘルパー
+  void AppendVEXPrefix(std::vector<uint8_t>& code, uint8_t m, uint8_t p, uint8_t l, uint8_t w, uint8_t vvvv, uint8_t r, uint8_t x, uint8_t b) noexcept;
+  
+  // AVX-512用EVEXプレフィックスの追加ヘルパー
+  void AppendEVEXPrefix(std::vector<uint8_t>& code, uint8_t m, uint8_t p, uint8_t l, uint8_t w, 
+                        uint8_t vvvv, uint8_t aaa, uint8_t z, uint8_t b, 
+                        uint8_t v2, uint8_t k, bool broadcast) noexcept;
+  
+  // SIBバイトの追加ヘルパー
+  void AppendSIB(std::vector<uint8_t>& code, uint8_t scale, uint8_t index, uint8_t base) noexcept;
+  
+  // SIMDレジスタの取得
+  std::optional<X86_64FloatRegister> GetSIMDReg(int32_t virtualReg) const noexcept;
+  
+  // AVX-512命令の追加メソッド
+  void EncodeAVX512Load(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Store(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Arithmetic(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512FMA(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  
+  // AVX-512用マスク操作
+  void EncodeAVX512MaskOp(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Blend(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Permute(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Compress(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  void EncodeAVX512Expand(const IRInstruction& inst, std::vector<uint8_t>& code) noexcept;
+  
+  // キャッシュライン最適化
+  void OptimizeForCacheLine(std::vector<uint8_t>& code) noexcept;
   
 private:
   // 生成されたコード

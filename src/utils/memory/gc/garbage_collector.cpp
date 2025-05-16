@@ -116,14 +116,104 @@ void GarbageCollector::collectGarbage() {
 }
 
 void GarbageCollector::markPhase() {
-  // 実際の実装では、到達可能なオブジェクトをマークする処理が入る
-  // ここではモックアップとして空の実装
+  // ルートオブジェクト（グローバルオブジェクトやスタック上の変数）からマークを開始
+  std::vector<Object*> markStack;
+  
+  // ルートオブジェクトをマークスタックに追加
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // スレッドローカルハンドルからのルートを追加
+    for (const auto& root : m_roots) {
+      if (root && *root) {
+        markStack.push_back(*root);
+        (*root)->setMarked(true);
+      }
+    }
+    
+    // グローバルハンドルからのルートを追加
+    for (const auto& handle : m_globalHandles) {
+      if (handle && *handle) {
+        markStack.push_back(*handle);
+        (*handle)->setMarked(true);
+      }
+    }
+  }
+  
+  // マークスタックからオブジェクトを取り出して子オブジェクトを追加
+  while (!markStack.empty()) {
+    Object* obj = markStack.back();
+    markStack.pop_back();
+    
+    // このオブジェクトが参照する他のオブジェクトを列挙
+    obj->visitReferences([&markStack](Object* childObj) {
+      // まだマークされていない子オブジェクトのみスタックに追加
+      if (childObj && !childObj->isMarked()) {
+        childObj->setMarked(true);
+        markStack.push_back(childObj);
+      }
+    });
+  }
+  
+  // WeakRefオブジェクトの処理
+  // マーク後に生き残っているオブジェクトを参照しているWeakRefのみ有効
+  processWeakReferences();
 }
 
 std::vector<Object*> GarbageCollector::sweepPhase() {
-  // 実際の実装では、マークされていないオブジェクトを解放する処理が入る
-  // ここではモックアップとして空のリストを返す
-  return std::vector<Object*>();
+  std::vector<Object*> collectedObjects;
+  
+  // マークされていないオブジェクトを収集
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    auto it = m_managedObjects.begin();
+    while (it != m_managedObjects.end()) {
+      Object* obj = *it;
+      
+      if (!obj->isMarked()) {
+        // マークされていないオブジェクトは解放対象
+        collectedObjects.push_back(obj);
+        it = m_managedObjects.erase(it);
+        
+        // ファイナライザがある場合は実行
+        obj->finalize();
+        
+        // WeakHandleがあれば無効化
+        invalidateWeakHandles(obj);
+        
+        // オブジェクトのメモリを解放
+        delete obj;
+      } else {
+        // 次のGCサイクルのためにマークをリセット
+        obj->setMarked(false);
+        ++it;
+      }
+    }
+  }
+  
+  return collectedObjects;
+}
+
+void GarbageCollector::processWeakReferences() {
+  // WeakRefオブジェクトを処理
+  for (const auto& provider : m_weakRefProviders) {
+    try {
+      provider();
+    } catch (...) {
+      // エラーを無視
+    }
+  }
+}
+
+void GarbageCollector::invalidateWeakHandles(Object* obj) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  for (auto handle : m_registeredWeakHandles) {
+    // WeakHandleが対象オブジェクトを参照している場合は無効化
+    if (handle && static_cast<void*>(obj) == handle->getTarget()) {
+      handle->invalidate();
+    }
+  }
 }
 
 void GarbageCollector::updateWeakRefs() {
