@@ -134,22 +134,279 @@ size_t ConstantPool::size() const {
 }
 
 std::vector<uint8_t> ConstantPool::serialize() const {
-  // 単純なバイナリ形式でシリアライズする
-  // 実際の実装では、より効率的なフォーマットを使用するべき
-
+  // 効率的なバイナリフォーマットでシリアライズ
   std::vector<uint8_t> data;
 
-  // ここにシリアライズのロジックを実装...
-
+  // ヘルパー関数：uint32_tをリトルエンディアンでデータに追加
+  auto appendUint32 = [&data](uint32_t value) {
+    data.push_back(static_cast<uint8_t>(value & 0xFF));
+    data.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    data.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    data.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+  };
+  
+  // ヘルパー関数：doubleをデータに追加
+  auto appendDouble = [&data](double value) {
+    union {
+      double d;
+      uint64_t i;
+    } converter;
+    converter.d = value;
+    
+    for (int i = 0; i < 8; i++) {
+      data.push_back(static_cast<uint8_t>((converter.i >> (i * 8)) & 0xFF));
+    }
+  };
+  
+  // ヘルパー関数：文字列をデータに追加
+  auto appendString = [&data, &appendUint32](const std::string& str) {
+    // 文字列長
+    appendUint32(static_cast<uint32_t>(str.size()));
+    // 文字列データ
+    for (char c : str) {
+      data.push_back(static_cast<uint8_t>(c));
+    }
+  };
+  
+  // 定数プールヘッダ
+  // マジックナンバー "CPOOL"
+  data.push_back('C');
+  data.push_back('P');
+  data.push_back('O');
+  data.push_back('O');
+  data.push_back('L');
+  
+  // バージョン
+  data.push_back(1); // メジャーバージョン
+  data.push_back(0); // マイナーバージョン
+  
+  // 定数の数
+  appendUint32(static_cast<uint32_t>(m_constants.size()));
+  
+  // 定数データ
+  for (const auto& value : m_constants) {
+    // 値の型情報
+    uint8_t type = static_cast<uint8_t>(value.getType());
+    data.push_back(type);
+    
+    // 型に応じたデータのシリアライズ
+    switch (value.getType()) {
+      case ValueType::Undefined:
+        // 型情報のみ
+        break;
+        
+      case ValueType::Null:
+        // 型情報のみ
+        break;
+        
+      case ValueType::Boolean:
+        // Boolean値（1バイト）
+        data.push_back(value.getBoolean() ? 1 : 0);
+        break;
+        
+      case ValueType::Number: {
+        // 倍精度浮動小数点数（8バイト）
+        appendDouble(value.getNumber());
+        break;
+      }
+        
+      case ValueType::String: {
+        // 文字列
+        appendString(value.getString());
+        break;
+      }
+        
+      case ValueType::BigInt: {
+        // BigInt（文字列表現）
+        appendString(value.getBigInt());
+        break;
+      }
+        
+      case ValueType::RegExp: {
+        // 正規表現（パターンと flags の文字列）
+        appendString(value.getRegExpPattern());
+        appendString(value.getRegExpFlags());
+        break;
+      }
+        
+      case ValueType::Function: {
+        // 関数インデックス
+        appendUint32(value.getFunctionIndex());
+        break;
+      }
+        
+      default:
+        // 未対応の型の場合は警告
+        std::cerr << "警告: 未対応の値型 " << static_cast<int>(value.getType()) << " がシリアライズされました" << std::endl;
+        break;
+    }
+  }
+  
+  // フッター（整合性チェック用）
+  data.push_back('E'); // 終了マーカー
+  data.push_back('N');
+  data.push_back('D');
+  
+  // 単純なチェックサム
+  uint32_t checksum = 0;
+  for (size_t i = 0; i < data.size(); i++) {
+    checksum = (checksum + data[i]) & 0xFFFFFFFF;
+  }
+  appendUint32(checksum);
+  
   return data;
 }
 
 std::unique_ptr<ConstantPool> ConstantPool::deserialize(const std::vector<uint8_t>& data) {
-  // バイナリデータから定数プールを再構築する
-
-  // ここでデシリアライズのロジックを実装...
-
-  return std::make_unique<ConstantPool>();
+  // バイナリデータから定数プールを復元
+  if (data.size() < 16) { // 最小限必要なサイズ（ヘッダー、定数カウント、フッター）
+    return nullptr;
+  }
+  
+  // ヘッダーチェック
+  if (data[0] != 'C' || data[1] != 'P' || data[2] != 'O' || data[3] != 'O' || data[4] != 'L') {
+    return nullptr; // 無効なヘッダー
+  }
+  
+  // バージョンチェック
+  uint8_t majorVersion = data[5];
+  uint8_t minorVersion = data[6];
+  
+  if (majorVersion > 1) {
+    // 互換性のないバージョン
+    return nullptr;
+  }
+  
+  size_t position = 7; // 現在の読み込み位置
+  
+  // ヘルパー関数：uint32_tを読み取り
+  auto readUint32 = [&data, &position]() -> uint32_t {
+    if (position + 4 > data.size()) {
+      throw std::runtime_error("データの境界外を読み取ろうとしています");
+    }
+    
+    uint32_t value = 
+        static_cast<uint32_t>(data[position]) |
+        (static_cast<uint32_t>(data[position + 1]) << 8) |
+        (static_cast<uint32_t>(data[position + 2]) << 16) |
+        (static_cast<uint32_t>(data[position + 3]) << 24);
+    
+    position += 4;
+    return value;
+  };
+  
+  // ヘルパー関数：doubleを読み取り
+  auto readDouble = [&data, &position]() -> double {
+    if (position + 8 > data.size()) {
+      throw std::runtime_error("データの境界外を読み取ろうとしています");
+    }
+    
+    union {
+      uint64_t i;
+      double d;
+    } converter;
+    
+    converter.i = 0;
+    for (int i = 0; i < 8; i++) {
+      converter.i |= static_cast<uint64_t>(data[position + i]) << (i * 8);
+    }
+    
+    position += 8;
+    return converter.d;
+  };
+  
+  // ヘルパー関数：文字列を読み取り
+  auto readString = [&data, &position, &readUint32]() -> std::string {
+    uint32_t length = readUint32();
+    
+    if (position + length > data.size()) {
+      throw std::runtime_error("データの境界外を読み取ろうとしています");
+    }
+    
+    std::string str(data.begin() + position, data.begin() + position + length);
+    position += length;
+    return str;
+  };
+  
+  // 定数数の読み取り
+  uint32_t constantCount = readUint32();
+  
+  // 新しい定数プールの作成
+  auto pool = std::make_unique<ConstantPool>(true); // 重複排除を有効化
+  
+  // 定数の読み取り
+  for (uint32_t i = 0; i < constantCount; i++) {
+    if (position >= data.size()) {
+      throw std::runtime_error("予期せぬデータ終端");
+    }
+    
+    // 型情報の読み取り
+    uint8_t typeValue = data[position++];
+    ValueType type = static_cast<ValueType>(typeValue);
+    
+    // 値の作成
+    Value value;
+    
+    switch (type) {
+      case ValueType::Undefined:
+        value.setUndefined();
+        break;
+        
+      case ValueType::Null:
+        value.setNull();
+        break;
+        
+      case ValueType::Boolean:
+        if (position >= data.size()) {
+          throw std::runtime_error("予期せぬデータ終端");
+        }
+        value.setBoolean(data[position++] != 0);
+        break;
+        
+      case ValueType::Number:
+        value.setNumber(readDouble());
+        break;
+        
+      case ValueType::String:
+        value.setString(readString());
+        break;
+        
+      case ValueType::BigInt:
+        value.setBigInt(readString());
+        break;
+        
+      case ValueType::RegExp: {
+        std::string pattern = readString();
+        std::string flags = readString();
+        value.setRegExp(pattern, flags);
+        break;
+      }
+        
+      case ValueType::Function:
+        value.setFunction(readUint32());
+        break;
+        
+      default:
+        throw std::runtime_error("未対応の値型: " + std::to_string(typeValue));
+    }
+    
+    // 定数プールに追加
+    pool->m_constants.push_back(value);
+    
+    // 重複排除マップにも追加
+    if (pool->m_enableDeduplication) {
+      pool->m_map[value] = i;
+    }
+  }
+  
+  // フッターの検証（最低限のチェック）
+  if (position + 7 > data.size() || 
+      data[position] != 'E' || data[position + 1] != 'N' || data[position + 2] != 'D') {
+    // フッターが無効な場合でも、ここまで読み取った定数は有効と判断して返す
+    std::cerr << "警告: 定数プールのフッターが無効です" << std::endl;
+  }
+  
+  return pool;
 }
 
 void ConstantPool::dump(std::ostream& output) const {

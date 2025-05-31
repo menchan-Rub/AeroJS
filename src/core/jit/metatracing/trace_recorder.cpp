@@ -335,873 +335,195 @@ bool TraceRecorder::recordGuardCondition(
  * @param context 実行コンテキスト
  * @param location バイトコードの位置
  * @param exitType サイドエグジットのタイプ
- */
+ */ 
 void TraceRecorder::recordSideExit(
     execution::ExecutionContext* context,
     const bytecode::BytecodeAddress& location,
     SideExitType exitType) 
-{
-    if (!m_recording || m_aborted) {
-        return;
-    }
-    
-    // サイドエグジット命令を記録
-    TraceInstruction instr;
-    instr.opcode = TraceOpcode::SideExit;
-    instr.location = location;
-    instr.sideExitType = exitType;
-    instr.timestamp = getCurrentTimestamp();
-    
-    // スタックスナップショットを記録
-    instr.hasStackSnapshot = true;
-    instr.stackSnapshot = captureStackSnapshot(context);
-    
-    m_trace.instructions.push_back(instr);
-    
-    // サイドエグジット情報を保存
-    SideExit exit;
-    exit.location = location;
-    exit.type = exitType;
-    exit.instructionIndex = m_trace.instructions.size() - 1;
-    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
-    
-    m_trace.sideExits.push_back(std::move(exit));
-    
-    // サイドエグジットが多すぎる場合はトレースを中止
-    if (m_trace.sideExits.size() > MAX_SIDE_EXITS) {
-        abortTrace("Too many side exits");
-    }
-}
-
-/**
- * @brief 最適化条件のヒントを記録する
- * @param location バイトコードの位置
- * @param hint 最適化ヒント
- * @param data 追加データ
- */
-void TraceRecorder::recordOptimizationHint(
-    const bytecode::BytecodeAddress& location,
-    OptimizationHint hint,
-    const Value& data) 
-{
-    if (!m_recording || m_aborted) {
-        return;
-    }
-    
-    // 最適化ヒント命令を記録
-    TraceInstruction instr;
-    instr.opcode = TraceOpcode::OptimizationHint;
-    instr.location = location;
-    instr.optimizationHint = hint;
-    instr.operands.push_back(data);
-    instr.timestamp = getCurrentTimestamp();
-    
-    m_trace.instructions.push_back(instr);
-}
-
-/**
- * @brief ガード失敗を記録する
- * @param context 実行コンテキスト
- * @param location バイトコードの位置
- * @param condition ガード条件
- * @param expectedType 期待される値の型
- * @param actualValue 実際の値
- */
-void TraceRecorder::recordGuardFailure(
-    execution::ExecutionContext* context,
-    const bytecode::BytecodeAddress& location,
-    GuardCondition condition,
-    ValueType expectedType,
-    const Value& actualValue) 
-{
-    // ガード失敗命令を記録
-    TraceInstruction instr;
-    instr.opcode = TraceOpcode::GuardFailure;
-    instr.location = location;
-    instr.guardCondition = condition;
-    instr.expectedType = expectedType;
-    instr.operands.push_back(actualValue);
-    instr.timestamp = getCurrentTimestamp();
-    
-    // スタックスナップショットを記録
-    instr.hasStackSnapshot = true;
-    instr.stackSnapshot = captureStackSnapshot(context);
-    
-    m_trace.instructions.push_back(instr);
-    
-    // ガード失敗に対応するサイドエグジットを記録
-    SideExit exit;
-    exit.location = location;
-    exit.type = SideExitType::GuardFailure;
-    exit.instructionIndex = m_trace.instructions.size() - 1;
-    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
-    exit.guardCondition = condition;
-    exit.expectedType = expectedType;
-    exit.actualValue = actualValue;
-    
-    m_trace.sideExits.push_back(std::move(exit));
-}
-
-/**
- * @brief トレースレコーダーをリセットする
- */
-void TraceRecorder::reset() {
-    m_recording = false;
-    m_aborted = false;
-    m_guardCount = 0;
-    m_instructionCount = 0;
-    m_loopLevel = 0;
-    m_loopIterationCount = 0;
-    m_trace.clear();
-    m_valueMap.clear();
-    m_nextValueId = 1;
-    
-    initializeEmptyTrace();
-}
-
-/**
- * @brief トレース記録中かどうかを返す
- */
-bool TraceRecorder::isRecording() const {
-    return m_recording;
-}
-
-/**
- * @brief 現在の記録深度を返す
- */
-int TraceRecorder::getRecordingDepth() const {
-    return m_loopLevel;
-}
-
-/**
- * @brief 最後のエントリーポイントを返す
- */
-const bytecode::BytecodeAddress* TraceRecorder::getLastEntryPoint() const {
-    return &m_trace.instructions.back().location;
-}
-
-/**
- * @brief 統計情報の収集を有効化/無効化する
- */
-void TraceRecorder::enableStatistics(bool enable) {
-    m_statisticsEnabled = enable;
-}
-
-/**
- * @brief ガード条件を評価する
- * @param condition ガード条件
- * @param expectedType 期待される値の型
- * @param actualValue 実際の値
- * @return ガードが成功した場合はtrue
- */
-bool TraceRecorder::evaluateGuard(
-    GuardCondition condition,
-    ValueType expectedType,
-    const Value& actualValue) 
-{
-    switch (condition) {
-        case GuardCondition::TypeCheck:
-            return actualValue.getType() == expectedType;
-            
-        case GuardCondition::NonNull:
-            return !actualValue.isNull() && !actualValue.isUndefined();
-            
-        case GuardCondition::IntegerInRange:
-            if (actualValue.isInt32()) {
-                int32_t value = actualValue.asInt32();
-                int32_t min = static_cast<int32_t>(expectedType & 0xFFFFFFFF);
-                int32_t max = static_cast<int32_t>(expectedType >> 32);
-                return value >= min && value <= max;
-            }
-            return false;
-            
-        case GuardCondition::StringLength:
-            if (actualValue.isString()) {
-                size_t length = actualValue.asString()->length();
-                return length == static_cast<size_t>(expectedType);
-            }
-            return false;
-            
-        case GuardCondition::ObjectShape:
-            // オブジェクトシェイプの比較は複雑なため、実際の実装ではさらに詳細な処理が必要
-            if (actualValue.isObject()) {
-                return actualValue.asObject()->getShapeId() == static_cast<uint32_t>(expectedType);
-            }
-            return false;
-            
-        case GuardCondition::ArrayLength:
-            if (actualValue.isArray()) {
-                size_t length = actualValue.asArray()->length();
-                return length == static_cast<size_t>(expectedType);
-            }
-            return false;
-            
-        default:
-            // 未知のガード条件は安全のため失敗とする
-            return false;
-    }
-}
-
-/**
- * @brief 現在のタイムスタンプを取得する
- */
-uint64_t TraceRecorder::getCurrentTimestamp() {
-    // 現在のタイムスタンプを取得（高精度）
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count());
-}
-
-/**
- * @brief スタックスナップショットを取得する
- * @param context 実行コンテキスト
- * @return スタックスナップショット
- */
-TraceRecorder::StackSnapshot TraceRecorder::captureStackSnapshot(execution::ExecutionContext* context) {
-    StackSnapshot snapshot;
-    
-    // 現在のスタックをコピー（実際の実装ではエンジンの内部構造に依存）
-    const auto& stack = context->getStack();
-    snapshot.values.resize(stack.size());
-    
-    for (size_t i = 0; i < stack.size(); i++) {
-        snapshot.values[i] = stack[i];
-    }
-    
-    snapshot.stackPointer = context->getStackPointer();
-    snapshot.framePointer = context->getFramePointer();
-    
-    return snapshot;
-}
-
-/**
- * @brief 空のトレースを初期化する
- */
-void TraceRecorder::initializeEmptyTrace() {
-    m_trace.instructions.clear();
-    m_trace.sideExits.clear();
-    m_trace.startAddress = 0;
-    m_trace.endAddress = 0;
-    m_trace.startTimestamp = 0;
-    m_trace.endTimestamp = 0;
-    m_trace.executedBytecodes = 0;
-    m_trace.contextSnapshot.reset();
-    m_loopIterationCount = 0;
-}
-
-/**
- * @brief 後方ジャンプかどうかをチェックする
- * @param current 現在の位置
- * @param target ジャンプ先
- * @return 後方ジャンプならtrue
- */
-bool TraceRecorder::isBackwardJump(
-    const bytecode::BytecodeAddress& current,
-    const bytecode::BytecodeAddress& target) 
-{
-    // 通常、バイトコードアドレスは関数とオフセットで構成される
-    // 同じ関数内で、オフセットが現在地より小さければ後方ジャンプ
-    if (current.function == target.function) {
-        return target.offset < current.offset;
-    }
-    
-    // 異なる関数の場合は後方ジャンプとは見なさない
-    return false;
-}
-
-/**
- * @brief バイトコードのジャンプターゲットを取得する
- * @param location 現在の位置
- * @param opcode バイトコードのオペコード
- * @param operands オペランドリスト
- * @return ジャンプ先アドレス
- */
-bytecode::BytecodeAddress TraceRecorder::getBytecodeJumpTarget(
-    const bytecode::BytecodeAddress& location,
-    bytecode::Opcode opcode,
-    const std::vector<Value>& operands) 
-{
-    // ジャンプ命令のターゲットは通常、相対オフセットとして指定される
-    // 実際の実装ではバイトコードフォーマットに依存する
-    
-    // 簡略化のため、直接ジャンプオフセットが指定されていると仮定
-    if (operands.size() > 0 && operands[0].isInt32()) {
-        int32_t offset = operands[0].asInt32();
-        
-        bytecode::BytecodeAddress target;
-        target.function = location.function;
-        target.offset = location.offset + offset;
-        
-        return target;
-    }
-    
-    // デフォルトでは現在位置を返す
-    return location;
-}
-
-/**
- * @brief コンテキストスナップショットのコンストラクタ
- * @param context 実行コンテキスト
- */
-TraceRecorder::ContextSnapshot::ContextSnapshot(execution::ExecutionContext* context) {
-    if (context) {
-        // 実行コンテキストの状態をキャプチャ
-        instruction = context->getCurrentInstruction();
-        stackPointer = context->getStackPointer();
-        framePointer = context->getFramePointer();
-        
-        // 現在のスタックフレームをコピー
-        const auto& stack = context->getStack();
-        stackValues.resize(stack.size());
-        
-        for (size_t i = 0; i < stack.size(); i++) {
-            stackValues[i] = stack[i];
-        }
-        
-        // その他の必要な状態をキャプチャ
-        // コンテキストの実装に応じて追加
-    }
-}
-
-/**
- * @brief コンテキストスナップショットのコピーコンストラクタ
- * @param other コピー元のスナップショット
- */
-TraceRecorder::ContextSnapshot::ContextSnapshot(const ContextSnapshot& other) {
-    instruction = other.instruction;
-    stackPointer = other.stackPointer;
-    framePointer = other.framePointer;
-    
-    stackValues.resize(other.stackValues.size());
-    optimizedCopy(other.stackValues.data(), stackValues.data(), other.stackValues.size());
-}
-
-/**
- * @brief コンテキストスナップショットのデストラクタ
- */
-TraceRecorder::ContextSnapshot::~ContextSnapshot() {
-    // 特に必要なリソース解放はない
-}
-
-void TraceRecorder::recordTraceHeader(ExecutionContext* context) {
-    // 環境情報の記録
-    m_trace.header.contextId = reinterpret_cast<uintptr_t>(context);
-    m_trace.header.globalObjectId = reinterpret_cast<uintptr_t>(context->globalObject());
-    m_trace.header.traceId = generateTraceId();
-    m_trace.header.timestamp = getCurrentTimestamp();
-    m_trace.header.threadId = getCurrentThreadId();
-    
-    // トレースの種類を設定
-    if (m_jit.getExecutionCounter().isLoopHeader(m_trace.startAddress)) {
-        m_trace.header.traceType = TraceType::LOOP_TRACE;
-    } else if (m_jit.getExecutionCounter().isFunctionEntry(m_trace.startAddress)) {
-        m_trace.header.traceType = TraceType::FUNCTION_TRACE;
-    } else {
-        m_trace.header.traceType = TraceType::GENERIC_TRACE;
-    }
-}
-
-void TraceRecorder::recordTraceFooter() {
-    // トレース統計情報を計算
-    m_trace.footer.instructionCount = m_trace.instructions.size();
-    m_trace.footer.guardCount = m_trace.guards.size();
-    m_trace.footer.valueCount = m_trace.values.size();
-    m_trace.footer.sideExitCount = m_trace.sideExits.size();
-    m_trace.footer.functionEntryCount = m_trace.functionEntries.size();
-    m_trace.footer.duration = m_trace.endTimestamp - m_trace.startTimestamp;
-    
-    // ループトレースの場合、ループの反復回数を記録
-    if (m_trace.header.traceType == TraceType::LOOP_TRACE) {
-        int loopIterations = 0;
-        for (const auto& event : m_trace.events) {
-            if (event.type == TraceEventType::LOOP_ENTRY) {
-                loopIterations++;
-            }
-        }
-        m_trace.footer.loopIterations = loopIterations;
-    }
-}
-
-std::unique_ptr<IRFunction> TraceRecorder::convertTraceToIR() const {
-    // IRビルダーを作成
-    IRBuilder builder;
-    
-    // トレース命令を順番にIR命令に変換
-    for (const auto& instr : m_trace.instructions) {
-        // 入力値のベクトルを構築
-        std::vector<int64_t> args;
-        for (ValueId input : instr.inputs) {
-            args.push_back(static_cast<int64_t>(input));
-        }
-        
-        // 対応するIR命令を追加
-        builder.addInstruction(instr.opcode, args, static_cast<int64_t>(instr.output));
-    }
-    
-    // ガード命令を追加
-    for (const auto& guard : m_trace.guards) {
-        // ガードタイプに応じた命令を生成
-        IROpcode guardOpcode;
-        switch (guard.type) {
-            case GuardType::TYPE_GUARD:
-                guardOpcode = IROpcode::GUARD_TYPE;
-                break;
-            case GuardType::VALUE_GUARD:
-                guardOpcode = IROpcode::GUARD_VALUE;
-                break;
-            case GuardType::SHAPE_GUARD:
-                guardOpcode = IROpcode::GUARD_SHAPE;
-                break;
-            case GuardType::NULL_GUARD:
-                guardOpcode = IROpcode::GUARD_NULL;
-                break;
-            case GuardType::UNDEFINED_GUARD:
-                guardOpcode = IROpcode::GUARD_UNDEFINED;
-                break;
-            case GuardType::INTEGER_GUARD:
-                guardOpcode = IROpcode::GUARD_INTEGER;
-                break;
-            default:
-                guardOpcode = IROpcode::GUARD_GENERIC;
-        }
-        
-        // ガード命令を追加
-        builder.addInstruction(guardOpcode, { static_cast<int64_t>(guard.valueId) });
-    }
-    
-    // IR関数を生成して返す
-    std::string funcName = "trace_" + std::to_string(m_trace.header.traceId);
-    IRFunction* func = builder.buildFunction(funcName);
-    
-    return std::unique_ptr<IRFunction>(func);
-}
-
-uint32_t TraceRecorder::getCurrentThreadId() {
-    // 現在のスレッドIDを取得
-    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-}
-
-uint64_t TraceRecorder::generateTraceId() {
-    // ユニークなトレースIDを生成
-    static std::atomic<uint64_t> nextTraceId(1);
-    return nextTraceId++;
-}
-
-// 新しい並列処理機能実装
-void TraceRecorder::optimizeTraceParallel(Trace* trace) {
-    if (!trace) return;
-    
-    // 各最適化フェーズを並列実行
-    std::vector<std::unique_ptr<OptimizationPhase>> phases;
-    phases.push_back(std::make_unique<RedundantGuardElimination>());
-    phases.push_back(std::make_unique<CommonSubexpressionElimination>());
-    phases.push_back(std::make_unique<DeadCodeElimination>());
-    phases.push_back(std::make_unique<LoopInvariantCodeMotion>());
-    phases.push_back(std::make_unique<InstructionCombiner>());
-    phases.push_back(std::make_unique<LoadStoreOptimizer>());
-    phases.push_back(std::make_unique<VectorizationOptimizer>());
-    phases.push_back(std::make_unique<TypeSpecializer>());
-    
-    // 並列実行用データ構造
-    struct OptimizationResult {
-        std::vector<std::unique_ptr<TraceNode>> newNodes;
-        bool changed = false;
-    };
-    
-    std::vector<OptimizationResult> results(phases.size());
-    
-    // 複数スレッドで各最適化を並列に実行
-    #pragma omp parallel for
-    for (size_t i = 0; i < phases.size(); ++i) {
-        results[i].changed = phases[i]->optimize(trace, results[i].newNodes);
-    }
-    
-    // 結果をマージ
-    bool changed = false;
-    for (auto& result : results) {
-        if (result.changed) {
-            changed = true;
-            // 新しいノードの追加
-            for (auto& node : result.newNodes) {
-                trace->addNode(std::move(node));
-            }
-        }
-    }
-    
-    // 最適化が適用された場合は依存関係を更新
-    if (changed) {
-        updateNodeDependencies(trace);
-    }
-}
-
-// 先進的型推論とSpecialization
-void TraceRecorder::inferTypesAdvanced(Trace* trace) {
-    if (!trace) return;
-    
-    // 型情報伝播のための処理順序を決定
-    std::vector<TraceNode*> processingOrder;
-    buildProcessingOrder(trace, processingOrder);
-    
-    // 型情報の収集と伝播
-    std::unordered_map<TraceNode*, profiler::TypeInfo> typeInfoMap;
-    for (auto* node : processingOrder) {
-        if (node->isOperation()) {
-            auto* op = node->as<OperationNode>();
-            
-            // 入力ノードの型情報を取得
-            std::vector<profiler::TypeInfo> inputTypes;
-            for (auto* input : op->getInputs()) {
-                auto it = typeInfoMap.find(input);
-                if (it != typeInfoMap.end()) {
-                    inputTypes.push_back(it->second);
-                } else {
-                    // デフォルトの型情報
-                    inputTypes.push_back(profiler::TypeInfo());
+                    
+                    for (auto* otherNode : nodes) {
+                        if (otherNode->opcode == OpCode::LoadElement) {
+                            auto* idx = otherNode->getInput(1);
+                            if (idx && idx->id == node->id) {
+                                // このインデックスがどのループで使われているか判断
+                                bool isInInnerLoop = false;
+                                for (auto* n : nodes) {
+                                    if (n->opcode == OpCode::LoopBody && 
+                                        n->getMetadata("nestLevel", 0) == 1) {
+                                        
+                                        for (size_t i = 0; i < n->getInputCount(); i++) {
+                                            if (n->getInput(i) && 
+                                                n->getInput(i)->id == otherNode->id) {
+                                                isInInnerLoop = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (isInInnerLoop) {
+                                    usedInInnerLoop = true;
+                                } else {
+                                    usedInOuterLoop = true;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 使用パターンに基づいてインデックスを分類
+                    if (usedInInnerLoop && !innerIndex) {
+                        innerIndex = node;
+                    } else if (usedInOuterLoop && !outerIndex) {
+                        outerIndex = node;
+                    }
                 }
             }
             
-            // 操作に基づいて型推論
-            profiler::TypeInfo resultType = inferTypeForOperation(op->getOpKind(), inputTypes);
-            
-            // 型情報記録
-            typeInfoMap[node] = resultType;
-            op->setTypeInfo(resultType);
-            
-            // 型情報に基づく最適化ヒント
-            if (op->getOpKind() == OpKind::Add && 
-                resultType.isProbablyNumber() && resultType.getPreciseType() == runtime::ValueType::Number) {
-                // 数値加算として専用パスを使用
-                op->setOptimizationHint(OptimizationHint::UseSpecializedPath);
-            } else if (op->getOpKind() == OpKind::PropertyLoad && 
-                      resultType.isProbablyObject()) {
-                // プロパティアクセスの最適化
-                op->setOptimizationHint(OptimizationHint::InlinePropertyAccess);
-            }
-            
-            // SIMD加速のヒント
-            if (canVectorize(op, resultType)) {
-                op->setOptimizationHint(OptimizationHint::Vectorize);
-            }
-        } else if (node->isGuard()) {
-            auto* guard = node->as<GuardNode>();
-            auto* input = guard->getInput();
-            
-            // 入力の型情報を利用して不要なガードを検出
-            auto it = typeInfoMap.find(input);
-            if (it != typeInfoMap.end() && 
-                guard->getGuardKind() == GuardKind::TypeCheck) {
-                const auto& inputType = it->second;
-                if (inputType.isPrecise() && 
-                    inputType.getPreciseType() == guard->getExpectedType()) {
-                    // このガードは冗長なので除去候補としてマーク
-                    guard->setOptimizationHint(OptimizationHint::EliminateRedundantGuard);
-                }
-            }
-            
-            // 型情報の更新（ガード通過後はより精密な型情報になる）
-            if (guard->getGuardKind() == GuardKind::TypeCheck) {
-                profiler::TypeInfo refinedType;
-                refinedType.setPreciseType(guard->getExpectedType());
-                typeInfoMap[node] = refinedType;
-            }
-        }
-    }
-}
-
-// 超高速メタトレースバイナリコード生成
-void TraceRecorder::generateOptimizedMachineCode(Trace* trace, const std::vector<profiler::TypeInfo>& typeInfos) {
-    if (!trace || !trace->isLoop()) return;
-    
-    // IR生成
-    IRGraph irGraph;
-    std::unordered_map<TraceNode*, IRNode*> nodeMapping;
-    
-    // ノードをIRに変換
-    for (const auto& node : trace->getNodes()) {
-        IRNode* irNode = node->toIRNode(&irGraph);
-        nodeMapping[node.get()] = irNode;
-    }
-    
-    // ノード間の依存関係を構築
-    for (const auto& node : trace->getNodes()) {
-        if (node->isOperation()) {
-            auto* op = node->as<OperationNode>();
-            IRNode* irNode = nodeMapping[node.get()];
-            
-            for (auto* input : op->getInputs()) {
-                auto it = nodeMapping.find(input);
-                if (it != nodeMapping.end()) {
-                    irNode->addDependency(it->second);
-                }
-            }
-        } else if (node->isGuard()) {
-            auto* guard = node->as<GuardNode>();
-            IRNode* irNode = nodeMapping[node.get()];
-            
-            auto* input = guard->getInput();
-            auto it = nodeMapping.find(input);
-            if (it != nodeMapping.end()) {
-                irNode->addDependency(it->second);
-            }
-        }
-    }
-    
-    // IR最適化
-    irGraph.optimize(OptimizationLevel::Ultra);
-    
-    // 最適化済みIRからバイナリコード生成
-    auto nativeCodegen = m_jit.getBackend()->createNativeCodeGenerator(m_jit.getCPUFeatures());
-    std::vector<uint8_t> machineCode;
-    bool success = nativeCodegen->generate(irGraph, machineCode);
-    
-    if (success) {
-        // 生成したコードをトレースにアタッチ
-        trace->setNativeCode(std::move(machineCode));
-        trace->setCompiled(true);
-        
-        // 実行統計の初期化
-        trace->resetExecutionStats();
-    }
-}
-
-// AIベース超最適化
-void TraceRecorder::applyAIOptimization(Trace* trace) {
-    if (!trace) return;
-    
-    // ループのパターンを認識
-    if (trace->isLoop()) {
-        auto* loopHead = trace->getLoopHead();
-        auto* loopEnd = trace->getLoopEnd();
-        
-        if (loopHead && loopEnd) {
-            // ループ内のノードを収集
-            std::vector<TraceNode*> loopNodes;
-            bool inLoop = false;
-            for (const auto& node : trace->getNodes()) {
-                if (node.get() == loopHead) {
-                    inLoop = true;
-                }
-                if (inLoop) {
-                    loopNodes.push_back(node.get());
-                }
-                if (node.get() == loopEnd) {
-                    inLoop = false;
-                }
-            }
-            
-            // パターン認識と変換
-            PatternMatcher matcher;
-            if (matcher.detectArrayPattern(loopNodes)) {
-                // 配列操作パターンを検出
-                replaceWithVectorizedArrayOp(trace, loopNodes, matcher.getPatternInfo());
-            } else if (matcher.detectStringPattern(loopNodes)) {
-                // 文字列操作パターンを検出
-                replaceWithOptimizedStringOp(trace, loopNodes, matcher.getPatternInfo());
-            } else if (matcher.detectMathPattern(loopNodes)) {
-                // 数学計算パターンを検出
-                replaceWithIntrinsicMathOp(trace, loopNodes, matcher.getPatternInfo());
-            }
-        }
-    }
-}
-
-// AIが検出したパターンに基づく最適化をサポートするクラス
-class PatternMatcher {
-public:
-    enum class PatternType {
-        None,
-        ArrayIteration,
-        ArrayMap,
-        ArrayReduce,
-        StringConcat,
-        StringSearch,
-        MathComputation
-    };
-    
-    struct PatternInfo {
-        PatternType type;
-        std::vector<TraceNode*> keyNodes;
-        std::unordered_map<std::string, TraceNode*> namedNodes;
-        std::string description;
-    };
-    
-    PatternMatcher() {}
-    
-    bool detectArrayPattern(const std::vector<TraceNode*>& nodes) {
-        // 配列イテレーションパターンの検出
-        if (matchArrayIteration(nodes)) {
-            m_patternInfo.type = PatternType::ArrayIteration;
-            m_patternInfo.description = "Array iteration pattern";
-            return true;
-        } else if (matchArrayMap(nodes)) {
-            m_patternInfo.type = PatternType::ArrayMap;
-            m_patternInfo.description = "Array map pattern";
-            return true;
-        } else if (matchArrayReduce(nodes)) {
-            m_patternInfo.type = PatternType::ArrayReduce;
-            m_patternInfo.description = "Array reduce pattern";
-            return true;
-        }
-        return false;
-    }
-    
-    bool detectStringPattern(const std::vector<TraceNode*>& nodes) {
-        // 文字列操作パターンの検出
-        if (matchStringConcat(nodes)) {
-            m_patternInfo.type = PatternType::StringConcat;
-            m_patternInfo.description = "String concatenation pattern";
-            return true;
-        } else if (matchStringSearch(nodes)) {
-            m_patternInfo.type = PatternType::StringSearch;
-            m_patternInfo.description = "String search pattern";
-            return true;
-        }
-        return false;
-    }
-    
-    bool detectMathPattern(const std::vector<TraceNode*>& nodes) {
-        // 数学計算パターンの検出
-        if (matchMathComputation(nodes)) {
-            m_patternInfo.type = PatternType::MathComputation;
-            m_patternInfo.description = "Mathematical computation pattern";
-            return true;
-        }
-        return false;
-    }
-    
-    const PatternInfo& getPatternInfo() const {
-        return m_patternInfo;
-    }
-    
-private:
-    bool matchArrayIteration(const std::vector<TraceNode*>& nodes) {
-        // 配列イテレーションパターンのマッチング
-        // 典型的なfor(let i=0; i<arr.length; i++)パターンを検出
-        
-        // 必要なノードを探す
-        TraceNode* loopCounter = nullptr;
-        TraceNode* arrayLength = nullptr;
-        TraceNode* arrayAccess = nullptr;
-        TraceNode* comparison = nullptr;
-        
-        for (auto* node : nodes) {
-            if (node->isOperation()) {
-                auto* op = node->as<OperationNode>();
-                if (op->getOpKind() == OpKind::ElementLoad) {
-                    arrayAccess = node;
-                } else if (op->getOpKind() == OpKind::PropertyLoad) {
-                    // length プロパティのロードを検出
-                    auto* propLoad = op->as<OperationNode>();
-                    // ここではシンプル化のため省略
-                    arrayLength = node;
-                } else if (op->getOpKind() == OpKind::LessThan) {
-                    comparison = node;
-                }
-            }
-        }
-        
-        // パターンの検証
-        if (arrayAccess && arrayLength && comparison) {
-            // キーノードを記録
-            m_patternInfo.keyNodes = {arrayAccess, arrayLength, comparison};
-            m_patternInfo.namedNodes["arrayAccess"] = arrayAccess;
-            m_patternInfo.namedNodes["arrayLength"] = arrayLength;
-            m_patternInfo.namedNodes["comparison"] = comparison;
-            return true;
-        }
-        
-        return false;
-    }
-    
-    bool matchArrayMap(const std::vector<TraceNode*>& nodes) {
-        // Array.map()のようなパターンを検出
-        // 実際の実装では、もっと複雑な検出ロジックが必要
-        
-        // 必要なノードを探す
-        TraceNode* arrayAccess = nullptr;
-        TraceNode* arrayIterator = nullptr;
-        TraceNode* callbackInvocation = nullptr;
-        TraceNode* newArrayPush = nullptr;
-        
-        // map処理のパターン検出
-        // 1. 配列アクセス -> 要素取得
-        // 2. コールバック呼び出し
-        // 3. 新しい配列への結果追加
-        
-        for (auto* node : nodes) {
-            if (node->isOperation()) {
-                auto* op = node->as<OperationNode>();
+            // マップ操作を探す (通常は関数適用または演算子)
+            if (!mapOperation && (node->opcode == OpCode::Call || 
+                                 node->opcode == OpCode::Multiply || 
+                                 node->opcode == OpCode::Add || 
+                                 node->opcode == OpCode::Subtract || 
+                                 node->opcode == OpCode::BitwiseOr || 
+                                 node->opcode == OpCode::BitwiseAnd)) {
                 
-                if (op->getOpKind() == OpKind::ElementLoad) {
-                    arrayAccess = node;
-                } else if (op->getOpKind() == OpKind::ElementStore) {
-                    newArrayPush = node;
-                } else if (op->getOpKind() == OpKind::Call) {
-                    callbackInvocation = node;
-                } else if (op->getOpKind() == OpKind::Add && 
-                           op->getInputs().size() == 2 && 
-                           op->getInputs()[1]->isConstantOne()) {
-                    // インデックスの増加を検出
-                    arrayIterator = node;
+                // マップ操作: 入力配列の要素を使用する操作
+                bool usesInputArray = false;
+                for (size_t i = 0; i < node->getInputCount(); i++) {
+                    auto* input = node->getInput(i);
+                    if (input && input->opcode == OpCode::LoadElement) {
+                        auto* arr = input->getInput(0);
+                        if (arr && inputArray && arr->id == inputArray->id) {
+                            usesInputArray = true;
+                            break;
+                        }
+                    }
                 }
-            }
-        }
-        
-        // パターンの検証
-        if (arrayAccess && callbackInvocation && newArrayPush && arrayIterator) {
-            // キーノードを記録
-            m_patternInfo.keyNodes = {arrayAccess, callbackInvocation, newArrayPush, arrayIterator};
-            m_patternInfo.namedNodes["arrayAccess"] = arrayAccess;
-            m_patternInfo.namedNodes["callbackInvocation"] = callbackInvocation;
-            m_patternInfo.namedNodes["newArrayPush"] = newArrayPush;
-            m_patternInfo.namedNodes["arrayIterator"] = arrayIterator;
-            m_patternInfo.description = "Array map pattern detected";
-            return true;
-        }
-        
-        return false;
-    }
-    
-    bool matchArrayReduce(const std::vector<TraceNode*>& nodes) {
-        // Array.reduce()のようなパターンを検出
-        // 必要なノードを探す
-        TraceNode* arrayAccess = nullptr;
-        TraceNode* accumulator = nullptr;
-        TraceNode* callbackInvocation = nullptr;
-        TraceNode* accumulatorUpdate = nullptr;
-        
-        // reduce処理のパターン検出
-        // 1. 配列アクセス -> 要素取得
-        // 2. コールバック呼び出し（アキュムレータと現在値）
-        // 3. アキュムレータの更新
-        
-        for (auto* node : nodes) {
-            if (node->isOperation()) {
-                auto* op = node->as<OperationNode>();
                 
-                if (op->getOpKind() == OpKind::ElementLoad) {
-                    arrayAccess = node;
-                } else if (op->getOpKind() == OpKind::Call) {
-                    callbackInvocation = node;
-                } else if (op->getOpKind() == OpKind::StoreLocal || 
-                           op->getOpKind() == OpKind::StoreGlobal) {
-                    accumulatorUpdate = node;
-                } else if (op->getOpKind() == OpKind::LoadLocal || 
-                           op->getOpKind() == OpKind::LoadGlobal) {
-                    // アキュムレータのロードを検出
-                    accumulator = node;
+                if (usesInputArray) {
+                    mapOperation = node;
                 }
             }
         }
         
-        // パターンの検証
-        if (arrayAccess && callbackInvocation && accumulatorUpdate && accumulator) {
-            // キーノードを記録
-            m_patternInfo.keyNodes = {arrayAccess, callbackInvocation, accumulatorUpdate, accumulator};
-            m_patternInfo.namedNodes["arrayAccess"] = arrayAccess;
-            m_patternInfo.namedNodes["callbackInvocation"] = callbackInvocation;
-            m_patternInfo.namedNodes["accumulatorUpdate"] = accumulatorUpdate;
+        // 必要なコンポーネントがすべて検出されたかチェック
+        if (!inputArray || !mapArray || !accumulator || !outerIndex || 
+            !innerIndex || !mapOperation || !reduceOperation) {
+            return false;
+        }
+        
+        // 3. MapReduceパターンの構造を検証
+        
+        // Map: 入力配列 -> 中間配列
+        bool hasMapping = false;
+        for (auto* node : nodes) {
+            if (node->opcode == OpCode::StoreElement) {
+                auto* arr = node->getInput(0);
+                auto* idx = node->getInput(1);
+                auto* val = node->getInput(2);
+                
+                if (arr && mapArray && arr->id == mapArray->id && 
+                    idx && outerIndex && idx->id == outerIndex->id && 
+                    val && mapOperation && 
+                    (val->id == mapOperation->id || 
+                     (val->hasInputWithId(mapOperation->id)))) {
+                    
+                    hasMapping = true;
+                    break;
+                }
+            }
+        }
+        
+        // Reduce: 中間配列 -> アキュムレータ
+        bool hasReducing = false;
+        for (auto* node : nodes) {
+            if (node->opcode == OpCode::LoadElement) {
+                auto* arr = node->getInput(0);
+                auto* idx = node->getInput(1);
+                
+                if (arr && mapArray && arr->id == mapArray->id && 
+                    idx && innerIndex && idx->id == innerIndex->id) {
+                    
+                    // この配列要素がリデュース操作の入力になっているか
+                    for (auto* otherNode : nodes) {
+                        if (otherNode->id == reduceOperation->id) {
+                            auto* lhs = otherNode->getInput(0);
+                            auto* rhs = otherNode->getInput(1);
+                            
+                            if ((lhs && lhs->id == accumulator->id && 
+                                 rhs && rhs->id == node->id) || 
+                                (rhs && rhs->id == accumulator->id && 
+                                 lhs && lhs->id == node->id)) {
+                                
+                                hasReducing = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (hasReducing) {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // MapReduceパターンとして認識する条件
+        if (hasMapping && hasReducing) {
+            m_patternInfo.type = PatternType::MapReduce;
+            m_patternInfo.description = "配列のMapReduceパターン";
+            
+            // 名前付きノードマップに登録
+            m_patternInfo.namedNodes["outerLoopStart"] = outerLoopStart;
+            m_patternInfo.namedNodes["outerLoopEnd"] = outerLoopEnd;
+            m_patternInfo.namedNodes["innerLoopStart"] = innerLoopStart;
+            m_patternInfo.namedNodes["innerLoopEnd"] = innerLoopEnd;
+            m_patternInfo.namedNodes["inputArray"] = inputArray;
+            m_patternInfo.namedNodes["mapArray"] = mapArray;
             m_patternInfo.namedNodes["accumulator"] = accumulator;
-            m_patternInfo.description = "Array reduce pattern detected";
+            m_patternInfo.namedNodes["outerIndex"] = outerIndex;
+            m_patternInfo.namedNodes["innerIndex"] = innerIndex;
+            m_patternInfo.namedNodes["mapOperation"] = mapOperation;
+            m_patternInfo.namedNodes["reduceOperation"] = reduceOperation;
+            
+            // MapReduceの演算子タイプを判定
+            std::string mapOpName = "unknown";
+            std::string reduceOpName = "unknown";
+            
+            // マップ操作の種類を判定
+            if (mapOperation->opcode == OpCode::Call) {
+                mapOpName = "function";
+                
+                auto* funcNode = mapOperation->getInput(0);
+                if (funcNode && funcNode->hasAttribute("name")) {
+                    mapOpName = funcNode->getAttribute("name");
+                }
+            } else {
+                switch (mapOperation->opcode) {
+                    case OpCode::Add: mapOpName = "add"; break;
+                    case OpCode::Subtract: mapOpName = "subtract"; break;
+                    case OpCode::Multiply: mapOpName = "multiply"; break;
+                    case OpCode::Divide: mapOpName = "divide"; break;
+                    case OpCode::Power: mapOpName = "power"; break;
+                    case OpCode::BitwiseAnd: mapOpName = "bitwiseAnd"; break;
+                    case OpCode::BitwiseOr: mapOpName = "bitwiseOr"; break;
+                    default: mapOpName = "transform"; break;
+                }
+            }
+            
+            // リデュース操作の種類を判定
+            switch (reduceOperation->opcode) {
+                case OpCode::Add: reduceOpName = "sum"; break;
+                case OpCode::Multiply: reduceOpName = "product"; break;
+                case OpCode::BitwiseAnd: reduceOpName = "bitwiseAnd"; break;
+                case OpCode::BitwiseOr: reduceOpName = "bitwiseOr"; break;
+                case OpCode::Max: reduceOpName = "max"; break;
+                case OpCode::Min: reduceOpName = "min"; break;
+                default: reduceOpName = "custom"; break;
+            }
+            
+            m_patternInfo.description += " (Map: " + mapOpName + ", Reduce: " + reduceOpName + ")";
+            
             return true;
         }
         
@@ -2118,3 +1440,886 @@ std::vector<TraceNode*> TraceRecorder::getDependentNodes(Trace* trace, TraceNode
 } // namespace jit
 } // namespace core
 } // namespace aerojs 
+{
+    if (!m_recording || m_aborted) {
+        return;
+    }
+    
+    // サイドエグジット命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::SideExit;
+    instr.location = location;
+    instr.sideExitType = exitType;
+    instr.timestamp = getCurrentTimestamp();
+    
+    // スタックスナップショットを記録
+    instr.hasStackSnapshot = true;
+    instr.stackSnapshot = captureStackSnapshot(context);
+    
+    m_trace.instructions.push_back(instr);
+    
+    // サイドエグジット情報を保存
+    SideExit exit;
+    exit.location = location;
+    exit.type = exitType;
+    exit.instructionIndex = m_trace.instructions.size() - 1;
+    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
+    
+    m_trace.sideExits.push_back(std::move(exit));
+    
+    // サイドエグジットが多すぎる場合はトレースを中止
+    if (m_trace.sideExits.size() > MAX_SIDE_EXITS) {
+        abortTrace("Too many side exits");
+    }
+}
+
+/**
+ * @brief 最適化条件のヒントを記録する
+ * @param location バイトコードの位置
+ * @param hint 最適化ヒント
+ * @param data 追加データ
+ */
+void TraceRecorder::recordOptimizationHint(
+    const bytecode::BytecodeAddress& location,
+    OptimizationHint hint,
+    const Value& data) 
+{
+    if (!m_recording || m_aborted) {
+        return;
+    }
+    
+    // 最適化ヒント命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::OptimizationHint;
+    instr.location = location;
+    instr.optimizationHint = hint;
+    instr.operands.push_back(data);
+    instr.timestamp = getCurrentTimestamp();
+    
+    m_trace.instructions.push_back(instr);
+}
+
+/**
+ * @brief ガード失敗を記録する
+ * @param context 実行コンテキスト
+ * @param location バイトコードの位置
+ * @param condition ガード条件
+ * @param expectedType 期待される値の型
+ * @param actualValue 実際の値
+ */
+void TraceRecorder::recordGuardFailure(
+    execution::ExecutionContext* context,
+    const bytecode::BytecodeAddress& location,
+    GuardCondition condition,
+    ValueType expectedType,
+    const Value& actualValue) 
+{
+    // ガード失敗命令を記録
+    TraceInstruction instr;
+    instr.opcode = TraceOpcode::GuardFailure;
+    instr.location = location;
+    instr.guardCondition = condition;
+    instr.expectedType = expectedType;
+    instr.operands.push_back(actualValue);
+    instr.timestamp = getCurrentTimestamp();
+    
+    // スタックスナップショットを記録
+    instr.hasStackSnapshot = true;
+    instr.stackSnapshot = captureStackSnapshot(context);
+    
+    m_trace.instructions.push_back(instr);
+    
+    // ガード失敗に対応するサイドエグジットを記録
+    SideExit exit;
+    exit.location = location;
+    exit.type = SideExitType::GuardFailure;
+    exit.instructionIndex = m_trace.instructions.size() - 1;
+    exit.contextSnapshot = std::make_unique<ContextSnapshot>(context);
+    exit.guardCondition = condition;
+    exit.expectedType = expectedType;
+    exit.actualValue = actualValue;
+    
+    m_trace.sideExits.push_back(std::move(exit));
+}
+
+/**
+ * @brief トレースレコーダーをリセットする
+ */
+void TraceRecorder::reset() {
+    m_recording = false;
+    m_aborted = false;
+    m_guardCount = 0;
+    m_instructionCount = 0;
+    m_loopLevel = 0;
+    m_loopIterationCount = 0;
+    m_trace.clear();
+    m_valueMap.clear();
+    m_nextValueId = 1;
+    
+    initializeEmptyTrace();
+}
+
+/**
+ * @brief トレース記録中かどうかを返す
+ */
+bool TraceRecorder::isRecording() const {
+    return m_recording;
+}
+
+/**
+ * @brief 現在の記録深度を返す
+ */
+int TraceRecorder::getRecordingDepth() const {
+    return m_loopLevel;
+}
+
+/**
+ * @brief 最後のエントリーポイントを返す
+ */
+const bytecode::BytecodeAddress* TraceRecorder::getLastEntryPoint() const {
+    return &m_trace.instructions.back().location;
+}
+
+/**
+ * @brief 統計情報の収集を有効化/無効化する
+ */
+void TraceRecorder::enableStatistics(bool enable) {
+    m_statisticsEnabled = enable;
+}
+
+/**
+ * @brief ガード条件を評価する
+ * @param condition ガード条件
+ * @param expectedType 期待される値の型
+ * @param actualValue 実際の値
+ * @return ガードが成功した場合はtrue
+ */
+bool TraceRecorder::evaluateGuard(
+    GuardCondition condition,
+    ValueType expectedType,
+    const Value& actualValue) 
+{
+    switch (condition) {
+        case GuardCondition::TypeCheck:
+            return actualValue.getType() == expectedType;
+            
+        case GuardCondition::NonNull:
+            return !actualValue.isNull() && !actualValue.isUndefined();
+            
+        case GuardCondition::IntegerInRange:
+            if (actualValue.isInt32()) {
+                int32_t value = actualValue.asInt32();
+                int32_t min = static_cast<int32_t>(expectedType & 0xFFFFFFFF);
+                int32_t max = static_cast<int32_t>(expectedType >> 32);
+                return value >= min && value <= max;
+            }
+            return false;
+            
+        case GuardCondition::StringLength:
+            if (actualValue.isString()) {
+                size_t length = actualValue.asString()->length();
+                return length == static_cast<size_t>(expectedType);
+            }
+            return false;
+            
+        case GuardCondition::ObjectShape:
+            // オブジェクトシェイプの比較。シェイプIDだけでなく、プロパティセット、
+            // プロトタイプチェーン、隠し属性の互換性もチェックする。
+            if (actualValue.isObject()) {
+                auto* obj = actualValue.asObject();
+                uint32_t actualShapeId = obj->getShapeId();
+                uint32_t expectedShapeId = static_cast<uint32_t>(expectedType);
+                
+                // シェイプIDの直接比較
+                if (actualShapeId == expectedShapeId) {
+                    return true;
+                }
+                
+                // シェイプ互換性の詳細チェック
+                ObjectShape* actualShape = obj->getShape();
+                ObjectShape* expectedShape = m_runtime->getShapeRegistry()->getShapeById(expectedShapeId);
+                
+                if (!expectedShape) {
+                    // 期待されるシェイプが見つからない場合は失敗
+                    m_jit.recordShapeMismatch(obj, expectedShapeId);
+                    return false;
+                }
+                
+                // 1. プロパティセットの互換性チェック
+                bool propertiesCompatible = true;
+                auto& expectedProperties = expectedShape->getProperties();
+                
+                for (auto& propPair : expectedProperties) {
+                    const auto& propName = propPair.first;
+                    const auto& propDesc = propPair.second;
+                    
+                    // トレース中に使用される全てのプロパティが存在し、互換性があるかチェック
+                    if (!actualShape->hasProperty(propName) || 
+                        !actualShape->isPropertyCompatible(propName, propDesc)) {
+                        propertiesCompatible = false;
+                        break;
+                    }
+                }
+                
+                if (propertiesCompatible) {
+                    // 必須プロパティは全て互換性がある
+                    
+                    // 2. プロトタイプチェーンの互換性
+                    if (expectedShape->requiresPrototypeCheck()) {
+                        // プロトタイプチェーンが重要な場合はチェック
+                        Object* actualProto = obj->getPrototype();
+                        Object* expectedProto = expectedShape->getExpectedPrototype();
+                        
+                        if (actualProto != expectedProto) {
+                            // プロトタイプが異なる場合、さらに詳細なチェックが必要
+                            // 例: プロトタイプのメソッドセットが同等かどうか
+                            if (!m_jit.isPrototypeCompatible(actualProto, expectedProto)) {
+                                m_jit.recordShapeMismatch(obj, expectedShapeId, "プロトタイプの不一致");
+                                return false;
+                            }
+                        }
+                    }
+                    
+                    // 3. 隠し属性の互換性（例: 配列バッファ、型付き配列など）
+                    if (expectedShape->hasHiddenClass()) {
+                        if (!actualShape->hasHiddenClass() || 
+                            actualShape->getHiddenClassId() != expectedShape->getHiddenClassId()) {
+                            m_jit.recordShapeMismatch(obj, expectedShapeId, "隠しクラスの不一致");
+                            return false;
+                        }
+                    }
+                    
+                // 継承関係にあるシェイプも許容する場合
+                if (obj->isShapeCompatibleWith(expectedShapeId)) {
+                        // キャッシュに互換性情報を記録
+                        m_jit.cacheShapeCompatibility(actualShapeId, expectedShapeId);
+                    return true;
+                }
+                
+                    // トランジションがあり得るかを確認し、事前に最適化
+                    if (m_runtime->getShapeRegistry()->canTransition(actualShapeId, expectedShapeId)) {
+                        // 変換可能なシェイプと記録
+                        m_jit.recordPotentialShapeTransition(obj, expectedShapeId);
+                    }
+                }
+                
+                // シェイプの不一致を記録
+                m_jit.recordShapeMismatch(obj, expectedShapeId, 
+                                         propertiesCompatible ? "部分的な互換性あり" : "プロパティの不一致");
+                return false;
+            }
+            return false;
+            
+        case GuardCondition::ArrayLength:
+            if (actualValue.isArray()) {
+                size_t length = actualValue.asArray()->length();
+                return length == static_cast<size_t>(expectedType);
+            }
+            return false;
+            
+        default:
+            // 未知のガード条件は安全のため失敗とする
+            return false;
+    }
+}
+
+/**
+ * @brief 現在のタイムスタンプを取得する
+ */
+uint64_t TraceRecorder::getCurrentTimestamp() {
+    // 現在のタイムスタンプを取得（高精度）
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count());
+}
+
+/**
+ * @brief スタックスナップショットを取得する
+ * @param context 実行コンテキスト
+ * @return スタックスナップショット
+ */
+TraceRecorder::StackSnapshot TraceRecorder::captureStackSnapshot(execution::ExecutionContext* context) {
+    StackSnapshot snapshot;
+    
+    // エンジンの実行スタックから値をキャプチャ
+    const auto& stack = context->getStack();
+    const size_t stackSize = stack.size();
+    const size_t maxCaptureSize = 1024; // スタックキャプチャの最大サイズ制限
+    const size_t captureSize = std::min(stackSize, maxCaptureSize);
+    
+    // スナップショットにスタック値をコピー
+    snapshot.values.resize(captureSize);
+    if (captureSize > 0) {
+        // 最適化されたメモリコピー（大きなスタックの場合SIMDを使用）
+        if (captureSize >= 8 && m_jit.getCPUFeatures().hasSIMD) {
+            // SIMD対応メモリコピー
+            optimizedCopy(stack.data(), snapshot.values.data(), captureSize);
+        } else {
+            // 通常のメモリコピー
+            for (size_t i = 0; i < captureSize; i++) {
+        snapshot.values[i] = stack[i];
+            }
+        }
+    }
+    
+    // スタックサイズが制限を超えた場合はメタデータを設定
+    if (stackSize > maxCaptureSize) {
+        snapshot.truncated = true;
+        snapshot.originalSize = stackSize;
+    }
+    
+    snapshot.stackPointer = context->getStackPointer();
+    snapshot.framePointer = context->getFramePointer();
+    
+    return snapshot;
+}
+
+/**
+ * @brief 空のトレースを初期化する
+ */
+void TraceRecorder::initializeEmptyTrace() {
+    m_trace.instructions.clear();
+    m_trace.sideExits.clear();
+    m_trace.startAddress = 0;
+    m_trace.endAddress = 0;
+    m_trace.startTimestamp = 0;
+    m_trace.endTimestamp = 0;
+    m_trace.executedBytecodes = 0;
+    m_trace.contextSnapshot.reset();
+    m_loopIterationCount = 0;
+}
+
+/**
+ * @brief 後方ジャンプかどうかをチェックする
+ * @param current 現在の位置
+ * @param target ジャンプ先
+ * @return 後方ジャンプならtrue
+ */
+bool TraceRecorder::isBackwardJump(
+    const bytecode::BytecodeAddress& current,
+    const bytecode::BytecodeAddress& target) 
+{
+    // 通常、バイトコードアドレスは関数とオフセットで構成される
+    // 同じ関数内で、オフセットが現在地より小さければ後方ジャンプ
+    if (current.function == target.function) {
+        return target.offset < current.offset;
+    }
+    
+    // 異なる関数の場合は後方ジャンプとは見なさない
+    return false;
+}
+
+/**
+ * @brief バイトコードのジャンプターゲットを取得する
+ * @param location 現在の位置
+ * @param opcode バイトコードのオペコード
+ * @param operands オペランドリスト
+ * @return ジャンプ先アドレス
+ */
+bytecode::BytecodeAddress TraceRecorder::getBytecodeJumpTarget(
+    const bytecode::BytecodeAddress& location,
+    bytecode::Opcode opcode,
+    const std::vector<Value>& operands) 
+{
+    bytecode::BytecodeAddress target;
+    target.function = location.function; // 基本的に同じ関数内でジャンプ
+    
+    // オペコードに応じたジャンプターゲット計算
+    switch (opcode) {
+        case bytecode::Opcode::JMP:
+            // 無条件ジャンプ - オペランドは直接オフセット
+            if (operands.size() > 0) {
+                if (operands[0].isInt32()) {
+                    // 相対オフセットとして解釈
+                    target.offset = location.offset + operands[0].asInt32();
+                } else if (operands[0].isAddress()) {
+                    // 絶対アドレスとして解釈
+                    bytecode::BytecodeAddress* addr = operands[0].asAddress();
+                    target = *addr;
+                }
+            }
+            break;
+            
+        case bytecode::Opcode::JMP_IF_TRUE:
+        case bytecode::Opcode::JMP_IF_FALSE:
+            // 条件付きジャンプ - 2番目のオペランドがオフセット
+            if (operands.size() > 1) {
+                if (operands[1].isInt32()) {
+                    // 相対オフセットとして解釈
+                    target.offset = location.offset + operands[1].asInt32();
+                } else if (operands[1].isAddress()) {
+                    // 絶対アドレスとして解釈
+                    bytecode::BytecodeAddress* addr = operands[1].asAddress();
+                    target = *addr;
+                }
+            }
+            break;
+            
+        case bytecode::Opcode::SWITCH:
+            // スイッチ文 - 複数のジャンプターゲットがある場合
+            // ここでは最初のケースのみ返す（完全な実装では、現在の値に基づいて正確なケースを選択）
+            if (operands.size() > 2) { // 最初の値+少なくとも1つのケース
+                if (operands[2].isInt32()) {
+                    target.offset = location.offset + operands[2].asInt32();
+                }
+            }
+            break;
+            
+        default:
+            // その他のジャンプ命令
+    if (operands.size() > 0 && operands[0].isInt32()) {
+                target.offset = location.offset + operands[0].asInt32();
+            } else {
+                target.offset = location.offset; // 変更なし
+            }
+            break;
+    }
+    
+    // バイトコード境界チェック
+    if (location.function) {
+        const bytecode::BytecodeFunction* func = location.function;
+        size_t codeSize = func->getCodeSize();
+        
+        if (target.offset >= codeSize) {
+            // 範囲外の場合は安全な値に制限
+            target.offset = codeSize - 1;
+    }
+    }
+    
+    return target;
+}
+
+/**
+ * @brief コンテキストスナップショットのコンストラクタ
+ * @param context 実行コンテキスト
+ */
+TraceRecorder::ContextSnapshot::ContextSnapshot(execution::ExecutionContext* context) {
+    if (context) {
+        // 実行コンテキストの状態をキャプチャ
+        instruction = context->getCurrentInstruction();
+        stackPointer = context->getStackPointer();
+        framePointer = context->getFramePointer();
+        
+        // 現在のスタックフレームをコピー
+        const auto& stack = context->getStack();
+        stackValues.resize(stack.size());
+        
+        for (size_t i = 0; i < stack.size(); i++) {
+            stackValues[i] = stack[i];
+        }
+        
+        // その他の必要な状態をキャプチャ
+        // コンテキストの実装に応じて追加
+    }
+}
+
+/**
+ * @brief コンテキストスナップショットのコピーコンストラクタ
+ * @param other コピー元のスナップショット
+ */
+TraceRecorder::ContextSnapshot::ContextSnapshot(const ContextSnapshot& other) {
+    instruction = other.instruction;
+    stackPointer = other.stackPointer;
+    framePointer = other.framePointer;
+    
+    stackValues.resize(other.stackValues.size());
+    optimizedCopy(other.stackValues.data(), stackValues.data(), other.stackValues.size());
+}
+
+/**
+ * @brief コンテキストスナップショットのデストラクタ
+ */
+TraceRecorder::ContextSnapshot::~ContextSnapshot() {
+    // 特に必要なリソース解放はない
+}
+
+void TraceRecorder::recordTraceHeader(ExecutionContext* context) {
+    // 環境情報の記録
+    m_trace.header.contextId = reinterpret_cast<uintptr_t>(context);
+    m_trace.header.globalObjectId = reinterpret_cast<uintptr_t>(context->globalObject());
+    m_trace.header.traceId = generateTraceId();
+    m_trace.header.timestamp = getCurrentTimestamp();
+    m_trace.header.threadId = getCurrentThreadId();
+    
+    // トレースの種類を設定
+    if (m_jit.getExecutionCounter().isLoopHeader(m_trace.startAddress)) {
+        m_trace.header.traceType = TraceType::LOOP_TRACE;
+    } else if (m_jit.getExecutionCounter().isFunctionEntry(m_trace.startAddress)) {
+        m_trace.header.traceType = TraceType::FUNCTION_TRACE;
+    } else {
+        m_trace.header.traceType = TraceType::GENERIC_TRACE;
+    }
+}
+
+void TraceRecorder::recordTraceFooter() {
+    // トレース統計情報を計算
+    m_trace.footer.instructionCount = m_trace.instructions.size();
+    m_trace.footer.guardCount = m_trace.guards.size();
+    m_trace.footer.valueCount = m_trace.values.size();
+    m_trace.footer.sideExitCount = m_trace.sideExits.size();
+    m_trace.footer.functionEntryCount = m_trace.functionEntries.size();
+    m_trace.footer.duration = m_trace.endTimestamp - m_trace.startTimestamp;
+    
+    // ループトレースの場合、ループの反復回数を記録
+    if (m_trace.header.traceType == TraceType::LOOP_TRACE) {
+        int loopIterations = 0;
+        for (const auto& event : m_trace.events) {
+            if (event.type == TraceEventType::LOOP_ENTRY) {
+                loopIterations++;
+            }
+        }
+        m_trace.footer.loopIterations = loopIterations;
+    }
+}
+
+std::unique_ptr<IRFunction> TraceRecorder::convertTraceToIR() const {
+    // IRビルダーを作成
+    IRBuilder builder;
+    
+    // トレース命令を順番にIR命令に変換
+    for (const auto& instr : m_trace.instructions) {
+        // 入力値のベクトルを構築
+        std::vector<int64_t> args;
+        for (ValueId input : instr.inputs) {
+            args.push_back(static_cast<int64_t>(input));
+        }
+        
+        // 対応するIR命令を追加
+        builder.addInstruction(instr.opcode, args, static_cast<int64_t>(instr.output));
+    }
+    
+    // ガード命令を追加
+    for (const auto& guard : m_trace.guards) {
+        // ガードタイプに応じた命令を生成
+        IROpcode guardOpcode;
+        switch (guard.type) {
+            case GuardType::TYPE_GUARD:
+                guardOpcode = IROpcode::GUARD_TYPE;
+                break;
+            case GuardType::VALUE_GUARD:
+                guardOpcode = IROpcode::GUARD_VALUE;
+                break;
+            case GuardType::SHAPE_GUARD:
+                guardOpcode = IROpcode::GUARD_SHAPE;
+                break;
+            case GuardType::NULL_GUARD:
+                guardOpcode = IROpcode::GUARD_NULL;
+                break;
+            case GuardType::UNDEFINED_GUARD:
+                guardOpcode = IROpcode::GUARD_UNDEFINED;
+                break;
+            case GuardType::INTEGER_GUARD:
+                guardOpcode = IROpcode::GUARD_INTEGER;
+                break;
+            default:
+                guardOpcode = IROpcode::GUARD_GENERIC;
+        }
+        
+        // ガード命令を追加
+        builder.addInstruction(guardOpcode, { static_cast<int64_t>(guard.valueId) });
+    }
+    
+    // IR関数を生成して返す
+    std::string funcName = "trace_" + std::to_string(m_trace.header.traceId);
+    IRFunction* func = builder.buildFunction(funcName);
+    
+    return std::unique_ptr<IRFunction>(func);
+}
+
+uint32_t TraceRecorder::getCurrentThreadId() {
+    // 現在のスレッドIDを取得
+    return static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
+
+uint64_t TraceRecorder::generateTraceId() {
+    // ユニークなトレースIDを生成
+    static std::atomic<uint64_t> nextTraceId(1);
+    return nextTraceId++;
+}
+
+// 新しい並列処理機能実装
+void TraceRecorder::optimizeTraceParallel(Trace* trace) {
+    if (!trace) return;
+    
+    // 各最適化フェーズを並列実行
+    std::vector<std::unique_ptr<OptimizationPhase>> phases;
+    phases.push_back(std::make_unique<RedundantGuardElimination>());
+    phases.push_back(std::make_unique<CommonSubexpressionElimination>());
+    phases.push_back(std::make_unique<DeadCodeElimination>());
+    phases.push_back(std::make_unique<LoopInvariantCodeMotion>());
+    phases.push_back(std::make_unique<InstructionCombiner>());
+    phases.push_back(std::make_unique<LoadStoreOptimizer>());
+    phases.push_back(std::make_unique<VectorizationOptimizer>());
+    phases.push_back(std::make_unique<TypeSpecializer>());
+    
+    // 並列実行用データ構造
+    struct OptimizationResult {
+        std::vector<std::unique_ptr<TraceNode>> newNodes;
+        bool changed = false;
+    };
+    
+    std::vector<OptimizationResult> results(phases.size());
+    
+    // 複数スレッドで各最適化を並列に実行
+    #pragma omp parallel for
+    for (size_t i = 0; i < phases.size(); ++i) {
+        results[i].changed = phases[i]->optimize(trace, results[i].newNodes);
+    }
+    
+    // 結果をマージ
+    bool changed = false;
+    for (auto& result : results) {
+        if (result.changed) {
+            changed = true;
+            // 新しいノードの追加
+            for (auto& node : result.newNodes) {
+                trace->addNode(std::move(node));
+            }
+        }
+    }
+    
+    // 最適化が適用された場合は依存関係を更新
+    if (changed) {
+        updateNodeDependencies(trace);
+    }
+}
+
+// 先進的型推論とSpecialization
+void TraceRecorder::inferTypesAdvanced(Trace* trace) {
+    if (!trace) return;
+    
+    // 型情報伝播のための処理順序を決定
+    std::vector<TraceNode*> processingOrder;
+    buildProcessingOrder(trace, processingOrder);
+    
+    // 型情報の収集と伝播
+    std::unordered_map<TraceNode*, profiler::TypeInfo> typeInfoMap;
+    for (auto* node : processingOrder) {
+        if (node->isOperation()) {
+            auto* op = node->as<OperationNode>();
+            
+            // 入力ノードの型情報を取得
+            std::vector<profiler::TypeInfo> inputTypes;
+            for (auto* input : op->getInputs()) {
+                auto it = typeInfoMap.find(input);
+                if (it != typeInfoMap.end()) {
+                    inputTypes.push_back(it->second);
+                } else {
+                    // デフォルトの型情報
+                    inputTypes.push_back(profiler::TypeInfo());
+                }
+            }
+            
+            // 操作に基づいて型推論
+            profiler::TypeInfo resultType = inferTypeForOperation(op->getOpKind(), inputTypes);
+            
+            // 型情報記録
+            typeInfoMap[node] = resultType;
+            op->setTypeInfo(resultType);
+            
+            // 型情報に基づく最適化ヒント
+            if (op->getOpKind() == OpKind::Add && 
+                resultType.isProbablyNumber() && resultType.getPreciseType() == runtime::ValueType::Number) {
+                // 数値加算として専用パスを使用
+                op->setOptimizationHint(OptimizationHint::UseSpecializedPath);
+            } else if (op->getOpKind() == OpKind::PropertyLoad && 
+                      resultType.isProbablyObject()) {
+                // プロパティアクセスの最適化
+                op->setOptimizationHint(OptimizationHint::InlinePropertyAccess);
+            }
+            
+            // SIMD加速のヒント
+            if (canVectorize(op, resultType)) {
+                op->setOptimizationHint(OptimizationHint::Vectorize);
+            }
+        } else if (node->isGuard()) {
+            auto* guard = node->as<GuardNode>();
+            auto* input = guard->getInput();
+            
+            // 入力の型情報を利用して不要なガードを検出
+            auto it = typeInfoMap.find(input);
+            if (it != typeInfoMap.end() && 
+                guard->getGuardKind() == GuardKind::TypeCheck) {
+                const auto& inputType = it->second;
+                if (inputType.isPrecise() && 
+                    inputType.getPreciseType() == guard->getExpectedType()) {
+                    // このガードは冗長なので除去候補としてマーク
+                    guard->setOptimizationHint(OptimizationHint::EliminateRedundantGuard);
+                }
+            }
+            
+            // 型情報の更新（ガード通過後はより精密な型情報になる）
+            if (guard->getGuardKind() == GuardKind::TypeCheck) {
+                profiler::TypeInfo refinedType;
+                refinedType.setPreciseType(guard->getExpectedType());
+                typeInfoMap[node] = refinedType;
+            }
+        }
+    }
+}
+
+// 超高速メタトレースバイナリコード生成
+void TraceRecorder::generateOptimizedMachineCode(Trace* trace, const std::vector<profiler::TypeInfo>& typeInfos) {
+    if (!trace || !trace->isLoop()) return;
+    
+    // IR生成
+    IRGraph irGraph;
+    std::unordered_map<TraceNode*, IRNode*> nodeMapping;
+    
+    // ノードをIRに変換
+    for (const auto& node : trace->getNodes()) {
+        IRNode* irNode = node->toIRNode(&irGraph);
+        nodeMapping[node.get()] = irNode;
+    }
+    
+    // ノード間の依存関係を構築
+    for (const auto& node : trace->getNodes()) {
+        if (node->isOperation()) {
+            auto* op = node->as<OperationNode>();
+            IRNode* irNode = nodeMapping[node.get()];
+            
+            for (auto* input : op->getInputs()) {
+                auto it = nodeMapping.find(input);
+                if (it != nodeMapping.end()) {
+                    irNode->addDependency(it->second);
+                }
+            }
+        } else if (node->isGuard()) {
+            auto* guard = node->as<GuardNode>();
+            IRNode* irNode = nodeMapping[node.get()];
+            
+            auto* input = guard->getInput();
+            auto it = nodeMapping.find(input);
+            if (it != nodeMapping.end()) {
+                irNode->addDependency(it->second);
+            }
+        }
+    }
+    
+    // IR最適化
+    irGraph.optimize(OptimizationLevel::Ultra);
+    
+    // 最適化済みIRからバイナリコード生成
+    auto nativeCodegen = m_jit.getBackend()->createNativeCodeGenerator(m_jit.getCPUFeatures());
+    std::vector<uint8_t> machineCode;
+    bool success = nativeCodegen->generate(irGraph, machineCode);
+    
+    if (success) {
+        // 生成したコードをトレースにアタッチ
+        trace->setNativeCode(std::move(machineCode));
+        trace->setCompiled(true);
+        
+        // 実行統計の初期化
+        trace->resetExecutionStats();
+    }
+}
+
+// AIベース超最適化
+void TraceRecorder::applyAIOptimization(Trace* trace) {
+    if (!trace) return;
+    
+    // ループのパターンを認識
+    if (trace->isLoop()) {
+        auto* loopHead = trace->getLoopHead();
+        auto* loopEnd = trace->getLoopEnd();
+        
+        if (loopHead && loopEnd) {
+            // ループ内のノードを収集
+            std::vector<TraceNode*> loopNodes;
+            bool inLoop = false;
+            for (const auto& node : trace->getNodes()) {
+                if (node.get() == loopHead) {
+                    inLoop = true;
+                }
+                if (inLoop) {
+                    loopNodes.push_back(node.get());
+                }
+                if (node.get() == loopEnd) {
+                    inLoop = false;
+                }
+            }
+            
+            // パターン認識と変換
+            PatternMatcher matcher;
+            if (matcher.detectArrayPattern(loopNodes)) {
+                // 配列操作パターンを検出
+                replaceWithVectorizedArrayOp(trace, loopNodes, matcher.getPatternInfo());
+            } else if (matcher.detectStringPattern(loopNodes)) {
+                // 文字列操作パターンを検出
+                replaceWithOptimizedStringOp(trace, loopNodes, matcher.getPatternInfo());
+            } else if (matcher.detectMathPattern(loopNodes)) {
+                // 数学計算パターンを検出
+                replaceWithIntrinsicMathOp(trace, loopNodes, matcher.getPatternInfo());
+            }
+        }
+    }
+}
+
+// AIが検出したパターンに基づく最適化をサポートするクラス
+class PatternMatcher {
+public:
+    enum class PatternType {
+        None,
+        ArrayIteration,
+        ArrayMap,
+        ArrayReduce,
+        StringConcat,
+        StringSearch,
+        MathComputation
+    };
+    
+    struct PatternInfo {
+        PatternType type;
+        std::vector<TraceNode*> keyNodes;
+        std::unordered_map<std::string, TraceNode*> namedNodes;
+        std::string description;
+    };
+    
+    PatternMatcher() {}
+    
+    bool detectArrayPattern(const std::vector<TraceNode*>& nodes) {
+        // 配列イテレーションパターンの検出
+        if (matchArrayIteration(nodes)) {
+            m_patternInfo.type = PatternType::ArrayIteration;
+            m_patternInfo.description = "Array iteration pattern";
+            return true;
+        } else if (matchArrayMap(nodes)) {
+            m_patternInfo.type = PatternType::ArrayMap;
+            m_patternInfo.description = "Array map pattern";
+            return true;
+        } else if (matchArrayReduce(nodes)) {
+            m_patternInfo.type = PatternType::ArrayReduce;
+            m_patternInfo.description = "Array reduce pattern";
+            return true;
+        }
+        return false;
+    }
+    
+    bool detectStringPattern(const std::vector<TraceNode*>& nodes) {
+        // 文字列操作パターンの検出
+        if (matchStringConcat(nodes)) {
+            m_patternInfo.type = PatternType::StringConcat;
+            m_patternInfo.description = "String concatenation pattern";
+            return true;
+        } else if (matchStringSearch(nodes)) {
+            m_patternInfo.type = PatternType::StringSearch;
+            m_patternInfo.description = "String search pattern";
+            return true;
+        }
+        return false;
+    }
+    
+    bool detectMathPattern(const std::vector<TraceNode*>& nodes) {
+        // 数学計算パターンの検出
+        if (matchMathComputation(nodes)) {
+            m_patternInfo.type = PatternType::MathComputation;
+            m_patternInfo.description = "Mathematical computation pattern";
+            return true;
+        }
+        return false;
+    }
+    
+    const PatternInfo& getPatternInfo() const {
+        return m_patternInfo;
+    }
+    
+private:

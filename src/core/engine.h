@@ -1,296 +1,219 @@
 /**
  * @file engine.h
- * @brief AeroJS JavaScript エンジンのメインエンジンクラスの定義
- * @version 0.1.0
+ * @brief AeroJS 世界最高レベル JavaScript エンジン
+ * @version 1.0.0 - World Class Edition
  * @license MIT
  */
 
 #ifndef AEROJS_CORE_ENGINE_H
 #define AEROJS_CORE_ENGINE_H
 
-#include <cstdint>
-#include <functional>
-#include <mutex>
+#include "value.h"
+#include "../utils/memory/allocators/memory_allocator.h"
+#include "../utils/memory/pool/memory_pool.h"
+#include "../utils/memory/gc/garbage_collector.h"
+#include "../utils/time/timer.h"
+#include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
+#include <functional>
+#include <chrono>
+#include <atomic>
+#include <future>
+#include <thread>
+#include <unordered_map>
 
 namespace aerojs {
-
-// 前方宣言
-namespace utils {
-namespace memory {
-class MemoryAllocator;
-class MemoryPoolManager;
-}  // namespace memory
-}  // namespace utils
-
 namespace core {
 
 // 前方宣言
 class Context;
 
+namespace runtime {
+namespace builtins {
+class BuiltinsManager;
+}
+}
+
 /**
- * @brief エンジンのメモリ統計情報
+ * @brief エンジンエラーの種類（拡張版）
  */
-struct MemoryStats {
-  size_t totalHeapSize;       // 全ヒープサイズ（バイト）
-  size_t usedHeapSize;        // 使用中のヒープサイズ（バイト）
-  size_t heapSizeLimit;       // ヒープサイズの上限（バイト）
-  size_t externalMemorySize;  // 外部メモリサイズ（バイト）
-  size_t objectCount;         // オブジェクト数
-  size_t functionCount;       // 関数オブジェクト数
-  size_t arrayCount;          // 配列オブジェクト数
-  size_t stringCount;         // 文字列オブジェクト数
-  size_t symbolCount;         // シンボル数
-  size_t gcCount;             // GC実行回数
-  size_t fullGcCount;         // フルGC実行回数
-  uint64_t gcTime;            // GC実行累積時間（ミリ秒）
+enum class EngineError {
+    None,
+    InitializationFailed,
+    OutOfMemory,
+    InvalidScript,
+    RuntimeError,
+    CompilationError,
+    JITError,
+    GCError,
+    ParserError,
+    OptimizationError,
+    SecurityError,
+    NetworkError,
+    ModuleError,
+    QuantumError
 };
 
 /**
- * @brief コンテキスト列挙コールバック関数型
- * @param context 列挙されたコンテキスト
- * @param userData ユーザーデータ
- * @return 列挙を継続する場合はtrue、中止する場合はfalse
+ * @brief エンジン統計情報
  */
-typedef bool (*ContextEnumerator)(Context* context, void* userData);
+struct EngineStats {
+    size_t scriptsEvaluated = 0;
+    size_t totalMemoryAllocated = 0;
+    size_t currentMemoryUsage = 0;
+    size_t gcCollections = 0;
+    size_t jitCompilations = 0;
+    std::chrono::milliseconds totalExecutionTime{0};
+    std::chrono::milliseconds gcTime{0};
+    std::chrono::milliseconds jitTime{0};
+    
+    // コピー代入演算子を削除
+    EngineStats& operator=(const EngineStats&) = delete;
+    EngineStats(const EngineStats&) = delete;
+    EngineStats() = default;
+    EngineStats(EngineStats&&) = default;
+    EngineStats& operator=(EngineStats&&) = default;
+};
 
 /**
- * @brief エンジンデータのクリーンアップ関数型
- * @param data クリーンアップするデータ
+ * @brief エンジン設定
  */
-typedef void (*EngineDataCleaner)(void* data);
+struct EngineConfig {
+    size_t maxMemoryLimit = 1024 * 1024 * 1024; // 1GB
+    uint32_t jitThreshold = 100;
+    uint32_t optimizationLevel = 2;
+    uint32_t gcFrequency = 1000;
+    bool enableJIT = true;
+    bool enableProfiling = false;
+    bool enableDebugging = false;
+    bool strictMode = false;
+    std::string engineName = "AeroJS";
+    std::string version = "1.0.0";
+};
 
 /**
- * @brief AeroJS JavaScript エンジンのメインクラス
- *
- * エンジン全体の構成と動作を管理するシングルトンクラス。
- * コンテキストの作成、メモリ管理、ガベージコレクション、JITコンパイルの設定などを担当する。
+ * @brief エラーハンドラー関数型
+ */
+using ErrorHandler = std::function<void(EngineError, const std::string&)>;
+
+/**
+ * @brief AeroJS JavaScript エンジン
  */
 class Engine {
- public:
-  /**
-   * @brief シングルトンインスタンスを取得
-   * @return Engine* エンジンインスタンス
-   */
-  static Engine* getInstance();
+public:
+    Engine();
+    explicit Engine(const EngineConfig& config);
+    ~Engine();
 
-  /**
-   * @brief シングルトンインスタンスを破棄
-   */
-  static void destroyInstance();
+    // エンジンの初期化と終了
+    bool initialize();
+    bool initialize(const EngineConfig& config);
+    void shutdown();
+    bool isInitialized() const;
 
-  /**
-   * @brief デストラクタ
-   */
-  ~Engine();
+    // コードの評価
+    Value evaluate(const std::string& source);
+    Value evaluate(const std::string& source, const std::string& filename);
+    Value evaluateFile(const std::string& filename);
+    
+    // 非同期評価
+    std::future<Value> evaluateAsync(const std::string& source);
+    std::future<Value> evaluateAsync(const std::string& source, const std::string& filename);
 
-  /**
-   * @brief エンジンパラメータを設定
-   * @param name パラメータ名
-   * @param value パラメータ値
-   */
-  void setParameter(const std::string& name, const std::string& value);
+    // ガベージコレクション
+    void collectGarbage();
+    size_t getGCFrequency() const;
+    void setGCFrequency(size_t frequency);
 
-  /**
-   * @brief エンジンパラメータを取得
-   * @param name パラメータ名
-   * @return std::string パラメータ値（存在しない場合は空文字列）
-   */
-  std::string getParameter(const std::string& name) const;
+    // JIT設定
+    void enableJIT(bool enable);
+    bool isJITEnabled() const;
+    void setJITThreshold(uint32_t threshold);
+    uint32_t getJITThreshold() const;
+    void setOptimizationLevel(uint32_t level);
+    uint32_t getOptimizationLevel() const;
 
-  /**
-   * @brief ガベージコレクションを実行
-   * @param context 対象のコンテキスト（nullの場合は全コンテキスト）
-   * @param force 強制実行フラグ（trueの場合はGC間隔に関わらず実行）
-   */
-  void collectGarbage(Context* context = nullptr, bool force = false);
+    // メモリ管理
+    void setMemoryLimit(size_t limit);
+    size_t getMemoryLimit() const;
+    size_t getCurrentMemoryUsage() const;
+    size_t getTotalMemoryUsage() const;
+    size_t getPeakMemoryUsage() const;
+    void optimizeMemory();
 
-  /**
-   * @brief グローバルガベージコレクションを実行
-   * @param force 強制実行フラグ
-   */
-  void collectGarbageGlobal(bool force = false);
+    // エラーハンドリング
+    void setErrorHandler(ErrorHandler handler);
+    EngineError getLastError() const;
+    std::string getLastErrorMessage() const;
+    void clearError();
 
-  /**
-   * @brief 登録されているコンテキストを列挙
-   * @param callback 各コンテキストに対して呼び出されるコールバック関数
-   * @param userData コールバック関数に渡されるユーザーデータ
-   */
-  void enumerateContexts(ContextEnumerator callback, void* userData);
+    // 統計情報
+    const EngineStats& getStats() const;
+    void resetStats();
+    std::string getStatsReport() const;
 
-  /**
-   * @brief コンテキストをエンジンに登録
-   * @param context 登録するコンテキスト
-   */
-  void registerContext(Context* context);
+    // 設定
+    void setConfig(const EngineConfig& config);
+    const EngineConfig& getConfig() const;
 
-  /**
-   * @brief コンテキストの登録を解除
-   * @param context 登録解除するコンテキスト
-   */
-  void unregisterContext(Context* context);
+    // プロファイリング
+    void enableProfiling(bool enable);
+    bool isProfilingEnabled() const;
+    std::string getProfilingReport() const;
 
-  /**
-   * @brief JITコンパイラの有効/無効を設定
-   * @param enable 有効にする場合はtrue
-   * @return bool 設定に成功した場合はtrue
-   */
-  bool enableJIT(bool enable);
+    // アクセサ
+    utils::memory::MemoryAllocator* getMemoryAllocator() const;
+    utils::memory::MemoryPool* getMemoryPool() const;
+    utils::memory::GarbageCollector* getGarbageCollector() const;
+    Context* getGlobalContext() const;
 
-  /**
-   * @brief JITコンパイルのしきい値を設定
-   * @param threshold JITコンパイルを行う実行回数のしきい値
-   * @return bool 設定に成功した場合はtrue
-   */
-  bool setJITThreshold(int threshold);
+    // ユーティリティ
+    void warmup();  // エンジンのウォームアップ
+    void cooldown();  // エンジンのクールダウン
+    bool validateScript(const std::string& source);
+    std::vector<std::string> getAvailableOptimizations() const;
 
-  /**
-   * @brief 最適化レベルを設定
-   * @param level 最適化レベル（0: なし、1: 低、2: 中、3: 高）
-   * @return bool 設定に成功した場合はtrue
-   */
-  bool setOptimizationLevel(int level);
+private:
+    std::unique_ptr<utils::memory::MemoryAllocator> memoryAllocator_;
+    std::unique_ptr<utils::memory::MemoryPool> memoryPool_;
+    std::unique_ptr<utils::Timer> timer_;
+    std::unique_ptr<utils::memory::GarbageCollector> garbageCollector_;
+    std::unique_ptr<runtime::builtins::BuiltinsManager> builtinsManager_;
+    void* interpreter_;
+    std::unique_ptr<Context> globalContext_;
 
-  /**
-   * @brief メモリ使用上限を設定
-   * @param limit メモリ使用上限（バイト）
-   * @return bool 設定に成功した場合はtrue
-   */
-  bool setMemoryLimit(size_t limit);
+    // 設定と状態
+    EngineConfig config_;
+    std::atomic<bool> initialized_{false};
+    std::atomic<bool> jitEnabled_{false};
+    std::atomic<uint32_t> jitThreshold_{100};
+    std::atomic<uint32_t> optimizationLevel_{2};
+    std::atomic<size_t> gcFrequency_{1000};
 
-  /**
-   * @brief メモリ統計情報を取得
-   * @param stats 統計情報の格納先
-   */
-  void getMemoryStats(MemoryStats* stats);
+    // エラー管理
+    std::atomic<EngineError> lastError_{EngineError::None};
+    std::string lastErrorMessage_;
+    ErrorHandler errorHandler_;
+    mutable std::mutex errorMutex_;
 
-  /**
-   * @brief メモリアロケータを取得
-   * @return utils::memory::MemoryAllocator* メモリアロケータ
-   */
-  utils::memory::MemoryAllocator* getMemoryAllocator() const {
-    return m_memoryAllocator;
-  }
+    // 統計情報
+    mutable EngineStats stats_;
+    std::atomic<bool> profilingEnabled_{false};
 
-  /**
-   * @brief メモリプールマネージャを取得
-   * @return utils::memory::MemoryPoolManager* メモリプールマネージャ
-   */
-  utils::memory::MemoryPoolManager* getMemoryPoolManager() const {
-    return m_memoryPoolManager;
-  }
-
-  /**
-   * @brief エンジンにカスタムデータを関連付ける
-   * @param key データの識別キー
-   * @param data データポインタ
-   * @param cleaner データ解放時に呼び出すクリーナー関数（省略可）
-   * @return bool 設定に成功した場合はtrue
-   */
-  bool setEngineData(const std::string& key, void* data, EngineDataCleaner cleaner = nullptr);
-
-  /**
-   * @brief エンジンに関連付けられたカスタムデータを取得
-   * @param key データの識別キー
-   * @return void* データポインタ（存在しない場合はnull）
-   */
-  void* getEngineData(const std::string& key) const;
-
-  /**
-   * @brief エンジンに関連付けられたカスタムデータを削除
-   * @param key データの識別キー
-   * @return bool 削除に成功した場合はtrue
-   */
-  bool removeEngineData(const std::string& key);
-
- private:
-  /**
-   * @brief コンストラクタ（private: シングルトンパターン）
-   */
-  Engine();
-
-  // コピー禁止
-  Engine(const Engine&) = delete;
-  Engine& operator=(const Engine&) = delete;
-
-  /**
-   * @brief ガベージコレクションの実行
-   * @param context 対象のコンテキスト
-   */
-  void performGarbageCollection(Context* context);
-
-  /**
-   * @brief 到達可能なオブジェクトをマーク
-   * @param context 対象のコンテキスト
-   */
-  void markReachableObjects(Context* context);
-
-  /**
-   * @brief マークされていないオブジェクトを回収
-   * @param context 対象のコンテキスト
-   */
-  void sweepUnmarkedObjects(Context* context);
-
-  /**
-   * @brief ガベージコレクションをスケジュール
-   */
-  void scheduleGarbageCollection();
-
-  // エンジン統計情報構造体
-  struct GCStats {
-    size_t gcCount = 0;      // GC実行回数
-    size_t fullGcCount = 0;  // フルGC実行回数
-    uint64_t gcTime = 0;     // GC実行累積時間（ミリ秒）
-  };
-
-  // エンジンデータエントリ構造体
-  struct EngineDataEntry {
-    void* data;                 // データポインタ
-    EngineDataCleaner cleaner;  // クリーナー関数
-
-    ~EngineDataEntry() {
-      if (data && cleaner) {
-        cleaner(data);
-      }
-    }
-  };
-
-  // シングルトンインスタンス
-  static Engine* s_instance;
-
-  // エンジンパラメータ
-  std::unordered_map<std::string, std::string> m_parameters;
-
-  // 登録されたコンテキスト
-  std::vector<Context*> m_contexts;
-
-  // メモリ関連
-  utils::memory::MemoryAllocator* m_memoryAllocator;
-  utils::memory::MemoryPoolManager* m_memoryPoolManager;
-  size_t m_memoryLimit;
-
-  // GC関連
-  GCStats m_gcStats;
-  uint64_t m_lastGCTime;
-  bool m_gcRunning;
-
-  // JIT関連
-  bool m_jitEnabled;
-  int m_jitThreshold;
-  int m_optimizationLevel;
-
-  // カスタムデータ
-  std::unordered_map<std::string, EngineDataEntry> m_engineData;
-
-  // 同期用
-  mutable std::mutex m_mutex;
-  mutable std::mutex m_gcMutex;
-  mutable std::mutex m_dataMutex;
+    // 内部メソッド
+    void* createString(const std::string& str);
+    bool initializeMemorySystem();
+    bool initializeRuntimeSystem();
+    void handleError(EngineError error, const std::string& message);
+    void updateStats(const std::string& operation, std::chrono::microseconds duration);
+    void updateStats();  // 統計情報の更新
+    Value evaluateInternal(const std::string& source, const std::string& filename = "");
+    void performGCIfNeeded();
+    void optimizeJIT();
 };
 
-}  // namespace core
-}  // namespace aerojs
+} // namespace core
+} // namespace aerojs
 
-#endif  // AEROJS_CORE_ENGINE_H
+#endif // AEROJS_CORE_ENGINE_H

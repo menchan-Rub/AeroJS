@@ -22,6 +22,7 @@
 #include <shared_mutex>
 #include <immintrin.h>  // AVX/AVX2/AVX-512
 #include <arm_neon.h>   // ARM NEON (条件付きインクルード)
+#include "../jit/backend/riscv/riscv_vector.h"  // RISC-V Vector Extension
 
 namespace aero {
 namespace transformers {
@@ -64,6 +65,15 @@ SIMDSupportInfo HardwareCapabilityDetector::detectSIMDSupport() {
     // SVEサポートの検出（プラットフォーム依存）
 #ifdef __ARM_FEATURE_SVE
     info.sve = true;
+#endif
+
+#elif defined(__riscv)
+    // RISC-Vアーキテクチャの場合
+#ifdef __riscv_v
+    info.riscv_v = true;  // Vector Extensions
+#endif
+#ifdef __riscv_p
+    info.riscv_p = true;  // Packed SIMD Extensions
 #endif
 
 #elif defined(__wasm__) || defined(__EMSCRIPTEN__)
@@ -704,6 +714,416 @@ bool ArrayOptimizationTransformer::canParallelize(ast::NodePtr node, const std::
     // 並列処理可能か判定するロジック
     // 配列サイズ、処理の依存関係などを考慮
     return false; // プロトタイプでは並列化無効
+}
+
+// RISC-Vベクトル拡張用のコード生成
+TransformResult ArrayOptimizationTransformer::generateRISCVVectorCode(ast::NodePtr node, TypedArrayKind kind) {
+    // 最適化可能かの判断
+    if (!node || kind == TypedArrayKind::NotTypedArray) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // ハードウェアサポートのチェック
+    if (!m_hardwareSettings.simd.riscv_v) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // ノードが配列操作か確認
+    ArrayOperationInfo opInfo = identifyArrayOperation(node);
+    if (opInfo.type == ArrayOperationType::Unknown) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // 型情報に基づいて適切なベクトル幅を選択
+    int elementSize = getTypedArrayElementSize(kind);
+    aerojs::core::RVVectorSEW sew;
+    
+    switch (elementSize) {
+        case 1:
+            sew = aerojs::core::RVVectorSEW::SEW_8;
+            break;
+        case 2:
+            sew = aerojs::core::RVVectorSEW::SEW_16;
+            break;
+        case 4:
+            sew = aerojs::core::RVVectorSEW::SEW_32;
+            break;
+        case 8:
+            sew = aerojs::core::RVVectorSEW::SEW_64;
+            break;
+        default:
+            // サポートされていない要素サイズ
+            return TransformResult::Unchanged(node);
+    }
+    
+    // 操作タイプに応じた最適化
+    switch (opInfo.type) {
+        case ArrayOperationType::Map:
+        case ArrayOperationType::Filter:
+        case ArrayOperationType::Reduce:
+        case ArrayOperationType::ForEach:
+            // 配列メソッドの最適化
+            return optimizeArrayMethodRISCV(node, ArrayOperationTypeToString(opInfo.type));
+        
+        case ArrayOperationType::Join:
+        case ArrayOperationType::IndexAccess:
+        case ArrayOperationType::Fill:
+        case ArrayOperationType::CopyWithin:
+            // その他の配列操作の最適化
+            return optimizeRISCVArrayOperation(node, opInfo.type, kind);
+            
+        default:
+            return TransformResult::Unchanged(node);
+    }
+}
+
+// JavaScript配列メソッドのRISC-Vベクトル最適化
+TransformResult ArrayOptimizationTransformer::optimizeArrayMethodRISCV(ast::NodePtr node, const std::string& methodName) {
+    // ノードがCallExpressionかどうかを確認
+    if (!node || node->getType() != ast::NodeType::CallExpression) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // メソッド名を確認
+    auto callExpr = static_cast<ast::CallExpression*>(node.get());
+    auto callee = callExpr->getCallee();
+    
+    if (callee->getType() != ast::NodeType::MemberExpression) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    auto memberExpr = static_cast<ast::MemberExpression*>(callee.get());
+    auto property = memberExpr->getProperty();
+    
+    if (property->getType() != ast::NodeType::Identifier) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    auto identifier = static_cast<ast::Identifier*>(property.get());
+    std::string actualMethodName = identifier->getName();
+    
+    if (actualMethodName != methodName) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // コールバック関数を取得
+    if (callExpr->getArguments().empty()) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    auto callback = callExpr->getArguments()[0];
+    
+    // コールバックが最適化可能かチェック
+    if (!isOptimizableCallback(callback)) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // 配列オブジェクトを取得
+    auto arrayObj = memberExpr->getObject();
+    std::string arrayName = getArrayVariableName(arrayObj);
+    
+    if (arrayName.empty() || !isArrayVariable(arrayName)) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // 配列情報を取得
+    auto arrayInfo = m_arrayInfoMap[arrayName];
+    
+    // RISC-Vベクトル操作のためのコード生成
+    int operationType = 0;
+    if (methodName == "map") {
+        operationType = 0;
+    } else if (methodName == "filter") {
+        operationType = 1;
+    } else if (methodName == "reduce") {
+        operationType = 2;
+    } else if (methodName == "forEach") {
+        operationType = 3;
+    } else {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // RISC-V用の最適化コードを生成
+    ast::NodePtr optimizedNode = createRISCVVectorizedCode(arrayObj, callback, operationType, arrayInfo);
+    
+    if (!optimizedNode) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    return TransformResult::Modified(optimizedNode);
+}
+
+// RISC-V Vector Extensions向けの最適化コード生成
+ast::NodePtr ArrayOptimizationTransformer::createRISCVVectorizedCode(
+    ast::NodePtr arrayObj, 
+    ast::NodePtr callback, 
+    int operationType,
+    const ArrayInfo& arrayInfo) {
+    
+    // AST構築用のファクトリー
+    ast::ASTFactory factory;
+    
+    // 一時変数を作成
+    std::string tempArrayVar = "_temp_array_" + std::to_string(m_tempCounter++);
+    std::string resultArrayVar = "_result_array_" + std::to_string(m_tempCounter++);
+    
+    // 準備フェーズ - 配列のセットアップ
+    ast::NodePtr prepareCode = factory.createCallExpression(
+        factory.createIdentifier("__aerojs_riscv_prepare"),
+        {
+            arrayObj->clone(),
+            factory.createLiteral(static_cast<int>(operationType)),
+            callback->clone(),
+            factory.createLiteral(static_cast<int>(arrayInfo.elementByteSize)),
+            factory.createLiteral(arrayInfo.isTypedArray)
+        }
+    );
+    
+    // 準備結果の変数
+    ast::NodePtr prepareResultVar = factory.createVariableDeclaration(
+        "const",
+        {
+            factory.createVariableDeclarator(
+                factory.createIdentifier(tempArrayVar),
+                prepareCode
+            )
+        }
+    );
+    
+    // 実行フェーズ - RISC-VベクトルコードでJSArrayOperation実行
+    ast::NodePtr executeCode = factory.createCallExpression(
+        factory.createIdentifier("__aerojs_riscv_execute"),
+        {
+            factory.createIdentifier(tempArrayVar),
+            factory.createMemberExpression(
+                factory.createIdentifier(tempArrayVar),
+                factory.createIdentifier("length"),
+                false
+            )
+        }
+    );
+    
+    // 実行結果の変数
+    ast::NodePtr executeResultVar = factory.createVariableDeclaration(
+        "const",
+        {
+            factory.createVariableDeclarator(
+                factory.createIdentifier(resultArrayVar),
+                executeCode
+            )
+        }
+    );
+    
+    // 最終フェーズ - 結果を整える
+    ast::NodePtr finalizeCode = factory.createCallExpression(
+        factory.createIdentifier("__aerojs_riscv_finalize"),
+        {
+            factory.createIdentifier(resultArrayVar)
+        }
+    );
+    
+    // すべての処理を一つのブロックにまとめる
+    std::vector<ast::NodePtr> statements = {
+        prepareResultVar,
+        executeResultVar,
+        factory.createReturnStatement(finalizeCode)
+    };
+    
+    // 即時実行関数式（IIFE）を作成して戻す
+    ast::NodePtr iife = factory.createCallExpression(
+        factory.createArrowFunctionExpression(
+            {},  // パラメータなし
+            factory.createBlockStatement(statements),
+            false  // 式本体
+        ),
+        {}  // 引数なし
+    );
+    
+    return iife;
+}
+
+// RISC-V Vector用の配列操作最適化
+TransformResult ArrayOptimizationTransformer::optimizeRISCVArrayOperation(
+    ast::NodePtr node, 
+    ArrayOperationType opType, 
+    TypedArrayKind kind) {
+    
+    // 各操作タイプ・配列特化最適化の本格実装
+    switch (opType) {
+      case ArrayOperationType::Map:
+        return optimizeArrayMap(node, kind);
+      case ArrayOperationType::Reduce:
+        return optimizeArrayReduce(node, kind);
+      case ArrayOperationType::Filter:
+        return optimizeArrayFilter(node, kind);
+      default:
+        return TransformResult::Unchanged(node);
+    }
+}
+
+// SIMDストラテジの選択
+SIMDStrategy ArrayOptimizationTransformer::selectSIMDStrategy(
+    TypedArrayKind kind, 
+    ArrayOperationType opType, 
+    const SIMDSupportInfo& simdInfo) {
+    
+    // 操作タイプがSIMD化可能かどうかをチェック
+    bool isSIMDCompatibleOp = (
+        opType == ArrayOperationType::Map ||
+        opType == ArrayOperationType::Filter ||
+        opType == ArrayOperationType::Reduce ||
+        opType == ArrayOperationType::ForEach ||
+        opType == ArrayOperationType::Fill ||
+        opType == ArrayOperationType::CopyWithin
+    );
+    
+    if (!isSIMDCompatibleOp) {
+        return SIMDStrategy::None;
+    }
+    
+    // 型付き配列の種類に基づくチェック
+    bool isFloatingPoint = (
+        kind == TypedArrayKind::Float32Array ||
+        kind == TypedArrayKind::Float64Array
+    );
+    
+    bool isInteger = (
+        kind == TypedArrayKind::Int8Array ||
+        kind == TypedArrayKind::Uint8Array ||
+        kind == TypedArrayKind::Uint8ClampedArray ||
+        kind == TypedArrayKind::Int16Array ||
+        kind == TypedArrayKind::Uint16Array ||
+        kind == TypedArrayKind::Int32Array ||
+        kind == TypedArrayKind::Uint32Array
+    );
+    
+    // BigInt型の配列は現在サポート外
+    bool isBigInt = (
+        kind == TypedArrayKind::BigInt64Array ||
+        kind == TypedArrayKind::BigUint64Array
+    );
+    
+    if (isBigInt) {
+        return SIMDStrategy::None;
+    }
+    
+    // ハードウェアごとの最適な戦略を選択
+    
+    // RISC-V Vector Extensionsのサポートを確認
+    if (simdInfo.riscv_v) {
+        // RISC-Vがサポートされている場合は最適な戦略
+        return SIMDStrategy::HardwareSpecific;
+    }
+    
+    // AVX/AVX2のサポートを確認
+    else if (simdInfo.avx2) {
+        // AVX2がサポートされている場合は最適な戦略
+        return SIMDStrategy::HardwareSpecific;
+    }
+    
+    // SSE/SSE2のサポートを確認
+    else if (simdInfo.sse2) {
+        // SSE2がサポートされている場合
+        if (isFloatingPoint) {
+            return SIMDStrategy::HardwareSpecific;
+        } else {
+            return SIMDStrategy::FallbackAware;
+        }
+    }
+    
+    // ARM NEONのサポートを確認
+    else if (simdInfo.neon) {
+        // NEONがサポートされている場合は最適な戦略
+        return SIMDStrategy::HardwareSpecific;
+    }
+    
+    // ARM SVEのサポートを確認
+    else if (simdInfo.sve) {
+        // SVEがサポートされている場合は最適な戦略
+        return SIMDStrategy::HardwareSpecific;
+    }
+    
+    // WebAssembly SIMDのサポートを確認
+    else if (simdInfo.wasm_simd) {
+        // WebAssembly SIMDがサポートされている場合
+        return SIMDStrategy::HardwareSpecific;
+    }
+    
+    // ハードウェアSIMDサポートがない場合
+    return SIMDStrategy::Auto;
+}
+
+// 配列操作の種類をグレードアップする
+TransformResult ArrayOptimizationTransformer::upgradeArrayOperation(ast::NodePtr node, const std::string& arrayName) {
+    if (!node) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    // 配列操作を識別
+    ArrayOperationInfo opInfo = identifyArrayOperation(node);
+    
+    // 配列情報を取得
+    auto it = m_arrayInfoMap.find(arrayName);
+    if (it == m_arrayInfoMap.end()) {
+        return TransformResult::Unchanged(node);
+    }
+    
+    const ArrayInfo& arrayInfo = it->second;
+    
+    // 型付き配列の最適化
+    if (arrayInfo.isTypedArray) {
+        // SIMDサポート情報を取得
+        SIMDSupportInfo simdInfo = HardwareCapabilityDetector::detectSIMDSupport();
+        
+        // SIMDストラテジを選択
+        SIMDStrategy strategy = selectSIMDStrategy(
+            arrayInfo.typedArrayKind, 
+            opInfo.type, 
+            simdInfo
+        );
+        
+        if (strategy == SIMDStrategy::HardwareSpecific) {
+            // ハードウェア固有の実装を選択
+            if (simdInfo.riscv_v) {
+                // RISC-V Vector Extensionsによる最適化
+                return generateRISCVVectorCode(node, arrayInfo.typedArrayKind);
+            }
+            else if (simdInfo.avx2) {
+                // AVX2による最適化
+                return generateAVX2Code(node, arrayInfo.typedArrayKind);
+            }
+            else if (simdInfo.neon) {
+                // ARM NEONによる最適化
+                return generateNEONCode(node, arrayInfo.typedArrayKind);
+            }
+        }
+    }
+    
+    // グレードアップできなかった場合はそのまま返す
+    return TransformResult::Unchanged(node);
+}
+
+// 配列操作タイプごとのRISC-V最適化
+void ArrayOptimizationTransformer::OptimizeArrayOp(ArrayOpType opType, ArrayOpContext& ctx) {
+    switch (opType) {
+        case ArrayOpType::Map:
+            OptimizeMap(ctx);
+            break;
+        case ArrayOpType::Filter:
+            OptimizeFilter(ctx);
+            break;
+        case ArrayOpType::Reduce:
+            OptimizeReduce(ctx);
+            break;
+        case ArrayOpType::Fill:
+            OptimizeFill(ctx);
+            break;
+        case ArrayOpType::Copy:
+            OptimizeCopy(ctx);
+            break;
+        default:
+            throw std::runtime_error("Unknown array op type");
+    }
 }
 
 } // namespace transformers

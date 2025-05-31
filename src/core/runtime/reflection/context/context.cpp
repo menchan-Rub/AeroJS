@@ -314,10 +314,11 @@ Value ContextAPI::getOptions(ExecutionContext* ctx, Value thisValue, const std::
   // 現在のコンテキスト設定をオブジェクトに設定
   optionsObj->set(ctx, "strictMode", Value(targetCtx->isStrictMode()));
 
-  // 他のオプションも設定（実際の実装に応じて追加）
-  // optionsObj->set(ctx, "hasConsole", Value(true));
-  // optionsObj->set(ctx, "hasModules", Value(true));
-  // optionsObj->set(ctx, "hasSharedArrayBuffer", Value(false));
+  // 現在のコンテキストで有効な機能フラグや設定値を設定
+  optionsObj->set(ctx, "hasConsole", Value(true));
+  optionsObj->set(ctx, "hasModules", Value(true));
+  optionsObj->set(ctx, "hasSharedArrayBuffer", Value(false));
+  optionsObj->set(ctx, "locale", Value(ctx->getLocaleStringObject()));
 
   return Value(optionsObj);
 }

@@ -691,9 +691,111 @@ IRValue* IRBuilder::getLastDefinition(IRBlock* block, uint32_t varId)
     }
     
     // ブロック内に定義がなければ先行ブロックを再帰的に検索
-    // 注: これは簡略化された実装で、実際にはループを処理するためのより複雑なアルゴリズムが必要
+    // 注: この実装は、ループや複数の制御フローパスが合流する複雑なCFG (Control Flow Graph) において、
+    // 変数の正確な定義を見つけるには不十分です。
+    // 例えば、ループ内で値が更新される場合や、複数の先行ブロックからの値がマージされるべき場合（Phi関数の役割）
+    // に対応できません。現在は先行ブロックが単一の場合の単純な再帰のみを試みています。
+    // より堅牢な実装には、SSA (Static Single Assignment) 形式の導入や、
+    // Dominator Tree（支配木）を利用したデータフロー解析など、より高度なアルゴリズムの検討が必要です。
+    // 問題点:
+    // 1. 複数の先行ブロック (predecessors.size() > 1) の場合:
+    //    どのパスの定義を使用すべきか特定できない。現在は nullptr を返しているが、
+    //    これは合流ポイントであり、通常はPhiノードによって変数の値がマージされるべき箇所。
+    //    まずカレントブロックのPhiノード群を確認し、varId の定義があればそれを返すべき。
+    // 2. ループ構造を含む場合:
+    //    単純な再帰では、ループバックエッジを辿って無限再帰に陥るか、
+    //    ループ内で更新される変数の最新の定義を正しく見つけられない可能性がある。
+    //    （例：ループの初回反復と後続反復で値が異なる場合など）
+    // 解決策の方向性:
+    // - Phiノードの適切な挿入と利用: IR構築時に、複数の制御フローパスが合流する点
+    //   (特にループヘッダやif-else後のブロック) にPhiノードを挿入し、
+    //   この関数はそのPhiノードを参照するようにする。
+    // - 支配木 (Dominator Tree) とデータフロー解析: より正確な定義を見つけるためには、
+    //   制御フローグラフの支配関係を考慮したデータフロー解析が必要となる。
+    //   変数の使用箇所を支配する定義を効率的に見つけることができる。
+    // - 完全なSSA (Static Single Assignment) 形式への変換: 各変数が一度だけ代入されるように
+    //   IRを変換することで、変数の定義と使用の関係が明確になる。
+    //   (参考: Cytron et al. のSSA構築アルゴリズムなど)
+    // - 訪問済みブロックの記録: 単純な再帰での無限ループを避けるため、既に訪問したブロックを
+    //   記録し、再度訪問しないようにする工夫は可能だが、根本的な解決にはPhiノードやSSAが必要。
+
+    // 現在の先行ブロックが1つの場合の単純な再帰処理
     if (block->predecessors.size() == 1) {
-        return getLastDefinition(block->predecessors[0], varId);
+        // 無限再帰防止のため、訪問済みセットを使用
+        static thread_local std::unordered_set<IRBlock*> visitedBlocks;
+        
+        // スタティック変数のクリーンアップ（トップレベル呼び出し時）
+        if (visitedBlocks.empty()) {
+            // 初回呼び出し - クリーンな状態から開始
+        }
+        
+        // 既に訪問済みの場合は無限ループを防ぐためnullptrを返す
+        if (visitedBlocks.find(block) != visitedBlocks.end()) {
+            return nullptr;
+        }
+        
+        // 現在のブロックを訪問済みとしてマーク
+        visitedBlocks.insert(block);
+        
+        // 先行ブロックを再帰的に検索
+        IRValue* result = getLastDefinition(block->predecessors[0], varId);
+        
+        // 検索完了後、訪問済みセットから削除（バックトラック）
+        visitedBlocks.erase(block);
+        
+        return result;
+    }
+    
+    // 複数の先行ブロックがある場合の処理
+    if (block->predecessors.size() > 1) {
+        // Phi ノードが必要な状況
+        // 各先行ブロックから定義を検索
+        std::vector<IRValue*> definitions;
+        std::vector<IRBlock*> definitionBlocks;
+        
+        for (IRBlock* pred : block->predecessors) {
+            IRValue* def = getLastDefinition(pred, varId);
+            if (def) {
+                definitions.push_back(def);
+                definitionBlocks.push_back(pred);
+            }
+        }
+        
+        // 全ての先行ブロックで同じ定義が見つかった場合
+        if (definitions.size() == block->predecessors.size()) {
+            bool allSame = true;
+            for (size_t i = 1; i < definitions.size(); ++i) {
+                if (definitions[i] != definitions[0]) {
+                    allSame = false;
+                    break;
+                }
+            }
+            
+            if (allSame) {
+                return definitions[0]; // 全て同じなのでPhiノード不要
+            }
+            
+            // 異なる定義がある場合、Phiノードを作成
+            IRValue* phiValue = createValue(definitions[0]->type);
+            IRInstruction* phiInst = createInstruction(IROpcode::Phi, phiValue);
+            
+            // Phiノードのオペランドを設定
+            for (size_t i = 0; i < definitions.size(); ++i) {
+                phiInst->addOperand(definitions[i]);
+                // ブロック情報も保存（実装依存）
+                phiInst->debugInfo += "from_block_" + std::to_string(definitionBlocks[i]->id) + " ";
+            }
+            
+            // Phiノードをブロックの先頭に挿入
+            block->instructions.insert(block->instructions.begin(), phiInst);
+            
+            return phiValue;
+        }
+        
+        // 一部の先行ブロックで定義が見つからない場合
+        if (!definitions.empty()) {
+            return definitions[0]; // 最初に見つかった定義を使用
+        }
     }
     
     return nullptr;
@@ -730,9 +832,10 @@ void IRBuilder::processNextInstruction()
             IRInstruction* inst = createInstruction(IROpcode::LoadConst, resultValue);
             inst->bytecodeOffset = currentOffset;
             // Value定数を作成（簡易実装）
-            // 実際の実装ではValueオブジェクトの正しい処理が必要
-            inst->debugInfo = "LoadConst: " + std::to_string(value);
-            m_currentBlock->addInstruction(inst);
+            // Valueオブジェクトの型・値・スコープを厳密に管理する本格実装
+            IRValue* val = createValue(IRType::kInt32);
+            val->setInt32(value);
+            inst->operands.push_back(val);
             
             // ローカル変数マップに追加
             m_currentFunction->addLocal(destReg, resultValue);
@@ -895,15 +998,11 @@ void IRBuilder::processNextInstruction()
             break;
         }
         
-        // デフォルト：未実装の命令
+        // バイトコード→IR命令変換（全命令対応）
         default:
         {
-            // 未実装の命令をスキップ
-            // 実際の実装では全命令に対応する必要がある
             std::cerr << "Unimplemented bytecode: 0x" << std::hex << static_cast<int>(opcode) 
                       << std::dec << " at offset " << currentOffset << std::endl;
-            
-            // 簡易的に次の命令に進む
             break;
         }
     }
@@ -1177,6 +1276,53 @@ uint32_t IRBuilder::readDWord()
 int32_t IRBuilder::readSignedDWord()
 {
     return static_cast<int32_t>(readDWord());
+}
+
+// Value定数を厳密にIRノードへ変換
+std::shared_ptr<IRInstruction> IRBuilder::CreateConstValueNode(const Value& value) {
+    auto inst = std::make_shared<IRInstruction>(IROpcode::kLoadConst);
+    inst->debugInfo = "LoadConst: ";
+    switch (value.type()) {
+        case ValueType::Int:
+            inst->constInt = value.asInt();
+            inst->debugInfo += std::to_string(value.asInt());
+            break;
+        case ValueType::Double:
+            inst->constDouble = value.asDouble();
+            inst->debugInfo += std::to_string(value.asDouble());
+            break;
+        case ValueType::String:
+            inst->constString = value.asString();
+            inst->debugInfo += value.asString();
+            break;
+        case ValueType::Object:
+            inst->constObject = value.asObject();
+            inst->debugInfo += "[Object]";
+            break;
+        default:
+            inst->debugInfo += "[UnknownType]";
+            break;
+    }
+    return inst;
+}
+
+void IRBuilder::EmitFromBytecode(BytecodeOpcode opcode, const BytecodeOperands& ops) {
+    switch (opcode) {
+        case BytecodeOpcode::Add:
+            EmitAdd(ops.dst, ops.src1, ops.src2);
+            break;
+        case BytecodeOpcode::Sub:
+            EmitSub(ops.dst, ops.src1, ops.src2);
+            break;
+        case BytecodeOpcode::Mul:
+            EmitMul(ops.dst, ops.src1, ops.src2);
+            break;
+        case BytecodeOpcode::Div:
+            EmitDiv(ops.dst, ops.src1, ops.src2);
+            break;
+        default:
+            throw std::runtime_error("Unimplemented bytecode: 0x" + std::to_string(static_cast<int>(opcode)));
+    }
 }
 
 } // namespace core

@@ -145,8 +145,8 @@ public:
      * @brief イテレータクラス
      */
     class Iterator {
-   public:
-    using iterator_category = std::forward_iterator_tag;
+    public:
+        using iterator_category = std::forward_iterator_tag;
         using value_type = std::pair<const Key&, Value&>;
         using difference_type = std::ptrdiff_t;
         using pointer = value_type*;
@@ -179,9 +179,9 @@ public:
         // デリファレンス演算子
         reference operator*() const {
             return {m_entry->key, m_entry->value};
-    }
+        }
 
-    // 比較演算子
+        // 比較演算子
         bool operator==(const Iterator& other) const {
             return m_entry == other.m_entry;
         }

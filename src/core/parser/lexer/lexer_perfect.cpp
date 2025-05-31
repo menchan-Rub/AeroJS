@@ -1018,9 +1018,7 @@ void Lexer::ScanMultiLineComment() {
       if (c != '_') cleanNumStr += c;
     }
     
-    // BigIntオブジェクトを作成（実際の実装ではBigIntクラスを使用）
-    // ここでは仮にstd::stringで代用
-    return Token(TokenType::BIGINT_LITERAL, std::move(rawValue), cleanNumStr, startLoc);
+            // BigIntオブジェクトを作成    BigInt* bigIntObj = BigInt::fromString(cleanNumStr.c_str(), radix);    if (!bigIntObj) {      ReportError("BigIntリテラルの解析に失敗しました", startLoc);      return Token(TokenType::ERROR, std::move(rawValue), "0", startLoc);    }        // BigIntオブジェクトをヒープに保存し、GC管理下に置く    Value bigIntValue = Value::createBigInt(bigIntObj);        // GCマーキングで回収されないようにルートとして登録    ParserGCRoot* root = ParserGCManager::getInstance()->createRoot(bigIntValue);        // トークンを作成してBigInt値とGCルート情報を設定    Token token(TokenType::BIGINT_LITERAL, std::move(rawValue), cleanNumStr, startLoc);    token.setValue(bigIntValue);    token.setGCRoot(root);        return token;
   } else {
     // 通常の数値の処理
     std::string cleanNumStr;
@@ -1802,17 +1800,7 @@ void Lexer::ScanMultiLineComment() {
   if (CurrentChar() == '[') {
     Advance(); // '[' をスキップ
     
-    // 配列要素の型を読み取る
-    // 実際の実装では再帰的に型を解析する必要がある
-    
-    if (CurrentChar() == ']') {
-      Advance(); // ']' をスキップ
-      return Token(TokenType::TS_ARRAY_TYPE, "[]", nullptr, startLoc);
-    }
-  }
-  
-  // ユニオン型（A | B）またはインターセクション型（A & B）
-  // 実際の実装では再帰的に型を解析する必要がある
+            // 配列要素の型を読み取る    TypeNode* elementType = ParseTypeExpression();        if (!elementType) {      ReportError("配列型定義に要素型が必要です", startLoc);      return Token(TokenType::ERROR, "[]", nullptr, startLoc);    }        if (CurrentChar() == ']') {      Advance(); // ']' をスキップ            // 配列型を表すASTノードを作成      ArrayTypeNode* arrayType = m_typeNodeAllocator.AllocateNode<ArrayTypeNode>();      arrayType->elementType = elementType;            Token token(TokenType::TS_ARRAY_TYPE, "[]", nullptr, startLoc);      token.setTypeNode(arrayType);      return token;    } else {      ReportError("配列型定義の閉じ括弧 ']' がありません", startLoc);      return Token(TokenType::ERROR, "[", nullptr, startLoc);    }  }    // ユニオン型（A | B）またはインターセクション型（A & B）  if (startChar == '|' || startChar == '&') {    bool isUnion = (startChar == '|');    char operatorChar = Advance(); // '|' または '&' をスキップ        // 2回連続の演算子かチェック (|| または &&)    if (CurrentChar() == operatorChar) {      // 論理演算子なのでTypeScriptの型ではない      m_stream->SetPosition(m_stream->Position() - 1); // 巻き戻す      return ScanPunctuator();    }        // 前のトークンを取得して左側の型にする    if (m_previousTypeNode == nullptr) {      ReportError(        std::string(isUnion ? "ユニオン" : "インターセクション") +         "型の左側の型式がありません",         startLoc      );      return Token(TokenType::ERROR, std::string(1, operatorChar), nullptr, startLoc);    }        // 右側の型を解析    TypeNode* rightType = ParseTypeExpression();    if (!rightType) {      ReportError(        std::string(isUnion ? "ユニオン" : "インターセクション") +         "型の右側の型式がありません",         GetCurrentLocation()      );      return Token(TokenType::ERROR, std::string(1, operatorChar), nullptr, startLoc);    }        // ユニオン/インターセクション型を表すASTノードを作成    CompositeTypeNode* compositeType = m_typeNodeAllocator.AllocateNode<CompositeTypeNode>();    compositeType->isUnion = isUnion;    compositeType->leftType = m_previousTypeNode;    compositeType->rightType = rightType;        TokenType tokenType = isUnion ? TokenType::TS_UNION_TYPE : TokenType::TS_INTERSECTION_TYPE;    Token token(tokenType, std::string(1, operatorChar), nullptr, startLoc);    token.setTypeNode(compositeType);        m_previousTypeNode = compositeType; // 次の型式の左側になる可能性がある    return token;  }
   
   // オブジェクト型（{ prop: Type }）
   if (CurrentChar() == '{') {
@@ -1841,10 +1829,7 @@ void Lexer::ScanMultiLineComment() {
   Advance(); // '<' をスキップ
   m_tsContext.angleStack.push(TsAngleType::GenericParams);
   
-  // ジェネリックパラメータの内容を解析
-  // 実際の実装では再帰的にパラメータを解析する必要がある
-  
-  return Token(TokenType::TS_GENERIC_PARAMS_START, "<", nullptr, startLoc);
+      // ジェネリックパラメータの内容を解析  GenericParamsNode* paramsNode = m_typeNodeAllocator.AllocateNode<GenericParamsNode>();    // パラメータリストを解析  bool firstParam = true;  while (!IsAtEnd() && CurrentChar() != '>') {    // カンマをスキップ（最初のパラメータ以外）    if (!firstParam) {      if (CurrentChar() != ',') {        ReportError("ジェネリックパラメータリストの区切り文字 ',' が必要です", GetCurrentLocation());        break;      }      Advance(); // ',' をスキップ      SkipWhitespace();    }        // パラメータ名を読み取る    std::string paramName;    if (!IsIdentifierStart(CurrentChar())) {      ReportError("ジェネリックパラメータ名が必要です", GetCurrentLocation());      break;    }        // 識別子を読み取る    while (!IsAtEnd() && IsIdentifierPart(CurrentChar())) {      paramName += Advance();    }    SkipWhitespace();        // 制約部分を読み取る（extends ...）    TypeNode* constraint = nullptr;    if (!IsAtEnd() && CurrentChar() == 'e' &&         PeekChar(1) == 'x' && PeekChar(2) == 't' && PeekChar(3) == 'e' &&         PeekChar(4) == 'n' && PeekChar(5) == 'd' && PeekChar(6) == 's') {      // "extends" キーワードをスキップ      for (int i = 0; i < 7; i++) Advance();      SkipWhitespace();            // 制約型を解析      constraint = ParseTypeExpression();      if (!constraint) {        ReportError("extends 後に型式が必要です", GetCurrentLocation());        break;      }      SkipWhitespace();    }        // デフォルト型を読み取る（= ...）    TypeNode* defaultType = nullptr;    if (!IsAtEnd() && CurrentChar() == '=') {      Advance(); // '=' をスキップ      SkipWhitespace();            // デフォルト型を解析      defaultType = ParseTypeExpression();      if (!defaultType) {        ReportError("デフォルト型の指定が必要です", GetCurrentLocation());        break;      }      SkipWhitespace();    }        // パラメータノードを作成    GenericParamNode* paramNode = m_typeNodeAllocator.AllocateNode<GenericParamNode>();    paramNode->name = paramName;    paramNode->constraint = constraint;    paramNode->defaultType = defaultType;        // パラメータリストに追加    paramsNode->params.push_back(paramNode);        firstParam = false;  }    // 閉じ山括弧をチェック  if (IsAtEnd() || CurrentChar() != '>') {    ReportError("ジェネリックパラメータリストの終了 '>' が必要です", GetCurrentLocation());  } else {    Advance(); // '>' をスキップ  }    Token token(TokenType::TS_GENERIC_PARAMS_START, "<", nullptr, startLoc);  token.setTypeNode(paramsNode);  return token;
 }
 
 [[nodiscard]] Token Lexer::ScanTypeAssertion(const SourceLocation& startLoc) {

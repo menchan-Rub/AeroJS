@@ -65,6 +65,8 @@ struct SIMDSupportInfo {
   bool neon = false;       // ARM NEON
   bool sve = false;        // ARM SVE (Scalable Vector Extension)
   bool wasm_simd = false;  // WebAssembly SIMD
+  bool riscv_v = false;    // RISC-V Vector Extension (RVV)
+  bool riscv_p = false;    // RISC-V DSP Extension (P)
 };
 
 /**
@@ -348,6 +350,22 @@ class ArrayOptimizationTransformer : public Transformer {
    * @param alignment アライメント値（バイト単位、16、32、64など）
    */
   void enableMemoryAlignmentOptimization(bool enable, int alignment = 16);
+
+  /**
+   * @brief RISC-Vベクトル拡張用のコード生成
+   * @param node 対象ノード
+   * @param kind 型付き配列の種類
+   * @return 変換結果
+   */
+  TransformResult generateRISCVVectorCode(ast::NodePtr node, TypedArrayKind kind);
+  
+  /**
+   * @brief JavaScript配列メソッドのRISC-Vベクトル最適化
+   * @param node 対象ノード 
+   * @param methodName メソッド名 (map, filter, reduce, forEach)
+   * @return 変換結果
+   */
+  TransformResult optimizeArrayMethodRISCV(ast::NodePtr node, const std::string& methodName);
 
  protected:
   /**

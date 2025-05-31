@@ -1,175 +1,141 @@
-cmake_minimum_required(VERSION 3.14)
-project(AeroJSTests)
+cmake_minimum_required(VERSION 3.24)
 
-# GoogleTestをダウンロードしてビルドする
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-)
-FetchContent_MakeAvailable(googletest)
+# テストライブラリの設定
+find_package(GTest QUIET)
+if(NOT GTest_FOUND)
+    # Google Testが見つからない場合は、FetchContentで取得
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/03597a01ee50f33f9142a332e68d798063b2dee5.zip
+    )
+    # Windows用の設定
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+endif()
 
-# 共通設定
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# コア機能テスト
-add_executable(
-  core_value_tests
-  core/runtime/values/value_test.cpp
-  core/runtime/values/symbol_test.cpp
-)
-
-# JIT基本機能テスト
-add_executable(
-  jit_compiler_tests
-  jit/jit_compiler_test.cpp
+# テスト用のインクルードディレクトリ
+include_directories(
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/tests
 )
 
-# 最適化JITテスト
-add_executable(
-  optimizing_jit_tests
-  jit/optimizing_jit_test.cpp
+# コアテスト
+add_executable(test_core
+    core/test_engine.cpp
+    core/test_context.cpp
+    core/test_value.cpp
 )
 
-# IRグラフテスト
-add_executable(
-  ir_graph_tests
-  jit/ir/ir_graph_test.cpp
+target_link_libraries(test_core
+    PRIVATE
+    AeroJSCore
+    gtest_main
+    gtest
 )
 
-# 型プロファイルテスト
-add_executable(
-  type_info_tests
-  jit/profiler/type_info_test.cpp
+# メモリ管理テスト
+add_executable(test_memory
+    core/test_memory_allocator.cpp
+    core/test_memory_pool.cpp
+    core/test_garbage_collector.cpp
 )
 
-# メタトレーシングJITテスト
-add_executable(
-  metatracing_jit_tests
-  jit/metatracing/trace_recorder_test.cpp
+target_link_libraries(test_memory
+    PRIVATE
+    AeroJSCore
+    gtest_main
+    gtest
 )
 
-# 統合テスト
-add_executable(
-  integration_tests
-  integration/engine_integration_test.cpp
+# ユーティリティテスト
+add_executable(test_utils
+    utils/test_timer.cpp
+    utils/test_containers.cpp
+)
+
+target_link_libraries(test_utils
+    PRIVATE
+    AeroJSCore
+    gtest_main
+    gtest
 )
 
 # パフォーマンステスト
-add_executable(
-  performance_tests
-  performance/jit_performance_test.cpp
-  performance/value_performance_test.cpp
+add_executable(test_performance
+    performance/benchmark_engine.cpp
+    performance/benchmark_memory.cpp
+    performance/benchmark_gc.cpp
 )
 
-# リンクするライブラリを指定
-target_link_libraries(
-  core_value_tests
-  GTest::gtest_main
-  AeroJSCore
+target_link_libraries(test_performance
+    PRIVATE
+    AeroJSCore
+    gtest_main
+    gtest
 )
 
-target_link_libraries(
-  jit_compiler_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
+# 統合テスト
+add_executable(test_integration
+    integration/test_full_engine.cpp
+    integration/test_javascript_execution.cpp
 )
 
-target_link_libraries(
-  optimizing_jit_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
+target_link_libraries(test_integration
+    PRIVATE
+    AeroJSCore
+    gtest_main
+    gtest
 )
 
-target_link_libraries(
-  ir_graph_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
-)
+# テストの登録
+add_test(NAME CoreTests COMMAND test_core)
+add_test(NAME MemoryTests COMMAND test_memory)
+add_test(NAME UtilsTests COMMAND test_utils)
+add_test(NAME PerformanceTests COMMAND test_performance)
+add_test(NAME IntegrationTests COMMAND test_integration)
 
-target_link_libraries(
-  type_info_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
-)
+# テストのプロパティ設定
+set_tests_properties(CoreTests PROPERTIES TIMEOUT 30)
+set_tests_properties(MemoryTests PROPERTIES TIMEOUT 60)
+set_tests_properties(UtilsTests PROPERTIES TIMEOUT 30)
+set_tests_properties(PerformanceTests PROPERTIES TIMEOUT 120)
+set_tests_properties(IntegrationTests PROPERTIES TIMEOUT 180)
 
-target_link_libraries(
-  metatracing_jit_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
-)
-
-target_link_libraries(
-  integration_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
-)
-
-target_link_libraries(
-  performance_tests
-  GTest::gtest_main
-  AeroJSCore
-  AeroJSJIT
-)
-
-# テスト自動発見
-include(GoogleTest)
-gtest_discover_tests(core_value_tests)
-gtest_discover_tests(jit_compiler_tests)
-gtest_discover_tests(optimizing_jit_tests)
-gtest_discover_tests(ir_graph_tests)
-gtest_discover_tests(type_info_tests)
-gtest_discover_tests(metatracing_jit_tests)
-gtest_discover_tests(integration_tests)
-gtest_discover_tests(performance_tests)
-
-# カスタムターゲット: すべてのテスト実行
-add_custom_target(run_all_tests
-  COMMAND core_value_tests
-  COMMAND jit_compiler_tests
-  COMMAND optimizing_jit_tests
-  COMMAND ir_graph_tests
-  COMMAND type_info_tests
-  COMMAND metatracing_jit_tests
-  COMMAND integration_tests
-  COMMAND performance_tests
-  DEPENDS 
-    core_value_tests
-    jit_compiler_tests
-    optimizing_jit_tests
-    ir_graph_tests
-    type_info_tests
-    metatracing_jit_tests
-    integration_tests
-    performance_tests
-  COMMENT "Run all tests in sequence"
-)
-
-# テストカバレッジ設定（オプション）
-option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
-if(ENABLE_COVERAGE)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # GCCまたはClangでカバレッジを有効化
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+# カバレッジ設定（GCC/Clangの場合）
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
+    target_compile_options(test_core PRIVATE --coverage)
+    target_link_options(test_core PRIVATE --coverage)
     
-    # カバレッジレポート生成用のターゲット
-    find_program(GCOVR_PATH gcovr)
-    if(GCOVR_PATH)
-      add_custom_target(coverage
-        COMMAND ${GCOVR_PATH} --xml-pretty --exclude-unreachable-branches --print-summary -o coverage.xml --root ${CMAKE_SOURCE_DIR}
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Generating coverage report"
-        DEPENDS run_all_tests
-      )
-    endif()
-  endif()
-endif() 
+    target_compile_options(test_memory PRIVATE --coverage)
+    target_link_options(test_memory PRIVATE --coverage)
+    
+    target_compile_options(test_utils PRIVATE --coverage)
+    target_link_options(test_utils PRIVATE --coverage)
+endif()
+
+# カスタムテストターゲット
+add_custom_target(run_tests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS test_core test_memory test_utils test_performance test_integration
+    COMMENT "Running all tests"
+)
+
+# メモリリークチェック用ターゲット（Valgrind）
+find_program(VALGRIND_PROGRAM valgrind)
+if(VALGRIND_PROGRAM)
+    add_custom_target(test_memcheck
+        COMMAND ${VALGRIND_PROGRAM} --tool=memcheck --leak-check=full --show-leak-kinds=all 
+                --track-origins=yes --verbose $<TARGET_FILE:test_core>
+        DEPENDS test_core
+        COMMENT "Running memory leak check"
+    )
+endif()
+
+# ベンチマーク用ターゲット
+add_custom_target(benchmark
+    COMMAND $<TARGET_FILE:test_performance>
+    DEPENDS test_performance
+    COMMENT "Running performance benchmarks"
+) 

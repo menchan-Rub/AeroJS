@@ -1,337 +1,220 @@
-#pragma once
+/**
+ * @file riscv_code_generator.h
+ * @brief RISC-V コード生成器
+ * 
+ * このファイルは、RISC-Vアーキテクチャ向けのコード生成器を定義します。
+ * 機械語命令の生成、レジスタ管理、最適化を担当します。
+ * 
+ * @author AeroJS Team
+ * @version 1.0.0
+ * @copyright MIT License
+ */
 
-#include <cstdint>
+#ifndef AEROJS_RISCV_CODE_GENERATOR_H
+#define AEROJS_RISCV_CODE_GENERATOR_H
+
+#include "../../ir/ir_instruction.h"
+#include "../../ir/ir_function.h"
+#include "../../../context.h"
 #include <vector>
 #include <unordered_map>
 #include <memory>
-#include <string>
-#include <bitset>
-#include <functional>
-#include <array>
-
-#include "../../ir/ir.h"
-#include "../../ir/ir_instruction.h"
 
 namespace aerojs {
 namespace core {
+namespace riscv {
 
-// RISC-V ISA拡張フラグ
-enum class RiscVFeature : uint32_t {
-    I           = 1 << 0,   // 基本整数命令セット (必須)
-    M           = 1 << 1,   // 整数乗除算
-    A           = 1 << 2,   // アトミック命令
-    F           = 1 << 3,   // 単精度浮動小数点
-    D           = 1 << 4,   // 倍精度浮動小数点
-    G           = 1 << 5,   // IMAFD（汎用ISA）
-    C           = 1 << 6,   // 圧縮命令
-    B           = 1 << 7,   // ビット操作拡張
-    V           = 1 << 8,   // ベクトル拡張
-    P           = 1 << 9,   // パックド-SIMD拡張
-    J           = 1 << 10,  // 動的言語向け拡張
-    Zicbom      = 1 << 11,  // キャッシュブロック操作
-    Zicsr       = 1 << 12,  // 制御・状態レジスタ
-    Zifencei    = 1 << 13,  // 命令フェンス
-    Zihintpause = 1 << 14,  // ポーズヒント
-    Zba         = 1 << 15,  // アドレス操作拡張
-    Zbb         = 1 << 16,  // 基本ビット操作
-    Zbc         = 1 << 17,  // キャリーレス演算
-    Zbs         = 1 << 18,  // シングルビット操作
-    K           = 1 << 19,  // 暗号化拡張
-    H           = 1 << 20,  // ハイパーバイザ拡張
-    N           = 1 << 21,  // ユーザーレベル割り込み
-    S           = 1 << 22,  // スーパーバイザモード
-    Zfh         = 1 << 23,  // 半精度浮動小数点
-    Zve32x      = 1 << 24,  // ベクトル拡張（整数のみ）
-    Zve64x      = 1 << 25,  // ベクトル拡張（64ビット整数）
-    Zvl128b     = 1 << 26,  // 最小ベクトル長128ビット
-    Zvl256b     = 1 << 27,  // 最小ベクトル長256ビット
-    Zvl512b     = 1 << 28,  // 最小ベクトル長512ビット
-    Zfinx       = 1 << 29   // 整数レジスタ内浮動小数点
-};
-using RiscVFeatureSet = std::bitset<32>;
-
-// コード生成のオプション
-enum class CodeGenOptFlags : uint32_t {
-    None              = 0,
-    PeepholeOptimize  = 1 << 0,   // 命令単位の最適化
-    AlignLoops        = 1 << 1,   // ループアライメント
-    OptimizeJumps     = 1 << 2,   // ジャンプ最適化
-    CacheAware        = 1 << 3,   // キャッシュを意識したコード配置
-    VectorizeLoops    = 1 << 4,   // ループベクトル化
-    UnrollLoops       = 1 << 5,   // ループアンローリング
-    ScheduleInsts     = 1 << 6,   // 命令スケジューリング
-    FullPowerOpt      = 0xFFFFFFFF // すべての最適化
-};
-inline CodeGenOptFlags operator|(CodeGenOptFlags a, CodeGenOptFlags b) {
-    return static_cast<CodeGenOptFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-}
-inline CodeGenOptFlags operator&(CodeGenOptFlags a, CodeGenOptFlags b) {
-    return static_cast<CodeGenOptFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
-}
-
-// RISC-Vレジスタ
-enum class RiscVRegister : uint8_t {
-    zero = 0,  // ハードワイヤードゼロ
-    ra   = 1,  // リターンアドレス
-    sp   = 2,  // スタックポインタ
-    gp   = 3,  // グローバルポインタ
-    tp   = 4,  // スレッドポインタ
-    t0   = 5,  // 一時レジスタ 0
-    t1   = 6,  // 一時レジスタ 1
-    t2   = 7,  // 一時レジスタ 2
-    s0   = 8,  // 保存レジスタ 0 / フレームポインタ
-    fp   = 8,  // フレームポインタ (s0の別名)
-    s1   = 9,  // 保存レジスタ 1
-    a0   = 10, // 引数/戻り値 0
-    a1   = 11, // 引数/戻り値 1
-    a2   = 12, // 引数 2
-    a3   = 13, // 引数 3
-    a4   = 14, // 引数 4
-    a5   = 15, // 引数 5
-    a6   = 16, // 引数 6
-    a7   = 17, // 引数 7
-    s2   = 18, // 保存レジスタ 2
-    s3   = 19, // 保存レジスタ 3
-    s4   = 20, // 保存レジスタ 4
-    s5   = 21, // 保存レジスタ 5
-    s6   = 22, // 保存レジスタ 6
-    s7   = 23, // 保存レジスタ 7
-    s8   = 24, // 保存レジスタ 8
-    s9   = 25, // 保存レジスタ 9
-    s10  = 26, // 保存レジスタ 10
-    s11  = 27, // 保存レジスタ 11
-    t3   = 28, // 一時レジスタ 3
-    t4   = 29, // 一時レジスタ 4
-    t5   = 30, // 一時レジスタ 5
-    t6   = 31  // 一時レジスタ 6
+// 命令エンコーディング情報
+struct InstructionEncoding {
+    uint32_t instruction;
+    std::vector<size_t> relocations;
+    bool needsPatching;
+    
+    InstructionEncoding() : instruction(0), needsPatching(false) {}
 };
 
-// 浮動小数点レジスタ
-enum class RiscVFPRegister : uint8_t {
-    f0  = 0,   // FP一時レジスタ 0 / 戻り値
-    f1  = 1,   // FP一時レジスタ 1 / 戻り値
-    f2  = 2,   // FP一時レジスタ 2
-    f3  = 3,   // FP一時レジスタ 3
-    f4  = 4,   // FP一時レジスタ 4
-    f5  = 5,   // FP一時レジスタ 5
-    f6  = 6,   // FP一時レジスタ 6
-    f7  = 7,   // FP一時レジスタ 7
-    f8  = 8,   // FP保存レジスタ 0
-    f9  = 9,   // FP保存レジスタ 1
-    f10 = 10,  // FP引数 0
-    f11 = 11,  // FP引数 1
-    f12 = 12,  // FP引数 2
-    f13 = 13,  // FP引数 3
-    f14 = 14,  // FP引数 4
-    f15 = 15,  // FP引数 5
-    f16 = 16,  // FP引数 6
-    f17 = 17,  // FP引数 7
-    f18 = 18,  // FP保存レジスタ 2
-    f19 = 19,  // FP保存レジスタ 3
-    f20 = 20,  // FP保存レジスタ 4
-    f21 = 21,  // FP保存レジスタ 5
-    f22 = 22,  // FP保存レジスタ 6
-    f23 = 23,  // FP保存レジスタ 7
-    f24 = 24,  // FP保存レジスタ 8
-    f25 = 25,  // FP保存レジスタ 9
-    f26 = 26,  // FP保存レジスタ 10
-    f27 = 27,  // FP保存レジスタ 11
-    f28 = 28,  // FP一時レジスタ 8
-    f29 = 29,  // FP一時レジスタ 9
-    f30 = 30,  // FP一時レジスタ 10
-    f31 = 31   // FP一時レジスタ 11
+// 基本ブロック情報
+struct BasicBlock {
+    size_t startIndex;
+    size_t endIndex;
+    std::vector<size_t> predecessors;
+    std::vector<size_t> successors;
+    bool isLoopHeader;
+    size_t loopDepth;
 };
 
-// コード生成の最適化オプション
-struct RiscVJITCompileOptions {
-    CodeGenOptFlags codeGenFlags = CodeGenOptFlags::PeepholeOptimize | 
-                                   CodeGenOptFlags::AlignLoops | 
-                                   CodeGenOptFlags::OptimizeJumps;
-    bool enableSIMD = false;         // ベクトル命令を使用
-    bool enableFastMath = true;      // 高速数学関数
-    bool enableMicroarchOpt = true;  // マイクロアーキテクチャ最適化
-    bool enableLoopUnrolling = true; // ループアンローリング
-    uint8_t loopUnrollFactor = 4;    // アンローリング係数
-    bool enableGCStackMapGen = true; // GCスタックマップ生成
-    bool enableVectorization = false; // ベクトル化
-    bool enableCompressedInsts = true; // 圧縮命令の使用
-};
-
-/**
- * @brief RISC-Vアーキテクチャ向けコードジェネレータ
- * 
- * IRからRISC-Vマシンコードを生成するクラス。
- * ベクトル拡張やビット操作拡張などの最新機能に対応。
- */
-class RiscVCodeGenerator {
+// RISC-Vコード生成器クラス
+class RISCVCodeGenerator {
 public:
-    RiscVCodeGenerator();
-    explicit RiscVCodeGenerator(RiscVJITCompileOptions options);
-    ~RiscVCodeGenerator();
+    explicit RISCVCodeGenerator(Context* context);
+    ~RISCVCodeGenerator();
     
-    /**
-     * @brief コード生成を行う
-     * 
-     * @param function IR関数
-     * @param output 出力コードバッファ
-     * @return 生成が成功したかどうか
-     */
-    bool Generate(const IRFunction& function, std::vector<uint8_t>& output);
+    // コード生成メイン
+    std::vector<uint32_t> GenerateCode(const IRFunction& function);
     
-    /**
-     * @brief オプションを設定する
-     * 
-     * @param options 最適化オプション
-     */
-    void SetOptions(const RiscVJITCompileOptions& options);
+    // 命令生成
+    void EmitInstruction(const IRInstruction& instr);
+    void EmitArithmetic(IROpcode opcode, int rd, int rs1, int rs2);
+    void EmitImmediate(IROpcode opcode, int rd, int rs1, int16_t imm);
+    void EmitLoad(IRType type, int rd, int rs1, int16_t offset);
+    void EmitStore(IRType type, int rs1, int rs2, int16_t offset);
+    void EmitBranch(IRBranchType type, int rs1, int rs2, int32_t offset);
+    void EmitJump(int rd, int32_t offset);
+    void EmitCall(const std::string& functionName);
+    void EmitReturn();
     
-    /**
-     * @brief 使用するISA拡張機能を設定する
-     * 
-     * @param feature 機能フラグ
-     * @param enable 有効/無効
-     */
-    void SetFeature(RiscVFeature feature, bool enable);
+    // ベクトル命令生成
+    void EmitVectorLoad(int vd, int rs1, int16_t offset);
+    void EmitVectorStore(int vs3, int rs1, int16_t offset);
+    void EmitVectorArithmetic(VectorOpcode opcode, int vd, int vs1, int vs2);
+    void EmitVectorConfig(size_t vl, size_t vsew);
     
-    /**
-     * @brief 現在のオプションを取得する
-     */
-    const RiscVJITCompileOptions& GetOptions() const;
+    // 基本ブロック管理
+    void StartBasicBlock();
+    void EndBasicBlock();
+    size_t GetCurrentBlockIndex() const { return currentBlock_; }
     
-    /**
-     * @brief サポートされる機能を検出する
-     */
-    static RiscVFeatureSet DetectSupportedFeatures();
+    // ラベル管理
+    void DefineLabel(const std::string& label);
+    void EmitLabelReference(const std::string& label);
+    size_t GetLabelAddress(const std::string& label);
     
-    /**
-     * @brief 機能がサポートされているか確認する
-     * 
-     * @param feature 確認する機能
-     */
-    bool IsFeatureSupported(RiscVFeature feature) const;
+    // リロケーション
+    void AddRelocation(size_t instructionIndex, const std::string& symbol, int32_t addend = 0);
+    void ResolveRelocations();
     
-    // 関数をRISC-V機械語にコンパイル
-    void CompileFunction(const IRFunction& func, std::vector<uint8_t>& out) noexcept;
+    // 最適化
+    void OptimizeCode();
+    void PerformPeepholeOptimization();
+    void RemoveRedundantInstructions();
+    void OptimizeBranches();
     
-    // 即値ロード命令の生成
-    void EmitLoadImmediate(int reg, int64_t value, std::vector<uint8_t>& out) noexcept;
+    // レジスタ情報
+    void SetRegisterMapping(const std::unordered_map<IRValue, int>& mapping);
+    int GetPhysicalRegister(const IRValue& value);
     
-    // メモリロード命令の生成
-    void EmitLoadMemory(int reg, int base, int offset, std::vector<uint8_t>& out) noexcept;
+    // 統計情報
+    size_t GetInstructionCount() const { return instructions_.size(); }
+    size_t GetCodeSize() const { return instructions_.size() * sizeof(uint32_t); }
     
-    // メモリストア命令の生成
-    void EmitStoreMemory(int reg, int base, int offset, std::vector<uint8_t>& out) noexcept;
-    
-    // 浮動小数点命令の生成
-    void EmitFloatOperation(IROpcode opcode, int dest, int src1, int src2, std::vector<uint8_t>& out) noexcept;
-    
-    // ベクトル命令の生成
-    void EmitVectorOperation(IROpcode opcode, int vd, int vs1, int vs2, int vlmax, std::vector<uint8_t>& out) noexcept;
-    
-    // ベクトルロード命令の生成
-    void EmitVectorLoad(int vd, int rs, int32_t offset, int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
-    
-    // ベクトルストア命令の生成
-    void EmitVectorStore(int vs, int rs, int32_t offset, int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
-    
-    // アトミック命令の生成
-    void EmitAtomicOperation(IROpcode opcode, int dest, int src, int addr, bool acquire, bool release, std::vector<uint8_t>& out) noexcept;
-    
-    // コンパイラフェンスの生成
-    void EmitFence(bool i, bool o, bool r, bool w, std::vector<uint8_t>& out) noexcept;
-    
-    // 命令セットタイプ（拡張を含む）
-    enum class ISAExtension {
-        RV64I,      // 基本命令セット
-        RV64M,      // 整数乗除算拡張
-        RV64A,      // アトミック拡張
-        RV64F,      // 単精度浮動小数点拡張
-        RV64D,      // 倍精度浮動小数点拡張
-        RV64V       // ベクトル拡張
-    };
-    
-    // 利用可能な命令セット拡張を設定
-    void EnableExtension(ISAExtension ext, bool enable = true) noexcept {
-        extensions_[static_cast<int>(ext)] = enable;
-    }
-    
-    // 命令セット拡張が有効かどうかをチェック
-    bool IsExtensionEnabled(ISAExtension ext) const noexcept {
-        return extensions_[static_cast<int>(ext)];
-    }
-
 private:
-    // コード生成オプション
-    RiscVJITCompileOptions m_options;
+    // 内部ヘルパー
+    uint32_t EncodeRType(uint8_t opcode, uint8_t rd, uint8_t funct3, 
+                        uint8_t rs1, uint8_t rs2, uint8_t funct7);
+    uint32_t EncodeIType(uint8_t opcode, uint8_t rd, uint8_t funct3, 
+                        uint8_t rs1, int16_t imm);
+    uint32_t EncodeSType(uint8_t opcode, uint8_t funct3, uint8_t rs1, 
+                        uint8_t rs2, int16_t imm);
+    uint32_t EncodeBType(uint8_t opcode, uint8_t funct3, uint8_t rs1, 
+                        uint8_t rs2, int16_t imm);
+    uint32_t EncodeUType(uint8_t opcode, uint8_t rd, uint32_t imm);
+    uint32_t EncodeJType(uint8_t opcode, uint8_t rd, int32_t imm);
+    uint32_t EncodeVType(uint8_t opcode, uint8_t vd, uint8_t funct3,
+                        uint8_t vs1, uint8_t vs2, uint8_t vm, uint8_t funct6);
     
-    // 有効なISA拡張
-    RiscVFeatureSet m_enabledFeatures;
+    // 最適化ヘルパー
+    bool IsRedundantInstruction(size_t index);
+    bool CanMergeInstructions(size_t index1, size_t index2);
+    void ReplaceInstruction(size_t index, uint32_t newInstruction);
+    void RemoveInstruction(size_t index);
     
-    // サポートされる機能
-    RiscVFeatureSet m_supportedFeatures;
+    // 分岐最適化
+    void OptimizeConditionalBranches();
+    void OptimizeUnconditionalBranches();
+    bool CanInvertBranch(uint32_t instruction);
+    uint32_t InvertBranchCondition(uint32_t instruction);
     
-    // IR仮想レジスタからネイティブレジスタへのマッピング
-    std::unordered_map<int32_t, RiscVRegister> m_registerMapping;
-    std::unordered_map<int32_t, RiscVFPRegister> m_fpRegisterMapping;
+    // ループ最適化
+    void DetectLoops();
+    void OptimizeLoops();
+    bool IsLoopInvariant(size_t instructionIndex, size_t loopStart, size_t loopEnd);
     
-    // レジスタ割り当てを行う
-    void AllocateRegisters(const IRFunction& function);
+private:
+    Context* context_;
+    std::vector<InstructionEncoding> instructions_;
+    std::vector<BasicBlock> basicBlocks_;
+    size_t currentBlock_;
     
-    // 仮想レジスタをネイティブレジスタにマップする
-    RiscVRegister MapRegister(int32_t virtualReg);
-    RiscVFPRegister MapFPRegister(int32_t virtualReg);
+    // ラベルとシンボル
+    std::unordered_map<std::string, size_t> labels_;
+    std::unordered_map<size_t, std::string> pendingLabels_;
     
-    // 各種命令の生成メソッド
-    void EmitProlog(std::vector<uint8_t>& code);
-    void EmitEpilog(std::vector<uint8_t>& code);
-    void EmitArithmeticInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    void EmitLoadConstInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    void EmitCompareInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    void EmitJumpInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    void EmitCallInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    void EmitReturnInst(const IRInstruction& inst, std::vector<uint8_t>& code);
+    // リロケーション情報
+    struct RelocationEntry {
+        size_t instructionIndex;
+        std::string symbol;
+        int32_t addend;
+        RelocationType type;
+    };
+    std::vector<RelocationEntry> relocations_;
     
-    // ベクトル命令の生成（V拡張）
-    void EmitVectorInst(const IRInstruction& inst, std::vector<uint8_t>& code);
+    // レジスタマッピング
+    std::unordered_map<IRValue, int> registerMapping_;
     
-    // ビット操作命令の生成（B拡張）
-    void EmitBitManipInst(const IRInstruction& inst, std::vector<uint8_t>& code);
-    
-    // 命令エンコード用ヘルパーメソッド
-    uint32_t EncodeRTypeInst(uint32_t opcode, uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3, uint32_t funct7);
-    uint32_t EncodeITypeInst(uint32_t opcode, uint32_t rd, uint32_t rs1, uint32_t imm, uint32_t funct3);
-    uint32_t EncodeSTypeInst(uint32_t opcode, uint32_t rs1, uint32_t rs2, uint32_t imm, uint32_t funct3);
-    uint32_t EncodeBTypeInst(uint32_t opcode, uint32_t rs1, uint32_t rs2, uint32_t imm, uint32_t funct3);
-    uint32_t EncodeUTypeInst(uint32_t opcode, uint32_t rd, uint32_t imm);
-    uint32_t EncodeJTypeInst(uint32_t opcode, uint32_t rd, uint32_t imm);
-    
-    // 命令最適化
-    void OptimizeCode(std::vector<uint8_t>& code);
-    
-    // 利用可能な命令セット拡張
-    bool extensions_[6] = {true, true, false, false, false, false};
-    
-    // エミッタテーブルの初期化
-    void Initialize();
-    
-    // レジスタ保存
-    void SaveRegisters(std::vector<uint8_t>& out) noexcept;
-    
-    // スタックフレーム設定
-    void SetupFrame(std::vector<uint8_t>& out, int frameSize) noexcept;
-    
-    // スタックフレーム解放
-    void TearDownFrame(std::vector<uint8_t>& out, int frameSize) noexcept;
-    
-    // JITキャッシュ最適化
-    void OptimizeCodeLayout(std::vector<uint8_t>& code) noexcept;
-    
-    // 命令スケジューリング
-    void ScheduleInstructions(std::vector<IRInstruction>& instructions) noexcept;
-    
-    // ベクトル長と要素幅を設定する命令の生成
-    void EmitVectorConfiguration(int vlmax, int eew, std::vector<uint8_t>& out) noexcept;
+    // コード生成状態
+    bool inFunction_;
+    size_t currentInstructionIndex_;
+    std::vector<size_t> loopHeaders_;
+    std::vector<size_t> loopEnds_;
 };
 
+// エンコーディング定数
+namespace Opcodes {
+    constexpr uint8_t LOAD        = 0x03;
+    constexpr uint8_t LOAD_FP     = 0x07;
+    constexpr uint8_t MISC_MEM    = 0x0F;
+    constexpr uint8_t OP_IMM      = 0x13;
+    constexpr uint8_t AUIPC       = 0x17;
+    constexpr uint8_t OP_IMM_32   = 0x1B;
+    constexpr uint8_t STORE       = 0x23;
+    constexpr uint8_t STORE_FP    = 0x27;
+    constexpr uint8_t AMO         = 0x2F;
+    constexpr uint8_t OP          = 0x33;
+    constexpr uint8_t LUI         = 0x37;
+    constexpr uint8_t OP_32       = 0x3B;
+    constexpr uint8_t MADD        = 0x43;
+    constexpr uint8_t MSUB        = 0x47;
+    constexpr uint8_t NMSUB       = 0x4B;
+    constexpr uint8_t NMADD       = 0x4F;
+    constexpr uint8_t OP_FP       = 0x53;
+    constexpr uint8_t OP_V        = 0x57;
+    constexpr uint8_t BRANCH      = 0x63;
+    constexpr uint8_t JALR        = 0x67;
+    constexpr uint8_t JAL         = 0x6F;
+    constexpr uint8_t SYSTEM      = 0x73;
+}
+
+namespace Funct3 {
+    // LOAD/STORE
+    constexpr uint8_t LB = 0x0, LH = 0x1, LW = 0x2, LD = 0x3;
+    constexpr uint8_t LBU = 0x4, LHU = 0x5, LWU = 0x6;
+    constexpr uint8_t SB = 0x0, SH = 0x1, SW = 0x2, SD = 0x3;
+    
+    // OP_IMM
+    constexpr uint8_t ADDI = 0x0, SLTI = 0x2, SLTIU = 0x3;
+    constexpr uint8_t XORI = 0x4, ORI = 0x6, ANDI = 0x7;
+    constexpr uint8_t SLLI = 0x1, SRLI = 0x5, SRAI = 0x5;
+    
+    // OP
+    constexpr uint8_t ADD = 0x0, SLL = 0x1, SLT = 0x2, SLTU = 0x3;
+    constexpr uint8_t XOR = 0x4, SRL = 0x5, OR = 0x6, AND = 0x7;
+    
+    // BRANCH
+    constexpr uint8_t BEQ = 0x0, BNE = 0x1, BLT = 0x4, BGE = 0x5;
+    constexpr uint8_t BLTU = 0x6, BGEU = 0x7;
+    
+    // SYSTEM
+    constexpr uint8_t ECALL = 0x0, EBREAK = 0x0;
+}
+
+namespace Funct7 {
+    constexpr uint8_t NORMAL = 0x00;
+    constexpr uint8_t ALT    = 0x20;  // SUB, SRA等
+    constexpr uint8_t MULDIV = 0x01;  // MUL, DIV等
+}
+
+} // namespace riscv
 } // namespace core
 } // namespace aerojs
+
+#endif // AEROJS_RISCV_CODE_GENERATOR_H

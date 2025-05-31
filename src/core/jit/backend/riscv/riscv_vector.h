@@ -306,6 +306,177 @@ public:
      * @param out 出力バッファ
      */
     static void emitPostloopCode(const std::vector<IRInstruction>& loopInsts, std::vector<uint8_t>& out);
+    
+    /**
+     * @brief ベクトル数学関数 - 平方根 (VSQRT)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs2 ソースベクトルレジスタ
+     * @param vm マスク指定
+     */
+    static void emitVectorSqrt(std::vector<uint8_t>& out, int vd, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief ベクトル数学関数 - 絶対値 (VABS)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs2 ソースベクトルレジスタ
+     * @param vm マスク指定
+     */
+    static void emitVectorAbs(std::vector<uint8_t>& out, int vd, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief ベクトルビット操作 - 論理AND (VAND)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs1 ソースベクトルレジスタ1
+     * @param vs2 ソースベクトルレジスタ2
+     * @param vm マスク指定
+     */
+    static void emitVectorAnd(std::vector<uint8_t>& out, int vd, int vs1, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief ベクトルビット操作 - 論理OR (VOR)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs1 ソースベクトルレジスタ1
+     * @param vs2 ソースベクトルレジスタ2
+     * @param vm マスク指定
+     */
+    static void emitVectorOr(std::vector<uint8_t>& out, int vd, int vs1, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief ベクトルビット操作 - 論理XOR (VXOR)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs1 ソースベクトルレジスタ1
+     * @param vs2 ソースベクトルレジスタ2
+     * @param vm マスク指定
+     */
+    static void emitVectorXor(std::vector<uint8_t>& out, int vd, int vs1, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief ベクトルビット操作 - 論理NOT (VNOT)
+     * 
+     * @param out 出力バッファ
+     * @param vd 出力ベクトルレジスタ
+     * @param vs2 ソースベクトルレジスタ
+     * @param vm マスク指定
+     */
+    static void emitVectorNot(std::vector<uint8_t>& out, int vd, int vs2, RVVectorMask vm);
+    
+    /**
+     * @brief 行列乗算操作
+     *
+     * @param out 出力バッファ
+     * @param rows 行数
+     * @param cols 列数
+     * @param inner 内側の次元サイズ
+     */
+    static void emitMatrixMultiply(std::vector<uint8_t>& out, int rows, int cols, int inner);
+    
+    /**
+     * @brief JavaScript配列のSIMD処理用ファンクション
+     *
+     * @param out 出力バッファ
+     * @param operation 操作種類 (0=map, 1=filter, 2=reduce, 3=forEach)
+     * @param arrayReg 入力配列レジスタ
+     * @param resultReg 結果配列レジスタ
+     * @param length 配列長
+     */
+    static void emitJSArrayOperation(std::vector<uint8_t>& out, int operation, int arrayReg, int resultReg, int length);
+    
+    // ヘルパーメソッド
+    
+    /**
+     * @brief VSET命令のエンコード
+     *
+     * @param rd 出力レジスタ
+     * @param uimm 即値
+     * @param sew 要素幅
+     * @param lmul ベクトル長倍率
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeVsetivli(int rd, int uimm, RVVectorSEW sew, RVVectorLMUL lmul);
+    
+    /**
+     * @brief ベクトル操作のエンコード
+     *
+     * @param opcode 操作コード
+     * @param vd 出力ベクトルレジスタ
+     * @param vs1 ソースベクトルレジスタ1
+     * @param vs2 ソースベクトルレジスタ2
+     * @param vm マスク指定
+     * @param funct6 関数コード
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeVectorOp(uint32_t opcode, uint32_t vd, uint32_t vs1, uint32_t vs2, uint32_t vm, uint32_t funct6);
+    
+    /**
+     * @brief ベクトルロード命令のエンコード
+     *
+     * @param vd 出力ベクトルレジスタ
+     * @param rs1 ベースアドレスレジスタ
+     * @param vm マスク指定
+     * @param width 要素幅
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeVectorLoad(uint32_t vd, uint32_t rs1, RVVectorMask vm, uint32_t width);
+    
+    /**
+     * @brief ベクトルストライドロード命令のエンコード
+     *
+     * @param vd 出力ベクトルレジスタ
+     * @param rs1 ベースアドレスレジスタ
+     * @param rs2 ストライドレジスタ
+     * @param stride ストライド値
+     * @param vm マスク指定
+     * @param width 要素幅
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeVectorStrideLoad(uint32_t vd, uint32_t rs1, uint32_t rs2, uint32_t stride, RVVectorMask vm, uint32_t width);
+    
+    /**
+     * @brief ベクトルストア命令のエンコード
+     *
+     * @param vs3 ソースベクトルレジスタ
+     * @param rs1 ベースアドレスレジスタ
+     * @param rs2 オフセットレジスタ
+     * @param vm マスク指定
+     * @param width 要素幅
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeVectorStore(uint32_t vs3, uint32_t rs1, uint32_t rs2, RVVectorMask vm, uint32_t width);
+    
+    /**
+     * @brief 条件分岐命令のエンコード (Bタイプ)
+     *
+     * @param rs1 ソースレジスタ1
+     * @param rs2 ソースレジスタ2
+     * @param funct3 関数コード
+     * @param opcode 操作コード
+     * @param offset 分岐オフセット
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeBType(uint32_t rs1, uint32_t rs2, uint32_t funct3, uint32_t opcode, int32_t offset);
+    
+    /**
+     * @brief Rタイプ命令のエンコード
+     *
+     * @param funct7 関数コード7
+     * @param rs2 ソースレジスタ2
+     * @param rs1 ソースレジスタ1
+     * @param funct3 関数コード3
+     * @param rd 出力レジスタ
+     * @param opcode 操作コード
+     * @return エンコードされた命令
+     */
+    static uint32_t encodeRType(uint32_t funct7, uint32_t rs2, uint32_t rs1, uint32_t funct3, uint32_t rd, uint32_t opcode);
 };
 
 } // namespace core

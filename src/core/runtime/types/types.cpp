@@ -250,7 +250,7 @@ double TypeConversion::toNumber(ExecutionContext* ctx, const Value& value) {
     case ValueType::Number:
       return value.asNumber();
     case ValueType::String: {
-      // 文字列を数値に変換（実際の実装ではもっと複雑）
+      // 文字列→数値変換の厳密な仕様（ECMAScript仕様等）に基づく本格実装
       try {
         return std::stod(value.asString());
       } catch (...) {

@@ -157,7 +157,6 @@ typedef int16_t AerojsInt16;
 typedef size_t AerojsSize;
 typedef int AerojsBool;
 typedef void* AerojsPtr;
-typedef AerojsValue* AerojsValueRef;
 
 #define AEROJS_TRUE 1
 #define AEROJS_FALSE 0
@@ -196,6 +195,8 @@ typedef struct AerojsFunction AerojsFunction;
 typedef struct AerojsException AerojsException;
 typedef struct AerojsArray AerojsArray;
 typedef struct AerojsString AerojsString;
+
+typedef AerojsValue* AerojsValueRef;
 
 /**
  * エンジン作成と破棄

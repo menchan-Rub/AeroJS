@@ -10,8 +10,7 @@
 
 #include <string>
 #include <vector>
-
-#include "../utils/memory/smart_ptr/ref_counted.h"
+#include <memory>
 
 namespace aerojs {
 namespace core {
@@ -56,7 +55,7 @@ struct StackTraceElement {
 /**
  * @brief JavaScript実行時の例外を表すクラス
  */
-class Exception : public utils::memory::RefCounted {
+class Exception {
  public:
   /**
    * @brief エラーメッセージから例外を作成
@@ -153,7 +152,7 @@ class Exception : public utils::memory::RefCounted {
 };
 
 // 例外用のスマートポインタ型の定義
-using ExceptionPtr = utils::memory::RefPtr<Exception>;
+using ExceptionPtr = std::unique_ptr<Exception>;
 
 }  // namespace core
 }  // namespace aerojs

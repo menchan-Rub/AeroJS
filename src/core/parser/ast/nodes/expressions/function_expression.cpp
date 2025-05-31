@@ -191,8 +191,12 @@ std::string FunctionExpression::toString() const {
   }
   oss << ")";
   
-  // 関数本体の追加（簡略表現）
-  oss << " { ... }";
+  // 関数本体の追加
+  if (m_body) {
+    oss << " " << m_body->toString();
+  } else {
+    oss << " { /* body not available */ }"; // フォールバック
+  }
   
   return oss.str();
 }
@@ -293,8 +297,8 @@ std::string ArrowFunctionExpression::toString() const {
     // 式本体
     oss << m_data.body->toString();
   } else {
-    // ブロック本体（簡略表現）
-    oss << "{ ... }";
+    // ブロック本体 - 実際のブロック内容を出力
+    oss << m_data.body->toString();
   }
   
   return oss.str();

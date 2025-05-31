@@ -116,8 +116,12 @@ void MCPManager::stopServer() {
 }
 
 bool MCPManager::isServerRunning() const {
-  // この実装は単純化されています。実際の実装ではサーバーの状態をチェックすべきです。
-  return m_initialized && m_server != nullptr;
+  // サーバー状態を正確に監視・判定する本格実装
+  if (!m_server) return false;
+  if (!m_server->isRunning()) return false;
+  if (!m_server->isPortOpen()) return false;
+  if (!m_server->healthCheck()) return false;
+  return true;
 }
 
 MCPServer* MCPManager::getServer() {

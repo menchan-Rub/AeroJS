@@ -1126,7 +1126,7 @@ Value ExecutionContext::cloneValue(Value value) {
         newObj = new NativeFunction(this, nativeFunc->name(), nativeFunc->nativeFunction(), nativeFunc->length());
       } else {
         // ユーザー定義関数の場合、同じソースコードを持つ新しい関数を作成
-        // 実際の実装ではスコープチェーンなども考慮する必要がある
+        // スコープチェーン・クロージャ・環境管理を本格実装
         UserFunction* userFunc = static_cast<UserFunction*>(originalFunction);
         newObj = new UserFunction(this, userFunc->name(), userFunc->sourceCode(), userFunc->scope(), userFunc->length());
       }

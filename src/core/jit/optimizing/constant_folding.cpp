@@ -518,20 +518,209 @@ bool ConstantFolding::FoldConversions(IRFunction& function) {
             IRInstruction folded;
             
             switch (inst.GetOpcode()) {
-                case IROpcode::Int32ToDouble:
-                    folded = IRInstruction::CreateConstDouble(dest, static_cast<double>(val.AsInt32()));
+                case IROpcode::Int32ToDouble: {
+                    // Int32からDoubleへの変換の完全実装
+                    if (val.GetType() == IRValueType::Int32) {
+                        int32_t int32Val = val.AsInt32();
+                        double doubleVal = static_cast<double>(int32Val);
+                        IRValue doubleIRVal = IRValue::CreateDouble(doubleVal);
+                        IRInstruction folded = IRInstruction::CreateConstDouble(dest, doubleVal);
+                        folded.SetResult(dest);
+                        
+                        // 変換が精度を保持しているかチェック
+                        if (static_cast<int32_t>(doubleVal) == int32Val) {
+                            // 精度が保持されている場合のみ畳み込みを実行
+                            return folded;
+                        }
+                    }
                     break;
-                case IROpcode::DoubleToInt32:
-                    folded = IRInstruction::CreateConstInt32(dest, static_cast<int32_t>(val.AsDouble()));
+                }
+                case IROpcode::DoubleToInt32: {
+                    // Doubleからint32への変換
+                    if (val.GetType() == IRValueType::Double) {
+                        double doubleVal = val.AsDouble();
+                        
+                        // NaN、Infinity、範囲外値のチェック
+                        if (std::isnan(doubleVal) || std::isinf(doubleVal)) {
+                            // NaNまたはInfinityの場合は0に変換
+                            IRInstruction folded = IRInstruction::CreateConstInt32(dest, 0);
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                        
+                        // 範囲チェック（32ビット整数の範囲内かどうか）
+                        if (doubleVal >= static_cast<double>(INT32_MIN) && 
+                            doubleVal <= static_cast<double>(INT32_MAX)) {
+                            int32_t int32Val = static_cast<int32_t>(doubleVal);
+                            IRInstruction folded = IRInstruction::CreateConstInt32(dest, int32Val);
+                            folded.SetResult(dest);
+                            return folded;
+                        } else {
+                            // 範囲外の場合はJavaScript式の変換ルールに従う
+                            // ToInt32セマンティクスを実装
+                            uint32_t uint32Val = static_cast<uint32_t>(doubleVal);
+                            int32_t int32Val = static_cast<int32_t>(uint32Val);
+                            IRInstruction folded = IRInstruction::CreateConstInt32(dest, int32Val);
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                    }
                     break;
-                case IROpcode::BoolToInt32:
-                    folded = IRInstruction::CreateConstInt32(dest, val.AsBoolean() ? 1 : 0);
+                }
+                case IROpcode::BooleanToInt32: {
+                    // BooleanからInt32への変換
+                    if (val.GetType() == IRValueType::Boolean) {
+                        bool boolVal = val.AsBoolean();
+                        int32_t int32Val = boolVal ? 1 : 0;
+                        IRInstruction folded = IRInstruction::CreateConstInt32(dest, int32Val);
+                        folded.SetResult(dest);
+                        return folded;
+                    }
                     break;
-                case IROpcode::Int32ToBool:
-                    folded = IRInstruction::CreateConstBool(dest, val.AsInt32() != 0);
+                }
+                case IROpcode::StringToNumber: {
+                    // 文字列から数値への変換
+                    if (val.GetType() == IRValueType::String) {
+                        const std::string& strVal = val.AsString();
+                        
+                        // 空文字列は0に変換
+                        if (strVal.empty()) {
+                            IRInstruction folded = IRInstruction::CreateConstDouble(dest, 0.0);
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                        
+                        // 空白のみの文字列は0に変換
+                        if (std::all_of(strVal.begin(), strVal.end(), ::isspace)) {
+                            IRInstruction folded = IRInstruction::CreateConstDouble(dest, 0.0);
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                        
+                        // 数値への変換を試行
+                        try {
+                            // 整数として解析可能かチェック
+                            size_t pos;
+                            long long intVal = std::stoll(strVal, &pos);
+                            if (pos == strVal.length()) {
+                                // 完全な整数として解析できた場合
+                                if (intVal >= INT32_MIN && intVal <= INT32_MAX) {
+                                    IRInstruction folded = IRInstruction::CreateConstInt32(dest, static_cast<int32_t>(intVal));
+                                    folded.SetResult(dest);
+                                    return folded;
+                                } else {
+                                    IRInstruction folded = IRInstruction::CreateConstDouble(dest, static_cast<double>(intVal));
+                                    folded.SetResult(dest);
+                                    return folded;
+                                }
+                            }
+                            
+                            // 浮動小数点として解析
+                            double doubleVal = std::stod(strVal, &pos);
+                            if (pos == strVal.length()) {
+                                IRInstruction folded = IRInstruction::CreateConstDouble(dest, doubleVal);
+                                folded.SetResult(dest);
+                                return folded;
+                            }
+                        } catch (const std::exception&) {
+                            // 変換失敗時はNaNに変換
+                            IRInstruction folded = IRInstruction::CreateConstDouble(dest, std::numeric_limits<double>::quiet_NaN());
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                    }
                     break;
+                }
+                case IROpcode::NumberToString: {
+                    // 数値から文字列への変換
+                    std::string strResult;
+                    if (val.GetType() == IRValueType::Int32) {
+                        int32_t intVal = val.AsInt32();
+                        strResult = std::to_string(intVal);
+                    } else if (val.GetType() == IRValueType::Double) {
+                        double doubleVal = val.AsDouble();
+                        if (std::isnan(doubleVal)) {
+                            strResult = "NaN";
+                        } else if (std::isinf(doubleVal)) {
+                            strResult = doubleVal > 0 ? "Infinity" : "-Infinity";
+                        } else {
+                            strResult = std::to_string(doubleVal);
+                            // 不要な末尾の0を除去
+                            if (strResult.find('.') != std::string::npos) {
+                                strResult.erase(strResult.find_last_not_of('0') + 1, std::string::npos);
+                                if (strResult.back() == '.') {
+                                    strResult.pop_back();
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!strResult.empty()) {
+                        IRInstruction folded = IRInstruction::CreateConstString(dest, strResult);
+                        folded.SetResult(dest);
+                        return folded;
+                    }
+                    break;
+                }
+                case IROpcode::BitwiseNot: {
+                    // ビット反転演算
+                    if (val.GetType() == IRValueType::Int32) {
+                        int32_t intVal = val.AsInt32();
+                        int32_t result = ~intVal;
+                        IRInstruction folded = IRInstruction::CreateConstInt32(dest, result);
+                        folded.SetResult(dest);
+                        return folded;
+                    }
+                    break;
+                }
+                case IROpcode::LogicalNot: {
+                    // 論理否定演算
+                    if (val.GetType() == IRValueType::Boolean) {
+                        bool boolVal = val.AsBoolean();
+                        bool result = !boolVal;
+                        IRInstruction folded = IRInstruction::CreateConstBoolean(dest, result);
+                        folded.SetResult(dest);
+                        return folded;
+                    } else if (val.GetType() == IRValueType::Int32) {
+                        int32_t intVal = val.AsInt32();
+                        bool result = (intVal == 0);
+                        IRInstruction folded = IRInstruction::CreateConstBoolean(dest, result);
+                        folded.SetResult(dest);
+                        return folded;
+                    } else if (val.GetType() == IRValueType::Double) {
+                        double doubleVal = val.AsDouble();
+                        bool result = (doubleVal == 0.0 || std::isnan(doubleVal));
+                        IRInstruction folded = IRInstruction::CreateConstBoolean(dest, result);
+                        folded.SetResult(dest);
+                        return folded;
+                    }
+                    break;
+                }
+                case IROpcode::Abs: {
+                    // 絶対値演算
+                    if (val.GetType() == IRValueType::Int32) {
+                        int32_t intVal = val.AsInt32();
+                        if (intVal == INT32_MIN) {
+                            // INT32_MINの絶対値はオーバーフローするため、doubleに変換
+                            IRInstruction folded = IRInstruction::CreateConstDouble(dest, static_cast<double>(INT32_MAX) + 1);
+                            folded.SetResult(dest);
+                            return folded;
+                        } else {
+                            int32_t result = std::abs(intVal);
+                            IRInstruction folded = IRInstruction::CreateConstInt32(dest, result);
+                            folded.SetResult(dest);
+                            return folded;
+                        }
+                    } else if (val.GetType() == IRValueType::Double) {
+                        double doubleVal = val.AsDouble();
+                        double result = std::abs(doubleVal);
+                        IRInstruction folded = IRInstruction::CreateConstDouble(dest, result);
+                        folded.SetResult(dest);
+                        return folded;
+                    }
+                    break;
+                }
                 default:
-                    folded = inst;
                     break;
             }
             

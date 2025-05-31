@@ -205,64 +205,185 @@ protected:
       bytecode.push_back(0x00);
     }
     
-    // 3重ループを模倣
-    // for (i=0; i<3; i++)
-    //   for (j=0; j<3; j++)
-    //     for (k=0; k<3; k++)
-    //       result[i*3+j] += a[i*3+k] * b[k*3+j];
+    // 行列乗算のアルゴリズム実装
+    // 3レベルの入れ子ループをバイトコードで生成
     
-    // 簡略化のため、固定の回数のループ展開をシミュレート
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        for (int k = 0; k < 3; k++) {
-          // A[i,k]の値をロード (仮想的)
-          bytecode.push_back(0x11);
-          bytecode.push_back(i*3+k);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          
-          // B[k,j]の値をロード (仮想的)
-          bytecode.push_back(0x12);
-          bytecode.push_back(k*3+j);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          
-          // 乗算
-          bytecode.push_back(0x07);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          
-          // C[i,j]をロード
-          bytecode.push_back(0x0D);
-          bytecode.push_back(i*3+j);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          
-          // 加算
-          bytecode.push_back(0x0A);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-          
-          // C[i,j]に格納
-          bytecode.push_back(0x0F);
-          bytecode.push_back(i*3+j);
-          bytecode.push_back(0x00);
-          bytecode.push_back(0x00);
-        }
-      }
-    }
+    // i, j, k の初期化
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(0); // i = 0
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(0); // i を変数0に格納
     
-    // 結果の0番目の要素を返す
-    bytecode.push_back(0x0D);
-    bytecode.push_back(0x00);
-    bytecode.push_back(0x00);
-    bytecode.push_back(0x00);
-    bytecode.push_back(0x08);
-    bytecode.push_back(0x00);
-    bytecode.push_back(0x00);
-    bytecode.push_back(0x00);
+    // 外側のループ: for (int i = 0; i < 3; i++)
+    size_t outerLoopStart = bytecode.size();
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3); // 3 をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Compare));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::JumpIfTrue));
+    
+    size_t outerLoopExit = bytecode.size();
+    bytecode.push_back(0); // 実際のアドレスは後で修正
+    bytecode.push_back(0);
+    
+    // j の初期化
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(0); // j = 0
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(1); // j を変数1に格納
+    
+    // 中間のループ: for (int j = 0; j < 3; j++)
+    size_t middleLoopStart = bytecode.size();
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3); // 3 をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Compare));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::JumpIfTrue));
+    
+    size_t middleLoopExit = bytecode.size();
+    bytecode.push_back(0); // 実際のアドレスは後で修正
+    bytecode.push_back(0);
+    
+    // k の初期化
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(0); // k = 0
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(2); // k を変数2に格納
+    
+    // 内側のループ: for (int k = 0; k < 3; k++)
+    size_t innerLoopStart = bytecode.size();
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(2); // k をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3); // 3 をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Compare));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::JumpIfTrue));
+    
+    size_t innerLoopExit = bytecode.size();
+    bytecode.push_back(0); // 実際のアドレスは後で修正
+    bytecode.push_back(0);
+    
+    // 行列乗算の核心計算: result[i*3+j] += a[i*3+k] * b[k*3+j]
+    
+    // result[i*3+j] のインデックス計算
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    
+    // a[i*3+k] のロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(2); // k
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadArray));
+    
+    // b[k*3+j] のロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(2); // k
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadArray));
+    
+    // 乗算
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    
+    // result[i*3+j] の現在値をロード
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadArray));
+    
+    // 加算
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    
+    // 結果をresult[i*3+j]に格納
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(3);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Mul));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreArray));
+    
+    // k のインクリメント
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(2); // k
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(1);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(2); // k に格納
+    
+    // 内側ループの開始に戻る
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Jump));
+    size_t innerJumpBack = bytecode.size();
+    bytecode.push_back((innerLoopStart >> 8) & 0xFF);
+    bytecode.push_back(innerLoopStart & 0xFF);
+    
+    // 内側ループ終了のアドレス修正
+    size_t innerLoopEndAddr = bytecode.size();
+    bytecode[innerLoopExit] = (innerLoopEndAddr >> 8) & 0xFF;
+    bytecode[innerLoopExit + 1] = innerLoopEndAddr & 0xFF;
+    
+    // j のインクリメント
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(1); // j
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(1);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(1); // j に格納
+    
+    // 中間ループの開始に戻る
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Jump));
+    bytecode.push_back((middleLoopStart >> 8) & 0xFF);
+    bytecode.push_back(middleLoopStart & 0xFF);
+    
+    // 中間ループ終了のアドレス修正
+    size_t middleLoopEndAddr = bytecode.size();
+    bytecode[middleLoopExit] = (middleLoopEndAddr >> 8) & 0xFF;
+    bytecode[middleLoopExit + 1] = middleLoopEndAddr & 0xFF;
+    
+    // i のインクリメント
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadLocal));
+    bytecode.push_back(0); // i
+    bytecode.push_back(static_cast<uint8_t>(Opcode::LoadConst));
+    bytecode.push_back(1);
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Add));
+    bytecode.push_back(static_cast<uint8_t>(Opcode::StoreLocal));
+    bytecode.push_back(0); // i に格納
+    
+    // 外側ループの開始に戻る
+    bytecode.push_back(static_cast<uint8_t>(Opcode::Jump));
+    bytecode.push_back((outerLoopStart >> 8) & 0xFF);
+    bytecode.push_back(outerLoopStart & 0xFF);
+    
+    // 外側ループ終了のアドレス修正
+    size_t outerLoopEndAddr = bytecode.size();
+    bytecode[outerLoopExit] = (outerLoopEndAddr >> 8) & 0xFF;
+    bytecode[outerLoopExit + 1] = outerLoopEndAddr & 0xFF;
     
     return std::make_unique<MockBytecodeFunction>(4, bytecode);
   }
@@ -290,9 +411,74 @@ protected:
     return {Value::createNumber(static_cast<double>(n))};
   }
   
-  // 行列乗算実行引数（ダミー）
+  // 完璧な行列乗算実行引数の実装
+  // JavaScript標準的な行列表現（2次元配列）に基づく引数生成
   std::vector<Value> getMatrixMultiplyArgs() {
-    return {};
+    // 4x4行列A（単位行列）
+    std::vector<Value> matrixA_row0 = {
+      Value::createNumber(1.0), Value::createNumber(0.0), 
+      Value::createNumber(0.0), Value::createNumber(0.0)
+    };
+    std::vector<Value> matrixA_row1 = {
+      Value::createNumber(0.0), Value::createNumber(1.0), 
+      Value::createNumber(0.0), Value::createNumber(0.0)
+    };
+    std::vector<Value> matrixA_row2 = {
+      Value::createNumber(0.0), Value::createNumber(0.0), 
+      Value::createNumber(1.0), Value::createNumber(0.0)
+    };
+    std::vector<Value> matrixA_row3 = {
+      Value::createNumber(0.0), Value::createNumber(0.0), 
+      Value::createNumber(0.0), Value::createNumber(1.0)
+    };
+    
+    std::vector<Value> matrixA_data = {
+      Value::createArray(context.get(), matrixA_row0),
+      Value::createArray(context.get(), matrixA_row1),
+      Value::createArray(context.get(), matrixA_row2),
+      Value::createArray(context.get(), matrixA_row3)
+    };
+    Value matrixA = Value::createArray(context.get(), matrixA_data);
+    
+    // 4x4行列B（各要素が順次増加）
+    std::vector<Value> matrixB_row0 = {
+      Value::createNumber(1.0), Value::createNumber(2.0), 
+      Value::createNumber(3.0), Value::createNumber(4.0)
+    };
+    std::vector<Value> matrixB_row1 = {
+      Value::createNumber(5.0), Value::createNumber(6.0), 
+      Value::createNumber(7.0), Value::createNumber(8.0)
+    };
+    std::vector<Value> matrixB_row2 = {
+      Value::createNumber(9.0), Value::createNumber(10.0), 
+      Value::createNumber(11.0), Value::createNumber(12.0)
+    };
+    std::vector<Value> matrixB_row3 = {
+      Value::createNumber(13.0), Value::createNumber(14.0), 
+      Value::createNumber(15.0), Value::createNumber(16.0)
+    };
+    
+    std::vector<Value> matrixB_data = {
+      Value::createArray(context.get(), matrixB_row0),
+      Value::createArray(context.get(), matrixB_row1),
+      Value::createArray(context.get(), matrixB_row2),
+      Value::createArray(context.get(), matrixB_row3)
+    };
+    Value matrixB = Value::createArray(context.get(), matrixB_data);
+    
+    // 行列の次元情報を含むオプションオブジェクト
+    std::map<std::string, Value> options = {
+      {"rows_a", Value::createNumber(4.0)},
+      {"cols_a", Value::createNumber(4.0)},
+      {"rows_b", Value::createNumber(4.0)},
+      {"cols_b", Value::createNumber(4.0)},
+      {"algorithm", Value::createString(context.get(), "standard")},
+      {"optimize_cache", Value::createBoolean(true)},
+      {"use_simd", Value::createBoolean(true)}
+    };
+    Value optionsObj = Value::createObject(context.get(), options);
+    
+    return {matrixA, matrixB, optionsObj};
   }
   
   std::unique_ptr<Context> context;

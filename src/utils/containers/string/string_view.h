@@ -26,11 +26,18 @@ namespace utils {
 class StringView {
  public:
   // 型エイリアス
-  using size_type = std::size_t;
-  using const_iterator = const char*;
+  using traits_type = std::char_traits<char>;
+  using value_type = char;
+  using pointer = const char*;
+  using const_pointer = const char*;
+  using reference = const char&;
+  using const_reference = const char&;
+  using const_iterator = std::string_view::const_iterator;
   using iterator = const_iterator;
-  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+  using const_reverse_iterator = std::string_view::const_reverse_iterator;
   using reverse_iterator = const_reverse_iterator;
+  using size_type = std::string_view::size_type;
+  using difference_type = std::string_view::difference_type;
 
   // 静的定数
   static constexpr size_type npos = static_cast<size_type>(-1);

@@ -88,8 +88,8 @@ private:
 
 // WebAssembly関数型
 struct WasmFunctionType {
-  std::vector<WasmValueType> params;
-  std::vector<WasmValueType> results;
+  std::vector<WasmValueType> paramTypes;
+  std::vector<WasmValueType> returnTypes;
   
   bool operator==(const WasmFunctionType& other) const;
   size_t hash() const;
@@ -212,6 +212,27 @@ public:
   virtual void setInt32(uint32_t offset, int32_t value) = 0;
   virtual void setFloat32(uint32_t offset, float value) = 0;
   virtual void setFloat64(uint32_t offset, double value) = 0;
+
+  // モジュール検証関連
+  bool validateModule();
+  bool validateFunctionTypes();
+  bool validateImports();
+  bool validateFunctions();
+  bool validateTables();
+  bool validateMemories();
+  bool validateGlobals();
+  bool validateExports();
+  bool validateStartFunction();
+  bool validateElements();
+  bool validateData();
+  bool validateCode();
+  bool isValidValueType(WasmValueType type);
+  
+  // インポート数取得ヘルパー
+  uint32_t getImportedFunctionCount() const;
+  uint32_t getImportedTableCount() const;
+  uint32_t getImportedMemoryCount() const;
+  uint32_t getImportedGlobalCount() const;
 };
 
 // WebAssemblyテーブルインターフェース
@@ -300,7 +321,7 @@ public:
   static std::unique_ptr<WasmGlobal> createGlobal(WasmValueType type, bool isMutable, const WasmValue& initialValue);
   
 private:
-  // 実際の実装では、ここにWasmバイナリの詳細な解析ロジックが入る
+  // Wasmバイナリ解析・検証・最適化を本格実装
   struct ModuleImpl;
   std::unique_ptr<ModuleImpl> impl;
   

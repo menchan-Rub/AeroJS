@@ -15,10 +15,14 @@
 #include <thread>
 #include <functional>
 #include "../../../core/runtime/values/value.h"
+#include <cstdint>
+#include <string>
 
 namespace aerojs {
 namespace utils {
 namespace memory {
+
+class GarbageCollector;
 
 // GCセルの状態
 enum class CellState {

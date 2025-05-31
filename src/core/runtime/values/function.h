@@ -1,6 +1,6 @@
 /**
  * @file function.h
- * @brief JavaScript 関数型の定義
+ * @brief JavaScript Functionクラスの定義
  * @version 0.1.0
  * @license MIT
  */
@@ -8,72 +8,71 @@
 #ifndef AEROJS_FUNCTION_H
 #define AEROJS_FUNCTION_H
 
-#include <functional>
-#include <string>
-#include <vector>
+#include "object.h"
+#include "value.h"
 
-#include "src/core/runtime/values/object.h"
+#include <functional>
+#include <vector>
+#include <string>
 
 namespace aerojs {
 namespace core {
 
 // 前方宣言
 class Context;
-class Value;
-class String;
-class Symbol;
+class Array;
 
 /**
- * @brief ネイティブ関数のシグネチャ
- *
- * thisValue: 関数内でのthis値
- * args: 関数に渡された引数
- * context: 実行コンテキスト
- * 戻り値: 関数の戻り値
+ * @brief ネイティブ関数の型定義
  */
-using NativeFunction = std::function<Value(const Value& thisValue,
-                                           const std::vector<Value>& args,
-                                           Context* context)>;
+using NativeFunction = std::function<Value*(Context*, const std::vector<Value*>&)>;
 
 /**
- * @brief JavaScript関数のコンストラクタのシグネチャ
+ * @brief JavaScript Function型を表現するクラス
  *
- * args: コンストラクタに渡された引数
- * context: 実行コンテキスト
- * 戻り値: 作成されたオブジェクト
- */
-using NativeConstructor = std::function<Object*(const std::vector<Value>& args,
-                                                Context* context)>;
-
-/**
- * @brief JavaScript の関数型を表現するクラス
- *
- * このクラスはJavaScriptの関数とメソッドを表現します。
+ * ECMAScript仕様に準拠したFunctionオブジェクトの実装。
+ * ネイティブ関数、ユーザー定義関数、アロー関数、コンストラクタをサポート。
  */
 class Function : public Object {
  public:
   /**
-   * @brief ネイティブ関数のコンストラクタ
-   * @param context 実行コンテキスト
-   * @param name 関数名
-   * @param func ネイティブ関数の実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @param prototype 関数のプロトタイプ（nullptrの場合はデフォルト）
+   * @brief 関数の種類を表す列挙型
    */
-  Function(Context* context, const String* name, NativeFunction func,
-           int argCount = -1, Object* prototype = nullptr);
+  enum class FunctionType {
+    Native,      // ネイティブ関数
+    UserDefined, // ユーザー定義関数
+    Arrow,       // アロー関数
+    Bound,       // bind()されたバウンド関数
+    Generator,   // ジェネレータ関数
+    AsyncFunction, // 非同期関数
+    AsyncGenerator // 非同期ジェネレータ関数
+  };
 
   /**
-   * @brief ネイティブコンストラクタのコンストラクタ
-   * @param context 実行コンテキスト
+   * @brief ネイティブ関数を作成
    * @param name 関数名
-   * @param constructor ネイティブコンストラクタの実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @param instancePrototype インスタンスのプロトタイプ
-   * @param prototype 関数のプロトタイプ（nullptrの場合はデフォルト）
+   * @param nativeFunc ネイティブ関数の実装
+   * @param length 仮引数の数
    */
-  Function(Context* context, const String* name, NativeConstructor constructor,
-           int argCount = -1, Object* instancePrototype = nullptr, Object* prototype = nullptr);
+  Function(const std::string& name, NativeFunction nativeFunc, uint32_t length = 0);
+
+  /**
+   * @brief ユーザー定義関数を作成
+   * @param name 関数名
+   * @param params 仮引数名のリスト
+   * @param body 関数本体のコード
+   * @param closure クロージャ環境
+   */
+  Function(const std::string& name, const std::vector<std::string>& params, 
+           const std::string& body, Context* closure = nullptr);
+
+  /**
+   * @brief バウンド関数を作成
+   * @param targetFunction バインド対象の関数
+   * @param thisArg thisとして使用する値
+   * @param boundArgs 事前に束縛する引数
+   */
+  Function(Function* targetFunction, Value* thisArg, const std::vector<Value*>& boundArgs);
 
   /**
    * @brief デストラクタ
@@ -81,227 +80,218 @@ class Function : public Object {
   ~Function() override;
 
   /**
+   * @brief オブジェクトタイプを取得
+   * @return Type::Function
+   */
+  Type getType() const override;
+
+  /**
+   * @brief 関数の種類を取得
+   * @return 関数の種類
+   */
+  FunctionType getFunctionType() const {
+    return functionType_;
+  }
+
+  /**
    * @brief 関数名を取得
    * @return 関数名
    */
-  String* getName() const;
+  const std::string& getName() const {
+    return name_;
+  }
 
   /**
-   * @brief 関数の期待される引数の数を取得
-   * @return 引数の数（-1は可変長）
+   * @brief 仮引数の数を取得
+   * @return 仮引数の数
    */
-  int getArgCount() const;
+  uint32_t getLength() const {
+    return length_;
+  }
 
   /**
-   * @brief 関数がコンストラクタかどうかを確認
-   * @return コンストラクタの場合はtrue
+   * @brief 関数を呼び出す
+   * @param context 実行コンテキスト
+   * @param thisArg this として使用する値
+   * @param args 引数リスト
+   * @return 戻り値
+   */
+  Value* call(Context* context, Value* thisArg, const std::vector<Value*>& args);
+
+  /**
+   * @brief 関数をコンストラクタとして呼び出す
+   * @param context 実行コンテキスト
+   * @param args 引数リスト
+   * @return 作成されたオブジェクト
+   */
+  Value* construct(Context* context, const std::vector<Value*>& args);
+
+  /**
+   * @brief apply()メソッドの実装
+   * @param context 実行コンテキスト
+   * @param thisArg thisとして使用する値
+   * @param argsArray 引数の配列
+   * @return 戻り値
+   */
+  Value* apply(Context* context, Value* thisArg, Array* argsArray);
+
+  /**
+   * @brief bind()メソッドの実装
+   * @param thisArg thisとして束縛する値
+   * @param args 事前に束縛する引数
+   * @return 新しいバウンド関数
+   */
+  Function* bind(Value* thisArg, const std::vector<Value*>& args);
+
+  /**
+   * @brief 関数が呼び出し可能かを確認
+   * @return 呼び出し可能な場合はtrue
+   */
+  bool isCallable() const {
+    return true; // 関数は常に呼び出し可能
+  }
+
+  /**
+   * @brief 関数がコンストラクタとして使用可能かを確認
+   * @return コンストラクタとして使用可能な場合はtrue
    */
   bool isConstructor() const;
 
   /**
-   * @brief 関数をネイティブ関数として実行
-   * @param thisValue 関数内でのthis値
-   * @param args 関数に渡された引数
-   * @param context 実行コンテキスト
-   * @return 関数の戻り値
+   * @brief アロー関数かどうかを確認
+   * @return アロー関数の場合はtrue
    */
-  Value call(const Value& thisValue, const std::vector<Value>& args, Context* context);
+  bool isArrowFunction() const {
+    return functionType_ == FunctionType::Arrow;
+  }
 
   /**
-   * @brief 関数をコンストラクタとして実行
-   * @param args コンストラクタに渡された引数
-   * @param context 実行コンテキスト
-   * @return 作成されたオブジェクト
+   * @brief ネイティブ関数かどうかを確認
+   * @return ネイティブ関数の場合はtrue
    */
-  Object* construct(const std::vector<Value>& args, Context* context);
+  bool isNativeFunction() const {
+    return functionType_ == FunctionType::Native;
+  }
 
   /**
-   * @brief 関数のスコープを設定
-   * @param scope スコープオブジェクト
+   * @brief バウンド関数かどうかを確認
+   * @return バウンド関数の場合はtrue
    */
-  void setScope(Object* scope);
+  bool isBoundFunction() const {
+    return functionType_ == FunctionType::Bound;
+  }
 
   /**
-   * @brief 関数のスコープを取得
-   * @return スコープオブジェクト
+   * @brief ジェネレータ関数かどうかを確認
+   * @return ジェネレータ関数の場合はtrue
    */
-  Object* getScope() const;
+  bool isGeneratorFunction() const {
+    return functionType_ == FunctionType::Generator;
+  }
 
   /**
-   * @brief 関数のプロトタイププロパティを取得
-   * @return プロトタイププロパティ（コンストラクタの場合）
+   * @brief 非同期関数かどうかを確認
+   * @return 非同期関数の場合はtrue
+   */
+  bool isAsyncFunction() const {
+    return functionType_ == FunctionType::AsyncFunction || 
+           functionType_ == FunctionType::AsyncGenerator;
+  }
+
+  /**
+   * @brief 関数のプロトタイプオブジェクトを取得
+   * @return プロトタイプオブジェクト
    */
   Object* getPrototypeProperty() const;
 
   /**
-   * @brief 関数のプロトタイププロパティを設定
-   * @param prototype 新しいプロトタイプ
+   * @brief 関数のプロトタイプオブジェクトを設定
+   * @param prototype 新しいプロトタイプオブジェクト
    */
   void setPrototypeProperty(Object* prototype);
 
   /**
-   * @brief 関数をバインド
-   * @param thisArg バインドするthis値
-   * @param boundArgs 束縛される引数
-   * @return 新しいバインドされた関数
-   */
-  Function* bind(const Value& thisArg, const std::vector<Value>& boundArgs);
-
-  /**
    * @brief 関数の文字列表現を取得
-   * @return 関数の文字列表現
+   * @return "[object Function]"
    */
   std::string toString() const override;
 
   /**
-   * @brief ネイティブ関数を作成
-   * @param context 実行コンテキスト
-   * @param name 関数名
-   * @param func ネイティブ関数の実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @return 新しい関数オブジェクト
+   * @brief 関数のソースコードを取得
+   * @return ソースコード文字列
    */
-  static Function* createNativeFunction(Context* context, const String* name,
-                                        NativeFunction func, int argCount = -1);
+  std::string getSourceCode() const;
 
-  /**
-   * @brief ネイティブコンストラクタを作成
-   * @param context 実行コンテキスト
-   * @param name 関数名
-   * @param constructor ネイティブコンストラクタの実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @param instancePrototype インスタンスのプロトタイプ
-   * @return 新しい関数オブジェクト
-   */
-  static Function* createNativeConstructor(Context* context, const String* name,
-                                           NativeConstructor constructor, int argCount = -1,
-                                           Object* instancePrototype = nullptr);
+  // 静的ファクトリ関数
+  static Function* createNative(const std::string& name, NativeFunction func, uint32_t length = 0);
+  static Function* createUserDefined(const std::string& name, const std::vector<std::string>& params, 
+                                   const std::string& body, Context* closure = nullptr);
+  static Function* createArrow(const std::vector<std::string>& params, const std::string& body, 
+                             Context* closure);
+  static Function* createGenerator(const std::string& name, const std::vector<std::string>& params, 
+                                 const std::string& body, Context* closure = nullptr);
+  static Function* createAsync(const std::string& name, const std::vector<std::string>& params, 
+                             const std::string& body, Context* closure = nullptr);
 
  private:
-  // 関数名
-  String* name_;
-
-  // 期待される引数の数
-  int argCount_;
-
-  // ネイティブ関数の実装
+  // 関数の基本プロパティ
+  FunctionType functionType_;
+  std::string name_;
+  uint32_t length_;
+  
+  // ネイティブ関数用
   NativeFunction nativeFunction_;
-
-  // ネイティブコンストラクタの実装
-  NativeConstructor nativeConstructor_;
-
-  // スコープオブジェクト
-  Object* scope_;
-
-  // コンストラクタのインスタンスプロトタイプ
-  Object* instancePrototype_;
-
-  // バインドされたthis値
-  Value boundThis_;
-
-  // バインドされた引数
-  std::vector<Value> boundArgs_;
-
-  // 関数がバインド関数かどうか
-  bool isBound_;
-
-  // 関数がコンストラクタかどうか
-  bool isConstructor_;
-
-  // バインド関数用のプライベートコンストラクタ
-  Function(Context* context, Function* targetFunction, const Value& thisArg,
-           const std::vector<Value>& boundArgs);
-
-  // バインド関数のラッパー
-  static Value boundFunctionWrapper(const Value& thisValue,
-                                    const std::vector<Value>& args,
-                                    Context* context);
-
-  // コピーおよびムーブの無効化
-  Function(const Function&) = delete;
-  Function& operator=(const Function&) = delete;
-  Function(Function&&) = delete;
-  Function& operator=(Function&&) = delete;
+  
+  // ユーザー定義関数用
+  std::vector<std::string> parameters_;
+  std::string functionBody_;
+  Context* closure_;
+  
+  // バウンド関数用
+  Function* targetFunction_;
+  Value* boundThisArg_;
+  std::vector<Value*> boundArguments_;
+  
+  // プロトタイプオブジェクト
+  Object* prototypeProperty_;
+  
+  // 内部ヘルパー関数
+  Value* callNativeFunction(Context* context, Value* thisArg, const std::vector<Value*>& args);
+  Value* callUserDefinedFunction(Context* context, Value* thisArg, const std::vector<Value*>& args);
+  Value* callBoundFunction(Context* context, Value* thisArg, const std::vector<Value*>& args);
+  Value* callArrowFunction(Context* context, Value* thisArg, const std::vector<Value*>& args);
+  
+  Object* constructUserDefinedFunction(Context* context, const std::vector<Value*>& args);
+  Object* constructNativeFunction(Context* context, const std::vector<Value*>& args);
+  
+  void initializePrototypeProperty();
+  Context* createExecutionContext(Context* parentContext, Value* thisArg, const std::vector<Value*>& args);
+  
+  // 引数を仮引数にバインド
+  void bindArguments(Context* executionContext, const std::vector<Value*>& args);
+  
+  // 関数実行時の引数オブジェクトを作成
+  Object* createArgumentsObject(const std::vector<Value*>& args);
 };
 
 /**
- * @brief アロー関数を表現するクラス
- *
- * アロー関数は通常の関数と異なり、独自のthisバインディングを持たない
+ * @brief JavaScript の Arguments オブジェクト
  */
-class ArrowFunction : public Function {
+class ArgumentsObject : public Object {
  public:
-  /**
-   * @brief アロー関数のコンストラクタ
-   * @param context 実行コンテキスト
-   * @param name 関数名
-   * @param func ネイティブ関数の実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @param lexicalThis レキシカルなthis値
-   * @param prototype 関数のプロトタイプ（nullptrの場合はデフォルト）
-   */
-  ArrowFunction(Context* context, const String* name, NativeFunction func,
-                int argCount = -1, const Value& lexicalThis = Value(),
-                Object* prototype = nullptr);
-
-  /**
-   * @brief デストラクタ
-   */
-  ~ArrowFunction() override;
-
-  /**
-   * @brief アロー関数をネイティブ関数として実行
-   * @param thisValue 無視される（アロー関数はレキシカルthisを使用）
-   * @param args 関数に渡された引数
-   * @param context 実行コンテキスト
-   * @return 関数の戻り値
-   */
-  Value call(const Value& thisValue, const std::vector<Value>& args, Context* context);
-
-  /**
-   * @brief アロー関数をコンストラクタとして実行（エラー）
-   * @param args コンストラクタに渡された引数
-   * @param context 実行コンテキスト
-   * @return 常にnullptr（アロー関数はコンストラクタにできない）
-   */
-  Object* construct(const std::vector<Value>& args, Context* context);
-
-  /**
-   * @brief アロー関数をバインド（必要なし、そのまま返す）
-   * @param thisArg 無視される
-   * @param boundArgs 無視される
-   * @return this（アロー関数は既にバインドされている）
-   */
-  Function* bind(const Value& thisArg, const std::vector<Value>& boundArgs);
-
-  /**
-   * @brief アロー関数の文字列表現を取得
-   * @return アロー関数の文字列表現
-   */
-  std::string toString() const override;
-
-  /**
-   * @brief アロー関数を作成
-   * @param context 実行コンテキスト
-   * @param name 関数名
-   * @param func ネイティブ関数の実装
-   * @param argCount 期待される引数の数（-1は可変長）
-   * @param lexicalThis レキシカルなthis値
-   * @return 新しいアロー関数オブジェクト
-   */
-  static ArrowFunction* createArrowFunction(Context* context, const String* name,
-                                            NativeFunction func, int argCount = -1,
-                                            const Value& lexicalThis = Value());
-
+  ArgumentsObject(const std::vector<Value*>& args);
+  ~ArgumentsObject() override;
+  
+  Type getType() const override {
+    return Type::Object; // Argumentsは特別なオブジェクト
+  }
+  
+  std::string toString() const override {
+    return "[object Arguments]";
+  }
+  
  private:
-  // レキシカルなthis値
-  Value lexicalThis_;
-
-  // コピーおよびムーブの無効化
-  ArrowFunction(const ArrowFunction&) = delete;
-  ArrowFunction& operator=(const ArrowFunction&) = delete;
-  ArrowFunction(ArrowFunction&&) = delete;
-  ArrowFunction& operator=(ArrowFunction&&) = delete;
+  std::vector<Value*> arguments_;
 };
 
 }  // namespace core

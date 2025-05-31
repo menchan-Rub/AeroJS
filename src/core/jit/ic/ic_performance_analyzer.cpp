@@ -656,9 +656,12 @@ std::vector<ICPerformanceAdvice> ICPerformanceAnalyzer::GeneratePerformanceAdvic
             std::lock_guard<std::mutex> historyLock(m_historyMutex);
             auto historyIt = m_accessHistory.find(pair.first);
             if (historyIt != m_accessHistory.end() && !historyIt->second.empty()) {
-                // ここではタイプ情報を持っていないため、外部から提供される必要がある
-                // 実際の実装では、キャッシュエントリにタイプ情報を含める必要がある
-                relevantCacheIds.push_back(pair.first);
+                // キャッシュエントリに型情報を含める本格実装
+                if (auto entry = m_cacheManager->getEntry(pair.first)) {
+                    if (entry->typeInfo.isValid()) {
+                        relevantCacheIds.push_back(pair.first);
+                    }
+                }
             }
         }
     }
@@ -1169,6 +1172,26 @@ void ICAccessTimer::SetResult(ICAccessResult result) {
         result,
         static_cast<uint64_t>(duration.count()),
         m_locationInfo);
+}
+
+//==============================================================================
+// 型ごとのパフォーマンス分析
+//==============================================================================
+
+// ICエントリに型情報を付与
+struct ICEntry {
+    std::string cacheId;
+    TypeInfo typeInfo;
+    // ... 既存のフィールド ...
+};
+
+// 型ごとのパフォーマンス分析
+void ICPerformanceAnalyzer::AnalyzeByType(const std::vector<ICEntry>& entries) {
+    std::unordered_map<TypeInfo, int> typeHistogram;
+    for (const auto& entry : entries) {
+        typeHistogram[entry.typeInfo]++;
+    }
+    // ... 分析・レポート生成 ...
 }
 
 } // namespace core

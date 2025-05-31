@@ -7,6 +7,7 @@
 #include "../jit_code_generator.h"
 #include "../../object/js_object.h"
 #include "../../value/js_value.h"
+#include "../arch_support.h" // アーキテクチャサポート定義用ヘッダ
 
 namespace aerojs {
 namespace core {
@@ -16,6 +17,19 @@ class JITCompiler;
 class IRFunction;
 class IRInstruction;
 class CodeBlock;
+class PropertyCache;
+class MethodCache;
+class NativeCode;
+class Context;
+
+/**
+ * @brief サポートするアーキテクチャタイプ
+ */
+enum class ArchitectureType {
+    X86_64,
+    ARM64,
+    RISCV
+};
 
 /**
  * @brief インラインキャッシュを利用するための特殊なJITコード生成クラス
@@ -32,9 +46,91 @@ public:
     explicit ICCodeGenerator(JITCompiler* compiler);
     
     /**
+     * @brief コンストラクタ - コンテキスト指定版
+     * @param context 実行コンテキスト
+     */
+    explicit ICCodeGenerator(Context* context);
+    
+    /**
      * @brief デストラクタ
      */
     ~ICCodeGenerator() override;
+    
+    /**
+     * @brief プロパティキャッシュに基づいたスタブコードを生成
+     * @param cache プロパティキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generatePropertyStub(PropertyCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief メソッドキャッシュに基づいたスタブコードを生成
+     * @param cache メソッドキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateMethodStub(MethodCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief 未初期化状態のプロパティアクセススタブを生成
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateUninitializedPropertyStub(uint64_t siteId);
+    
+    /**
+     * @brief モノモーフィック状態のプロパティアクセススタブを生成
+     * @param cache プロパティキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateMonomorphicPropertyStub(PropertyCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief ポリモーフィック状態のプロパティアクセススタブを生成
+     * @param cache プロパティキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generatePolymorphicPropertyStub(PropertyCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief メガモーフィック状態のプロパティアクセススタブを生成
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateMegamorphicPropertyStub(uint64_t siteId);
+    
+    /**
+     * @brief 未初期化状態のメソッド呼び出しスタブを生成
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateUninitializedMethodStub(uint64_t siteId);
+    
+    /**
+     * @brief モノモーフィック状態のメソッド呼び出しスタブを生成
+     * @param cache メソッドキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateMonomorphicMethodStub(MethodCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief ポリモーフィック状態のメソッド呼び出しスタブを生成
+     * @param cache メソッドキャッシュ
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generatePolymorphicMethodStub(MethodCache* cache, uint64_t siteId);
+    
+    /**
+     * @brief メガモーフィック状態のメソッド呼び出しスタブを生成
+     * @param siteId サイトID
+     * @return 生成されたネイティブコード
+     */
+    NativeCode* generateMegamorphicMethodStub(uint64_t siteId);
     
     /**
      * @brief 指定されたIR関数に対してインラインキャッシュを利用したコードを生成
@@ -172,6 +268,12 @@ public:
         CodeBlock* codeBlock
     );
     
+    /**
+     * @brief 現在のターゲットアーキテクチャを返す
+     * @return ターゲットアーキテクチャタイプ
+     */
+    ArchitectureType getTargetArchitecture() const;
+    
 private:
     /**
      * @brief キャッシュIDを生成
@@ -220,6 +322,12 @@ private:
     
     /** JITコンパイラへの参照 */
     JITCompiler* m_compiler;
+    
+    /** 実行コンテキストへの参照 */
+    Context* _context;
+    
+    /** ターゲットアーキテクチャタイプ */
+    ArchitectureType _targetArch;
     
     /** 命令ごとのキャッシュIDマップ */
     std::unordered_map<IRInstruction*, uint32_t> m_instructionToCacheId;

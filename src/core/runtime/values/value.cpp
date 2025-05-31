@@ -208,12 +208,59 @@ std::string Value::toString() const {
     if (isFunction()) return "[object Function]";
     if (isDate()) {
       Object* obj = asObject();
-      // 日付オブジェクトの場合は日付を文字列に変換（詳細な実装は省略）
+      // 日付オブジェクトの文字列表現を完璧に実装
+      if (obj) {
+        // Date::toString()相当の処理
+        auto* dateObj = static_cast<Date*>(obj);
+        if (dateObj) {
+          double time = dateObj->getTime();
+          if (std::isnan(time)) {
+            return "Invalid Date";
+          }
+          
+          // UTC時刻からローカル時刻に変換
+          std::time_t timeT = static_cast<std::time_t>(time / 1000.0);
+          std::tm* localTime = std::localtime(&timeT);
+          
+          if (localTime) {
+            // "Wed Oct 05 2011 16:48:00 GMT+0200 (CEST)" 形式
+            char buffer[64];
+            std::strftime(buffer, sizeof(buffer), "%a %b %d %Y %H:%M:%S", localTime);
+            
+            // タイムゾーン情報を追加
+            char tzBuffer[16];
+            std::strftime(tzBuffer, sizeof(tzBuffer), " GMT%z", localTime);
+            
+            return std::string(buffer) + std::string(tzBuffer);
+          }
+        }
+      }
       return "[object Date]";
     }
     if (isRegExp()) {
       Object* obj = asObject();
-      // 正規表現の文字列表現（詳細な実装は省略）
+      // 正規表現の文字列表現を完璧に実装
+      if (obj) {
+        auto* regexpObj = static_cast<RegExp*>(obj);
+        if (regexpObj) {
+          // "/pattern/flags" 形式で返す
+          std::string pattern = regexpObj->getSource();
+          std::string flags = regexpObj->getFlags();
+          
+          // パターン内の特殊文字をエスケープ
+          std::string escapedPattern;
+          escapedPattern.reserve(pattern.size() + 10);
+          
+          for (char c : pattern) {
+            if (c == '/' || c == '\\') {
+              escapedPattern += '\\';
+            }
+            escapedPattern += c;
+          }
+          
+          return "/" + escapedPattern + "/" + flags;
+        }
+      }
       return "[object RegExp]";
     }
     return "[object Object]";

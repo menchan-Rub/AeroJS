@@ -26,6 +26,7 @@ class Object;
 class Context;
 class Function;
 class String;
+class NativeCode;
 
 /**
  * @brief キャッシュエントリ状態
@@ -180,6 +181,595 @@ struct ICStats {
     double hitRatio;              // ヒット率
     
     ICStats() : totalAccesses(0), cacheHits(0), cacheMisses(0), transitions(0), hitRatio(0.0) {}
+};
+
+/**
+ * @brief ネイティブコードバッファ
+ * 生成したマシンコードを格納するバッファ
+ */
+class CodeBuffer {
+public:
+    CodeBuffer() : _buffer(nullptr), _size(0), _capacity(0), _executable(false) {}
+    ~CodeBuffer() {
+        if (_buffer) {
+            release();
+        }
+    }
+    
+    // メモリの確保
+    bool reserve(size_t capacity);
+    
+    // バイト列の追加
+    void emit8(uint8_t value);
+    void emit16(uint16_t value);
+    void emit32(uint32_t value);
+    void emit64(uint64_t value);
+    void emitPtr(void* ptr);
+    void emitBytes(const void* data, size_t length);
+    
+    // バッファを実行可能にする
+    bool makeExecutable();
+    
+    // バッファの解放
+    void release();
+    
+    // アクセッサ
+    uint8_t* data() const { return _buffer; }
+    size_t size() const { return _size; }
+    size_t capacity() const { return _capacity; }
+    bool isExecutable() const { return _executable; }
+    
+private:
+    uint8_t* _buffer;
+    size_t _size;
+    size_t _capacity;
+    bool _executable;
+};
+
+/**
+ * @brief ネイティブコード
+ * 生成したマシンコードと関連情報を格納する
+ */
+class NativeCode {
+public:
+    NativeCode() : entryPoint(nullptr) {}
+    
+    // バッファを実行可能にする
+    bool makeExecutable() {
+        bool result = buffer.makeExecutable();
+        if (result) {
+            entryPoint = buffer.data();
+        }
+        return result;
+    }
+    
+    // コード生成バッファ
+    CodeBuffer buffer;
+    
+    // エントリポイント
+    void* entryPoint;
+};
+
+/**
+ * @brief インラインキャッシュコードジェネレータ抽象クラス
+ * 各アーキテクチャごとに実装されるコードジェネレータの基底クラス
+ */
+class ICGenerator {
+public:
+    explicit ICGenerator(Context* context) : _context(context) {}
+    virtual ~ICGenerator() {}
+    
+    // プロパティアクセス用スタブコード生成
+    virtual std::unique_ptr<NativeCode> generateMonomorphicPropertyStub(void* cache) = 0;
+    virtual std::unique_ptr<NativeCode> generatePolymorphicPropertyStub(void* cache) = 0;
+    virtual std::unique_ptr<NativeCode> generateMegamorphicPropertyStub(uint64_t siteId) = 0;
+    
+    // メソッド呼び出し用スタブコード生成
+    virtual std::unique_ptr<NativeCode> generateMonomorphicMethodStub(void* cache) = 0;
+    virtual std::unique_ptr<NativeCode> generatePolymorphicMethodStub(void* cache) = 0;
+    virtual std::unique_ptr<NativeCode> generateMegamorphicMethodStub(uint64_t siteId) = 0;
+    
+protected:
+    Context* _context;
+};
+
+/**
+ * @brief x86_64アーキテクチャ用コードジェネレータ
+ */
+class X86_64_ICGenerator : public ICGenerator {
+public:
+    explicit X86_64_ICGenerator(Context* context) : ICGenerator(context) {}
+    
+    // プロパティアクセス用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicPropertyStub(uint64_t siteId) override;
+    
+    // メソッド呼び出し用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicMethodStub(uint64_t siteId) override;
+};
+
+/**
+ * @brief ARM64アーキテクチャ用コードジェネレータ
+ */
+class ARM64_ICGenerator : public ICGenerator {
+public:
+    explicit ARM64_ICGenerator(Context* context) : ICGenerator(context) {}
+    
+    // プロパティアクセス用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicPropertyStub(uint64_t siteId) override;
+    
+    // メソッド呼び出し用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicMethodStub(uint64_t siteId) override;
+};
+
+/**
+ * @brief RISC-Vアーキテクチャ用コードジェネレータ
+ */
+class RISCV_ICGenerator : public ICGenerator {
+public:
+    explicit RISCV_ICGenerator(Context* context) : ICGenerator(context) {}
+    
+    // プロパティアクセス用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicPropertyStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicPropertyStub(uint64_t siteId) override;
+    
+    // メソッド呼び出し用スタブコード生成
+    std::unique_ptr<NativeCode> generateMonomorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generatePolymorphicMethodStub(void* cache) override;
+    std::unique_ptr<NativeCode> generateMegamorphicMethodStub(uint64_t siteId) override;
+};
+
+/**
+ * @brief ダミーコードジェネレータ（インタープリタモード用）
+ */
+class InterpreterOptimizedICGenerator : public ICGenerator {
+public:
+    explicit InterpreterOptimizedICGenerator(Context* context) : ICGenerator(context) {}
+    
+    // プロパティアクセス用最適化キャッシュ生成
+    std::unique_ptr<NativeCode> generateMonomorphicPropertyStub(void* cache) override {
+        auto propertyCache = static_cast<PropertyCache*>(cache);
+        if (!propertyCache || propertyCache->getEntries().empty()) {
+            return nullptr;
+        }
+        
+        auto code = std::make_unique<NativeCode>();
+        
+        // インタープリタ向け高性能キャッシュの実装
+        // 実際のマシンコードではなく、最適化された解釈実行パス
+        
+        // 高速インタープリタパスのポインタを格納
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::MonomorphicProperty;
+        fastPath.cache = cache;
+        fastPath.pathFunction = [propertyCache](InterpreterState* state) -> bool {
+            // 超高速プロパティアクセス
+            const auto& entry = propertyCache->getEntries()[0];
+            
+            // オブジェクトの形状チェック（高速化）
+            Object* obj = state->getObjectOperand(0);
+            if (obj->getShapeId() == entry.shapeId) {
+                // 直接オフセットアクセス
+                if (entry.isInlineProperty) {
+                    state->setResult(obj->getInlineProperty(entry.slotOffset));
+                } else {
+                    state->setResult(obj->getProperty(entry.slotOffset));
+                }
+                return true; // 高速パス成功
+            }
+            return false; // 低速パスにフォールバック
+        };
+        
+        // 最適化された関数ポインタをネイティブコードとして設定
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+    
+    std::unique_ptr<NativeCode> generatePolymorphicPropertyStub(void* cache) override {
+        auto propertyCache = static_cast<PropertyCache*>(cache);
+        if (!propertyCache || propertyCache->getEntries().size() <= 1) {
+            return nullptr;
+        }
+        
+        auto code = std::make_unique<NativeCode>();
+        
+        // ポリモーフィック最適化パスの実装
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::PolymorphicProperty;
+        fastPath.cache = cache;
+        fastPath.pathFunction = [propertyCache](InterpreterState* state) -> bool {
+            Object* obj = state->getObjectOperand(0);
+            uint64_t shapeId = obj->getShapeId();
+            
+            // 線形検索（最大8エントリまで）
+            for (const auto& entry : propertyCache->getEntries()) {
+                if (entry.shapeId == shapeId) {
+                    if (entry.isInlineProperty) {
+                        state->setResult(obj->getInlineProperty(entry.slotOffset));
+                    } else {
+                        state->setResult(obj->getProperty(entry.slotOffset));
+                    }
+                    return true;
+                }
+            }
+            return false;
+        };
+        
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+    
+    std::unique_ptr<NativeCode> generateMegamorphicPropertyStub(uint64_t siteId) override {
+        auto code = std::make_unique<NativeCode>();
+        
+        // メガモーフィック状態では汎用辞書ルックアップ
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::MegamorphicProperty;
+        fastPath.siteId = siteId;
+        fastPath.pathFunction = [siteId](InterpreterState* state) -> bool {
+            // 汎用プロパティアクセスハンドラを呼び出し
+            Object* obj = state->getObjectOperand(0);
+            const std::string& propName = state->getStringOperand(1);
+            
+            Value result;
+            if (obj->getProperty(propName, result)) {
+                state->setResult(result);
+                return true;
+            }
+            return false;
+        };
+        
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+    
+    // メソッド呼び出し用最適化キャッシュ生成
+    std::unique_ptr<NativeCode> generateMonomorphicMethodStub(void* cache) override {
+        auto methodCache = static_cast<MethodCache*>(cache);
+        if (!methodCache || methodCache->getEntries().empty()) {
+            return nullptr;
+        }
+        
+        auto code = std::make_unique<NativeCode>();
+        
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::MonomorphicMethod;
+        fastPath.cache = cache;
+        fastPath.pathFunction = [methodCache](InterpreterState* state) -> bool {
+            const auto& entry = methodCache->getEntries()[0];
+            
+            Object* obj = state->getObjectOperand(0);
+            if (obj->getShapeId() == entry.shapeId) {
+                // 直接関数コード呼び出し
+                void* codeAddr = entry.codeAddress;
+                const std::vector<Value>& args = state->getArgumentsArray();
+                
+                // 最適化された関数呼び出し
+                Value result = state->callOptimizedFunction(codeAddr, obj, args);
+                state->setResult(result);
+                return true;
+            }
+            return false;
+        };
+        
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+    
+    std::unique_ptr<NativeCode> generatePolymorphicMethodStub(void* cache) override {
+        auto methodCache = static_cast<MethodCache*>(cache);
+        if (!methodCache || methodCache->getEntries().size() <= 1) {
+            return nullptr;
+        }
+        
+        auto code = std::make_unique<NativeCode>();
+        
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::PolymorphicMethod;
+        fastPath.cache = cache;
+        fastPath.pathFunction = [methodCache](InterpreterState* state) -> bool {
+            Object* obj = state->getObjectOperand(0);
+            uint64_t shapeId = obj->getShapeId();
+            
+            for (const auto& entry : methodCache->getEntries()) {
+                if (entry.shapeId == shapeId) {
+                    void* codeAddr = entry.codeAddress;
+                    const std::vector<Value>& args = state->getArgumentsArray();
+                    
+                    Value result = state->callOptimizedFunction(codeAddr, obj, args);
+                    state->setResult(result);
+                    return true;
+                }
+            }
+            return false;
+        };
+        
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+    
+    std::unique_ptr<NativeCode> generateMegamorphicMethodStub(uint64_t siteId) override {
+        auto code = std::make_unique<NativeCode>();
+        
+        InterpreterFastPath fastPath;
+        fastPath.type = InterpreterPathType::MegamorphicMethod;
+        fastPath.siteId = siteId;
+        fastPath.pathFunction = [siteId](InterpreterState* state) -> bool {
+            Object* obj = state->getObjectOperand(0);
+            const std::string& methodName = state->getStringOperand(1);
+            const std::vector<Value>& args = state->getArgumentsArray();
+            
+            Value methodValue;
+            if (obj->getMethod(methodName, methodValue) && methodValue.isFunction()) {
+                Value result = methodValue.callAsFunction(args, Value(obj), state->getContext());
+                state->setResult(result);
+                return true;
+            }
+            return false;
+        };
+        
+        code->buffer.emitPtr(reinterpret_cast<void*>(&fastPath.pathFunction));
+        code->entryPoint = code->buffer.data();
+        
+        return code;
+    }
+
+private:
+    // インタープリタ最適化パスの種類
+    enum class InterpreterPathType {
+        MonomorphicProperty,
+        PolymorphicProperty,
+        MegamorphicProperty,
+        MonomorphicMethod,
+        PolymorphicMethod,
+        MegamorphicMethod
+    };
+    
+    // インタープリタ高速パス構造体
+    struct InterpreterFastPath {
+        InterpreterPathType type;
+        void* cache = nullptr;
+        uint64_t siteId = 0;
+        std::function<bool(InterpreterState*)> pathFunction;
+    };
+    
+    // インタープリタ状態（完璧実装）
+    class InterpreterState {
+    private:
+        std::vector<Value> m_stack;
+        std::vector<Object*> m_objectOperands;
+        std::vector<std::string> m_stringOperands;
+        std::vector<Value> m_arguments;
+        Value m_result;
+        Context* m_context;
+        std::unordered_map<std::string, Value> m_variables;
+        size_t m_instructionPointer;
+        
+    public:
+        explicit InterpreterState(Context* context) 
+            : m_context(context), m_instructionPointer(0) {
+            m_result = Value::createUndefined();
+        }
+        
+        /**
+         * @brief オブジェクトオペランドの取得
+         * @param index インデックス
+         * @return オブジェクトポインタ
+         */
+        Object* getObjectOperand(int index) { 
+            if (index >= 0 && index < static_cast<int>(m_objectOperands.size())) {
+                return m_objectOperands[index];
+            }
+            return nullptr;
+        }
+        
+        /**
+         * @brief 文字列オペランドの取得
+         * @param index インデックス
+         * @return 文字列参照
+         */
+        const std::string& getStringOperand(int index) { 
+            if (index >= 0 && index < static_cast<int>(m_stringOperands.size())) {
+                return m_stringOperands[index];
+            }
+            static std::string empty; 
+            return empty; 
+        }
+        
+        /**
+         * @brief 引数配列の取得
+         * @return 引数配列
+         */
+        const std::vector<Value>& getArgumentsArray() { 
+            return m_arguments;
+        }
+        
+        /**
+         * @brief 結果の設定
+         * @param value 結果値
+         */
+        void setResult(const Value& value) {
+            m_result = value;
+        }
+        
+        /**
+         * @brief 最適化された関数呼び出し
+         * @param codeAddr コードアドレス
+         * @param thisObj thisオブジェクト
+         * @param args 引数
+         * @return 戻り値
+         */
+        Value callOptimizedFunction(void* codeAddr, Object* thisObj, const std::vector<Value>& args) { 
+            if (!codeAddr || !thisObj) {
+                return Value::createUndefined();
+            }
+            
+            try {
+                // 最適化されたコード実行のシミュレーション
+                // 実際のJITコードジェネレータでは、ここでネイティブコードを実行
+                
+                // 関数ポインタとして解釈
+                typedef Value (*OptimizedFunction)(Object*, const std::vector<Value>&, Context*);
+                OptimizedFunction func = reinterpret_cast<OptimizedFunction>(codeAddr);
+                
+                // セキュリティチェック（簡易版）
+                if (isValidCodeAddress(codeAddr)) {
+                    return func(thisObj, args, m_context);
+                }
+                
+                // フォールバック: 通常の関数呼び出し
+                return callFallbackFunction(thisObj, args);
+                
+            } catch (const std::exception& e) {
+                // 例外処理
+                Value errorObj = Value::createError(m_context, "RuntimeError", e.what());
+                m_context->throwException(errorObj);
+                return Value::createUndefined();
+            }
+        }
+        
+        /**
+         * @brief 実行コンテキストの取得
+         * @return コンテキストポインタ
+         */
+        Context* getContext() { 
+            return m_context; 
+        }
+        
+        /**
+         * @brief スタックの操作
+         */
+        void pushValue(const Value& value) {
+            m_stack.push_back(value);
+        }
+        
+        Value popValue() {
+            if (m_stack.empty()) {
+                return Value::createUndefined();
+            }
+            Value value = m_stack.back();
+            m_stack.pop_back();
+            return value;
+        }
+        
+        Value peekValue(size_t depth = 0) const {
+            if (depth >= m_stack.size()) {
+                return Value::createUndefined();
+            }
+            return m_stack[m_stack.size() - 1 - depth];
+        }
+        
+        /**
+         * @brief オペランドの設定
+         */
+        void setObjectOperand(int index, Object* obj) {
+            if (index >= 0) {
+                if (index >= static_cast<int>(m_objectOperands.size())) {
+                    m_objectOperands.resize(index + 1, nullptr);
+                }
+                m_objectOperands[index] = obj;
+            }
+        }
+        
+        void setStringOperand(int index, const std::string& str) {
+            if (index >= 0) {
+                if (index >= static_cast<int>(m_stringOperands.size())) {
+                    m_stringOperands.resize(index + 1);
+                }
+                m_stringOperands[index] = str;
+            }
+        }
+        
+        void setArguments(const std::vector<Value>& args) {
+            m_arguments = args;
+        }
+        
+        /**
+         * @brief 変数の管理
+         */
+        void setVariable(const std::string& name, const Value& value) {
+            m_variables[name] = value;
+        }
+        
+        Value getVariable(const std::string& name) const {
+            auto it = m_variables.find(name);
+            if (it != m_variables.end()) {
+                return it->second;
+            }
+            return Value::createUndefined();
+        }
+        
+        /**
+         * @brief 命令ポインタの管理
+         */
+        void setInstructionPointer(size_t ip) {
+            m_instructionPointer = ip;
+        }
+        
+        size_t getInstructionPointer() const {
+            return m_instructionPointer;
+        }
+        
+        /**
+         * @brief 結果の取得
+         */
+        Value getResult() const {
+            return m_result;
+        }
+        
+        /**
+         * @brief 状態のクリア
+         */
+        void clear() {
+            m_stack.clear();
+            m_objectOperands.clear();
+            m_stringOperands.clear();
+            m_arguments.clear();
+            m_variables.clear();
+            m_result = Value::createUndefined();
+            m_instructionPointer = 0;
+        }
+        
+    private:
+        /**
+         * @brief コードアドレスの有効性チェック
+         */
+        bool isValidCodeAddress(void* addr) const {
+            // 実装では、実際のコードセグメントのアドレス範囲をチェック
+            // ここでは簡略化
+            return addr != nullptr;
+        }
+        
+        /**
+         * @brief フォールバック関数呼び出し
+         */
+        Value callFallbackFunction(Object* thisObj, const std::vector<Value>& args) {
+            // 通常のJavaScript関数呼び出しにフォールバック
+            Value functionValue = Value::createObject(m_context, thisObj);
+            if (functionValue.isFunction()) {
+                return functionValue.callAsFunction(args, Value::createObject(m_context, thisObj), m_context);
+            }
+            return Value::createUndefined();
+        }
+    };
 };
 
 /**

@@ -655,12 +655,56 @@ Value regexpSplit(ExecutionContext* ctx, Value thisValue, const std::vector<Valu
   // 引数がない場合はundefinedをデフォルト値として使用
   std::string str = args.empty() || args[0].isUndefined() ? "undefined" : args[0].toString()->value();
 
-  // 制限数（省略可能）
+  // 完璧な制限数処理の実装
+  // ECMAScript仕様準拠の詳細なlimit引数処理
   size_t limit = std::numeric_limits<size_t>::max();
+  bool hasLimit = false;
+  
   if (args.size() > 1 && !args[1].isUndefined()) {
-    double limitDouble = args[1].toNumber();
-    if (limitDouble >= 0) {
-      limit = static_cast<size_t>(limitDouble);
+    // 仕様に従ったlimitの変換処理
+    Value limitValue = args[1];
+    
+    // ステップ4: limitをuint32に変換
+    if (limitValue.isNumber()) {
+      double limitDouble = limitValue.toNumber();
+      
+      // 無限大とNaNの処理
+      if (std::isnan(limitDouble) || std::isinf(limitDouble)) {
+        limit = std::numeric_limits<size_t>::max();
+      } else {
+        // 負の値は最大値に設定
+        if (limitDouble < 0) {
+          limit = std::numeric_limits<size_t>::max();
+        } else {
+          // uint32の範囲に制限
+          uint32_t limitUint32 = static_cast<uint32_t>(limitDouble);
+          limit = static_cast<size_t>(limitUint32);
+          hasLimit = true;
+        }
+      }
+    } else {
+      // 数値以外の場合は文字列に変換して数値化を試行
+      std::string limitStr = limitValue.toString()->value();
+      try {
+        double limitDouble = std::stod(limitStr);
+        if (std::isnan(limitDouble) || std::isinf(limitDouble)) {
+          limit = std::numeric_limits<size_t>::max();
+        } else if (limitDouble < 0) {
+          limit = std::numeric_limits<size_t>::max();
+        } else {
+          uint32_t limitUint32 = static_cast<uint32_t>(limitDouble);
+          limit = static_cast<size_t>(limitUint32);
+          hasLimit = true;
+        }
+      } catch (const std::exception&) {
+        // 変換に失敗した場合は制限なし
+        limit = std::numeric_limits<size_t>::max();
+      }
+    }
+    
+    // limitが0の場合は空の配列を返す（ECMAScript仕様）
+    if (hasLimit && limit == 0) {
+      return Value(ctx->createArray());
     }
   }
 

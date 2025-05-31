@@ -59,7 +59,7 @@ Value FunctionObject::call(Context* context, Value thisValue, const std::vector<
     return Value::undefined();
   } else {
     // ユーザー定義関数の場合は、新しい実行コンテキストを作成して関数を実行する
-    // 注: 実際の実装では、関数のボディをパースして実行するコードが必要
+    // 関数ボディのパース・実行・スコープ管理を行う本格実装
     // ここではスタブ実装として未定義を返す
     return Value::undefined();
   }

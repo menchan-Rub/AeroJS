@@ -1,300 +1,274 @@
 /**
  * @file memory_allocator.h
- * @brief メモリアロケータの基本インターフェース
+ * @brief AeroJS メモリアロケータインターフェースと実装
  * @version 0.1.0
  * @license MIT
  */
 
-#ifndef AEROJS_MEMORY_ALLOCATOR_H
-#define AEROJS_MEMORY_ALLOCATOR_H
+#ifndef AEROJS_UTILS_MEMORY_ALLOCATORS_MEMORY_ALLOCATOR_H
+#define AEROJS_UTILS_MEMORY_ALLOCATORS_MEMORY_ALLOCATOR_H
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <new>
-#include <type_traits>
-#include <utility>
+#include <mutex>
+#include <unordered_map>
+#include <atomic>
+#include <vector>
+#include <chrono>
 
 namespace aerojs {
 namespace utils {
+namespace memory {
 
 /**
- * @brief メモリ領域の属性フラグ
+ * @brief メモリ統計情報
  */
-enum class MemoryRegionFlags : uint32_t {
-  None = 0,
-  // メモリの用途
-  Code = 1 << 0,    // 実行可能コード用
-  Data = 1 << 1,    // データ用
-  GCHeap = 1 << 2,  // GCヒープ用
-  Stack = 1 << 3,   // スタック用
-
-  // アクセス権限
-  Read = 1 << 4,     // 読み取り可能
-  Write = 1 << 5,    // 書き込み可能
-  Execute = 1 << 6,  // 実行可能
-
-  // GC関連フラグ
-  GCManaged = 1 << 7,  // GC管理下
-  GCRoot = 1 << 8,     // GCルート
-
-  // その他フラグ
-  Shared = 1 << 9,   // 共有メモリ
-  Mapped = 1 << 10,  // メモリマップド
-  Huge = 1 << 11,    // 巨大ページ
-
-  // 一般的な組み合わせ
-  ReadWrite = Read | Write,
-  ReadExecute = Read | Execute,
-  ReadWriteExecute = Read | Write | Execute,
-  DefaultData = Data | ReadWrite,
-  DefaultCode = Code | ReadExecute,
-  DefaultHeap = GCHeap | ReadWrite | GCManaged
+struct AllocatorStats {
+    size_t totalAllocations{0};      // 総割り当て回数
+    size_t currentAllocations{0};    // 現在の割り当て数
+    size_t totalBytes{0};            // 総割り当てバイト数
+    size_t currentBytes{0};          // 現在の割り当てバイト数
+    size_t peakBytes{0};             // ピーク時の割り当てバイト数
+    size_t failedAllocations{0};     // 失敗した割り当て回数
+    size_t totalAllocated{0};        // 総割り当てサイズ
+    size_t currentAllocated{0};      // 現在の割り当てサイズ
+    size_t gcCount{0};               // GC実行回数
 };
 
-// ビット演算子のオーバーロード
-inline MemoryRegionFlags operator|(MemoryRegionFlags a, MemoryRegionFlags b) {
-  return static_cast<MemoryRegionFlags>(
-      static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-}
-
-inline MemoryRegionFlags operator&(MemoryRegionFlags a, MemoryRegionFlags b) {
-  return static_cast<MemoryRegionFlags>(
-      static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
-}
-
-inline MemoryRegionFlags& operator|=(MemoryRegionFlags& a, MemoryRegionFlags b) {
-  a = a | b;
-  return a;
-}
-
-inline MemoryRegionFlags& operator&=(MemoryRegionFlags& a, MemoryRegionFlags b) {
-  a = a & b;
-  return a;
-}
-
 /**
- * @brief メモリアロケータの基本インターフェース
- *
- * すべてのカスタムアロケータの基底クラスです。
+ * @brief メモリアロケータの基底クラス
  */
 class MemoryAllocator {
- public:
-  virtual ~MemoryAllocator() = default;
+public:
+    virtual ~MemoryAllocator() = default;
 
-  /**
-   * @brief メモリを確保する
-   * @param size 確保するサイズ (バイト単位)
-   * @param alignment アライメント (バイト単位)
-   * @param flags メモリ領域のフラグ
-   * @return 確保されたメモリへのポインタ、失敗した場合はnullptr
-   */
-  virtual void* allocate(std::size_t size, std::size_t alignment = alignof(std::max_align_t), MemoryRegionFlags flags = MemoryRegionFlags::DefaultData) = 0;
+    /**
+     * @brief メモリを割り当てる
+     * @param size 割り当てサイズ（バイト）
+     * @param alignment メモリアライメント（デフォルト: 8）
+     * @return void* 割り当てられたメモリへのポインタ（失敗時はnullptr）
+     */
+    virtual void* allocate(size_t size, size_t alignment = 8) = 0;
 
-  /**
-   * @brief メモリを解放する
-   * @param ptr 解放するメモリへのポインタ
-   * @param size 確保時のサイズ (バイト単位)
-   * @param alignment 確保時のアライメント (バイト単位)
-   * @return 成功した場合はtrue、それ以外はfalse
-   */
-  virtual bool deallocate(void* ptr, std::size_t size = 0, std::size_t alignment = alignof(std::max_align_t)) = 0;
+    /**
+     * @brief メモリを解放する
+     * @param ptr 解放するメモリのポインタ
+     */
+    virtual void deallocate(void* ptr) = 0;
 
-  /**
-   * @brief メモリ領域のサイズを変更する
-   * @param ptr 現在のメモリへのポインタ
-   * @param oldSize 現在のサイズ (バイト単位)
-   * @param newSize 新しいサイズ (バイト単位)
-   * @param alignment アライメント (バイト単位)
-   * @return 新しいメモリへのポインタ、失敗した場合はnullptr
-   */
-  virtual void* reallocate(void* ptr, std::size_t oldSize, std::size_t newSize, std::size_t alignment = alignof(std::max_align_t)) {
-    // デフォルト実装: 新しいメモリを確保してコピー
-    if (newSize == 0) {
-      deallocate(ptr, oldSize, alignment);
-      return nullptr;
-    }
+    /**
+     * @brief メモリを再割り当てする
+     * @param ptr 再割り当てするメモリのポインタ
+     * @param newSize 新しいサイズ（バイト）
+     * @param alignment メモリアライメント（デフォルト: 8）
+     * @return void* 再割り当てされたメモリへのポインタ
+     */
+    virtual void* reallocate(void* ptr, size_t newSize, size_t alignment = 8) = 0;
 
-    if (ptr == nullptr) {
-      return allocate(newSize, alignment);
-    }
+    /**
+     * @brief 割り当てられたメモリのサイズを取得
+     * @param ptr メモリのポインタ
+     * @return size_t メモリサイズ（バイト）
+     */
+    virtual size_t getSize(void* ptr) const = 0;
 
-    void* newPtr = allocate(newSize, alignment);
-    if (newPtr == nullptr) {
-      return nullptr;
-    }
+    /**
+     * @brief 現在割り当てられているメモリサイズを取得
+     * @return size_t 現在のメモリサイズ（バイト）
+     */
+    virtual size_t getCurrentAllocatedSize() const = 0;
 
-    std::memcpy(newPtr, ptr, (oldSize < newSize) ? oldSize : newSize);
-    deallocate(ptr, oldSize, alignment);
+    /**
+     * @brief 総割り当てメモリサイズを取得
+     * @return size_t 総メモリサイズ（バイト）
+     */
+    virtual size_t getTotalAllocatedSize() const = 0;
 
-    return newPtr;
-  }
+    /**
+     * @brief メモリ制限を設定
+     * @param limit メモリ制限（バイト）
+     */
+    virtual void setMemoryLimit(size_t limit) = 0;
 
-  /**
-   * @brief メモリ領域のアクセス権限を変更する
-   * @param ptr メモリ領域へのポインタ
-   * @param size サイズ (バイト単位)
-   * @param flags 新しいメモリ領域のフラグ
-   * @return 成功した場合はtrue、失敗した場合はfalse
-   */
-  virtual bool setMemoryProtection(void* ptr, std::size_t size, MemoryRegionFlags flags) {
-    // 基本実装はなにもしない（サブクラスで必要に応じて実装）
-    return false;
-  }
+    /**
+     * @brief メモリ制限を取得
+     * @return size_t メモリ制限（バイト）
+     */
+    virtual size_t getMemoryLimit() const = 0;
 
-  /**
-   * @brief アロケータ統計情報
-   */
-  struct Stats {
-    std::size_t totalAllocated;      // 合計確保サイズ
-    std::size_t currentAllocated;    // 現在確保サイズ
-    std::size_t maxAllocated;        // 最大確保サイズ
-    std::size_t totalAllocations;    // 確保回数
-    std::size_t activeAllocations;   // 現在のアクティブな確保数
-    std::size_t totalDeallocations;  // 解放回数
-    std::size_t failedAllocations;   // 失敗した確保回数
-  };
+    /**
+     * @brief 統計情報を取得
+     * @return const AllocatorStats& 統計情報への参照
+     */
+    virtual const AllocatorStats& getStats() const = 0;
 
-  /**
-   * @brief 統計情報を取得する
-   * @return 統計情報
-   */
-  virtual Stats getStats() const = 0;
+    /**
+     * @brief ガベージコレクション準備
+     */
+    virtual void prepareForGC() = 0;
 
-  /**
-   * @brief 統計情報をリセットする
-   */
-  virtual void resetStats() = 0;
+    /**
+     * @brief ガベージコレクション完了通知
+     */
+    virtual void finishGC() = 0;
 
-  /**
-   * @brief アロケータ名を取得する
-   * @return アロケータ名
-   */
-  virtual const char* getName() const = 0;
+    /**
+     * @brief 割り当て済みオブジェクトのリストを取得（GC用）
+     * @return std::vector<void*> 割り当て済みオブジェクトのリスト
+     */
+    virtual std::vector<void*> getAllocatedObjects() const = 0;
+
+    /**
+     * @brief ガベージコレクション開始
+     */
+    virtual void startGC() = 0;
+
+    /**
+     * @brief 初期化
+     * @return bool 成功時はtrue
+     */
+    virtual bool initialize() = 0;
 };
 
 /**
- * @brief 標準アロケータの実装
- *
- * new/deleteを使用した基本的なアロケータです。
+ * @brief 標準的なメモリアロケータ実装
  */
 class StandardAllocator : public MemoryAllocator {
- public:
-  StandardAllocator()
-      : m_stats{0, 0, 0, 0, 0, 0, 0} {
-  }
+public:
+    StandardAllocator();
+    ~StandardAllocator() override;
 
-  virtual ~StandardAllocator() = default;
+    void* allocate(size_t size, size_t alignment = 8) override;
+    void deallocate(void* ptr) override;
+    void* reallocate(void* ptr, size_t newSize, size_t alignment = 8) override;
+    size_t getSize(void* ptr) const override;
+    size_t getCurrentAllocatedSize() const override;
+    size_t getTotalAllocatedSize() const override;
+    void setMemoryLimit(size_t limit) override;
+    size_t getMemoryLimit() const override;
+    const AllocatorStats& getStats() const override;
+    void prepareForGC() override;
+    void finishGC() override;
+    std::vector<void*> getAllocatedObjects() const override;
+    void startGC() override;
+    bool initialize() override;
 
-  virtual void* allocate(std::size_t size, std::size_t alignment = alignof(std::max_align_t), MemoryRegionFlags flags = MemoryRegionFlags::DefaultData) override {
-    if (size == 0) return nullptr;
+private:
+    struct AllocationInfo {
+        size_t size;
+        size_t alignment;
+        std::chrono::steady_clock::time_point timestamp;
+    };
 
-    void* ptr = nullptr;
-
-    if (alignment <= alignof(std::max_align_t)) {
-      // 標準的なアライメントの場合はnew[]を使用
-      ptr = ::operator new(size, std::nothrow);
-    } else {
-      // カスタムアライメントの場合はaligned_allocを使用
-      ptr = aligned_alloc(alignment, size);
-    }
-
-    if (ptr) {
-      // 統計情報を更新
-      m_stats.totalAllocated += size;
-      m_stats.currentAllocated += size;
-      m_stats.maxAllocated = std::max(m_stats.maxAllocated, m_stats.currentAllocated);
-      m_stats.totalAllocations++;
-      m_stats.activeAllocations++;
-    } else {
-      m_stats.failedAllocations++;
-    }
-
-    return ptr;
-  }
-
-  virtual bool deallocate(void* ptr, std::size_t size = 0, std::size_t alignment = alignof(std::max_align_t)) override {
-    if (ptr == nullptr) return true;
-
-    if (alignment <= alignof(std::max_align_t)) {
-      // 標準的なアライメントの場合はdeleteを使用
-      ::operator delete(ptr);
-    } else {
-      // カスタムアライメントの場合はfreeを使用
-      free(ptr);
-    }
-
-    // 統計情報を更新
-    if (size > 0) {
-      m_stats.currentAllocated -= size;
-    }
-    m_stats.totalDeallocations++;
-    m_stats.activeAllocations--;
-
-    return true;
-  }
-
-  virtual Stats getStats() const override {
-    return m_stats;
-  }
-
-  virtual void resetStats() override {
-    m_stats = {0, 0, 0, 0, 0, 0, 0};
-  }
-
-  virtual const char* getName() const override {
-    return "StandardAllocator";
-  }
-
- private:
-  Stats m_stats;
-
-  // aligned_allocのクロスプラットフォーム実装
-  void* aligned_alloc(std::size_t alignment, std::size_t size) {
-#if defined(_MSC_VER)
-    return _aligned_malloc(size, alignment);
-#elif defined(__APPLE__)
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, alignment, size) != 0) {
-      return nullptr;
-    }
-    return ptr;
-#else
-    // C11で標準化されたaligned_allocを使用
-    // サイズはアライメントの倍数である必要がある
-    size_t alignedSize = (size + alignment - 1) & ~(alignment - 1);
-    return ::aligned_alloc(alignment, alignedSize);
-#endif
-  }
+    mutable std::mutex mutex_;
+    std::unordered_map<void*, AllocationInfo> allocations_;
+    AllocatorStats stats_;
+    size_t memoryLimit_;
 };
 
 /**
- * @brief オブジェクト生成・破棄のためのユーティリティ関数
+ * @brief プールアロケータ実装
  */
-template <typename T, typename Allocator, typename... Args>
-T* createObject(Allocator& allocator, Args&&... args) {
-  void* memory = allocator.allocate(sizeof(T), alignof(T));
-  if (!memory) {
-    return nullptr;
-  }
+class PoolAllocator : public MemoryAllocator {
+ public:
+  explicit PoolAllocator(size_t blockSize, size_t poolSize = 1024 * 1024);
+  ~PoolAllocator() override;
 
-  try {
-    return new (memory) T(std::forward<Args>(args)...);
-  } catch (...) {
-    allocator.deallocate(memory, sizeof(T), alignof(T));
-    throw;
-  }
-}
+  void* allocate(size_t size, size_t alignment = 8) override;
+  void deallocate(void* ptr) override;
+  void* reallocate(void* ptr, size_t newSize, size_t alignment = 8) override;
+  size_t getSize(void* ptr) const override;
+  size_t getCurrentAllocatedSize() const override;
+  size_t getTotalAllocatedSize() const override;
+  void setMemoryLimit(size_t limit) override;
+  size_t getMemoryLimit() const override;
+  const AllocatorStats& getStats() const override;
+  void prepareForGC() override;
+  void finishGC() override;
 
-template <typename T, typename Allocator>
-void destroyObject(Allocator& allocator, T* object) {
-  if (object) {
-    object->~T();
-    allocator.deallocate(object, sizeof(T), alignof(T));
-  }
-}
+ private:
+  struct Block {
+    Block* next;
+    bool inUse;
+  };
 
+  struct Pool {
+    void* memory;
+    size_t size;
+    Block* freeList;
+    Pool* next;
+  };
+
+  size_t blockSize_;
+  size_t poolSize_;
+  Pool* pools_;
+  Block* freeList_;
+  mutable std::mutex mutex_;
+  AllocatorStats stats_;
+  size_t memoryLimit_;
+
+  /**
+   * @brief 新しいプールを作成
+   * @return Pool* 作成されたプール
+   */
+  Pool* createPool();
+
+  /**
+   * @brief プールを初期化
+   * @param pool 初期化するプール
+   */
+  void initializePool(Pool* pool);
+};
+
+/**
+ * @brief スタックアロケータ実装
+ */
+class StackAllocator : public MemoryAllocator {
+ public:
+  explicit StackAllocator(size_t size);
+  ~StackAllocator() override;
+
+  void* allocate(size_t size, size_t alignment = 8) override;
+  void deallocate(void* ptr) override;
+  void* reallocate(void* ptr, size_t newSize, size_t alignment = 8) override;
+  size_t getSize(void* ptr) const override;
+  size_t getCurrentAllocatedSize() const override;
+  size_t getTotalAllocatedSize() const override;
+  void setMemoryLimit(size_t limit) override;
+  size_t getMemoryLimit() const override;
+  const AllocatorStats& getStats() const override;
+  void prepareForGC() override;
+  void finishGC() override;
+
+  /**
+   * @brief スタックの先頭に戻す
+   */
+  void reset();
+
+  /**
+   * @brief マーカーを設定
+   * @return size_t マーカー位置
+   */
+  size_t setMarker();
+
+  /**
+   * @brief マーカー位置に戻す
+   * @param marker マーカー位置
+   */
+  void resetToMarker(size_t marker);
+
+ private:
+  void* memory_;
+  size_t size_;
+  size_t current_;
+  mutable std::mutex mutex_;
+  AllocatorStats stats_;
+  size_t memoryLimit_;
+};
+
+}  // namespace memory
 }  // namespace utils
 }  // namespace aerojs
 
-#endif  // AEROJS_MEMORY_ALLOCATOR_H
+#endif  // AEROJS_UTILS_MEMORY_ALLOCATORS_MEMORY_ALLOCATOR_H

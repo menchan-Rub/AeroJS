@@ -1,237 +1,261 @@
 /**
  * @file garbage_collector.cpp
- * @brief ガベージコレクタの実装
- * @copyright 2023 AeroJS プロジェクト
+ * @brief AeroJS ガベージコレクタ実装
+ * @version 0.1.0
+ * @license MIT
  */
 
 #include "garbage_collector.h"
-#include "../../../core/runtime/object.h"
-#include "../smart_ptr/handle_manager.h"
+#include "../allocators/memory_allocator.h"
+#include "../pool/memory_pool.h"
+#include <algorithm>
+#include <chrono>
+#include <thread>
 
-namespace aero {
+namespace aerojs {
+namespace utils {
+namespace memory {
 
-// 非テンプレートメソッドの実装
-
-void GarbageCollector::registerWeakRefProvider(std::function<void()> provider) {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  m_weakRefProviders.push_back(provider);
+GarbageCollector::GarbageCollector(MemoryAllocator* allocator, MemoryPool* pool)
+    : allocator_(allocator),
+      pool_(pool),
+      mode_(GCMode::MARK_SWEEP),
+      isRunning_(false),
+      totalCollections_(0),
+      totalCollectionTime_(0),
+      lastCollectionTime_(0),
+      threshold_(1024 * 1024), // 1MB
+      maxHeapSize_(512 * 1024 * 1024) { // 512MB
 }
 
-void GarbageCollector::registerFinalizationCallback(std::function<void()> callback) {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  m_finalizationCallbacks.push_back(callback);
-}
+GarbageCollector::~GarbageCollector() = default;
 
-void GarbageCollector::triggerGC(bool force) {
-  // GCが既に実行中ならスキップ
-  bool expected = false;
-  if (!m_isCollecting.compare_exchange_strong(expected, true)) {
-    return;
-  }
-
-  try {
-    // 並列コレクションが設定されている場合は別スレッドで実行
-    if (m_parallelCollection && !force) {
-      std::thread collector([this]() {
-        try {
-          this->collectGarbage();
-        } catch (...) {
-          // 例外を無視
+void GarbageCollector::collect() {
+    if (isRunning_) {
+        return; // 既にGCが実行中
+    }
+    
+    isRunning_ = true;
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    try {
+        switch (mode_) {
+            case GCMode::MARK_SWEEP:
+                performMarkSweep();
+                break;
+            case GCMode::GENERATIONAL:
+                performGenerational();
+                break;
+            case GCMode::INCREMENTAL:
+                performIncremental();
+                break;
+            case GCMode::CONCURRENT:
+                performConcurrent();
+                break;
         }
-        m_isCollecting.store(false);
-      });
-      collector.detach();
-    } else {
-      // 直接実行
-      collectGarbage();
-      m_isCollecting.store(false);
-    }
-  } catch (...) {
-    // 例外発生時にもフラグをリセット
-    m_isCollecting.store(false);
-    throw;
-  }
-}
-
-void GarbageCollector::processFinalizationRegistries() {
-  std::vector<std::function<void()>> callbacks;
-  
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    callbacks = m_finalizationCallbacks;
-  }
-  
-  // 各コールバックを実行
-  for (const auto& callback : callbacks) {
-    try {
-      callback();
+        
+        totalCollections_++;
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+        lastCollectionTime_ = duration.count();
+        totalCollectionTime_ += lastCollectionTime_;
+        
     } catch (...) {
-      // エラーを無視（コールバックチェーンを中断しない）
-    }
-  }
-}
-
-void GarbageCollector::setParallelCollection(bool enabled) {
-  m_parallelCollection = enabled;
-}
-
-void GarbageCollector::setDebugMode(bool enabled) {
-  m_debugMode = enabled;
-}
-
-void GarbageCollector::collectGarbage() {
-  if (m_debugMode) {
-    printf("GC: Starting garbage collection\n");
-  }
-
-  // HandleManagerとの連携
-  auto handleManager = HandleManager::getInstance();
-  if (handleManager) {
-    handleManager->prepareForGC();
-  }
-
-  // フェーズ1: マーク処理（WeakRefオブジェクトの特定を含む）
-  markPhase();
-
-  // フェーズ2: スイープ処理（オブジェクトの解放）
-  std::vector<Object*> collectedObjects = sweepPhase();
-
-  // HandleManagerに回収オブジェクトを通知
-  if (handleManager && !collectedObjects.empty()) {
-    handleManager->afterGC(collectedObjects);
-  }
-
-  // フェーズ3: WeakRefの更新
-  updateWeakRefs();
-
-  // フェーズ4: Finalizationコールバックの実行
-  if (!collectedObjects.empty()) {
-    processFinalizationRegistries();
-  }
-
-  if (m_debugMode) {
-    printf("GC: Completed garbage collection, collected %zu objects\n", 
-            collectedObjects.size());
-  }
-}
-
-void GarbageCollector::markPhase() {
-  // ルートオブジェクト（グローバルオブジェクトやスタック上の変数）からマークを開始
-  std::vector<Object*> markStack;
-  
-  // ルートオブジェクトをマークスタックに追加
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    // スレッドローカルハンドルからのルートを追加
-    for (const auto& root : m_roots) {
-      if (root && *root) {
-        markStack.push_back(*root);
-        (*root)->setMarked(true);
-      }
+        // GCエラーの処理
     }
     
-    // グローバルハンドルからのルートを追加
-    for (const auto& handle : m_globalHandles) {
-      if (handle && *handle) {
-        markStack.push_back(*handle);
-        (*handle)->setMarked(true);
-      }
+    isRunning_ = false;
+}
+
+void GarbageCollector::setMode(GCMode mode) {
+    if (!isRunning_) {
+        mode_ = mode;
     }
-  }
-  
-  // マークスタックからオブジェクトを取り出して子オブジェクトを追加
-  while (!markStack.empty()) {
-    Object* obj = markStack.back();
-    markStack.pop_back();
+}
+
+GCMode GarbageCollector::getMode() const {
+    return mode_;
+}
+
+void GarbageCollector::setThreshold(size_t threshold) {
+    threshold_ = threshold;
+}
+
+size_t GarbageCollector::getThreshold() const {
+    return threshold_;
+}
+
+void GarbageCollector::setMaxHeapSize(size_t maxSize) {
+    maxHeapSize_ = maxSize;
+}
+
+size_t GarbageCollector::getMaxHeapSize() const {
+    return maxHeapSize_;
+}
+
+bool GarbageCollector::isRunning() const {
+    return isRunning_;
+}
+
+size_t GarbageCollector::getTotalCollections() const {
+    return totalCollections_;
+}
+
+uint64_t GarbageCollector::getTotalCollectionTime() const {
+    return totalCollectionTime_;
+}
+
+uint64_t GarbageCollector::getLastCollectionTime() const {
+    return lastCollectionTime_;
+}
+
+void GarbageCollector::addRoot(void* root) {
+    std::lock_guard<std::mutex> lock(rootsMutex_);
+    roots_.insert(root);
+}
+
+void GarbageCollector::removeRoot(void* root) {
+    std::lock_guard<std::mutex> lock(rootsMutex_);
+    roots_.erase(root);
+}
+
+void GarbageCollector::performMarkSweep() {
+    // マーク＆スイープGCの実装
     
-    // このオブジェクトが参照する他のオブジェクトを列挙
-    obj->visitReferences([&markStack](Object* childObj) {
-      // まだマークされていない子オブジェクトのみスタックに追加
-      if (childObj && !childObj->isMarked()) {
-        childObj->setMarked(true);
-        markStack.push_back(childObj);
-      }
+    // 1. マークフェーズ：到達可能なオブジェクトをマーク
+    markReachableObjects();
+    
+    // 2. スイープフェーズ：未マークのオブジェクトを回収
+    sweepUnmarkedObjects();
+    
+    // 3. コンパクションフェーズ（オプション）
+    if (shouldCompact()) {
+        compactHeap();
+    }
+}
+
+void GarbageCollector::performGenerational() {
+    // 世代別GCの実装
+    // 若い世代のGCを頻繁に、古い世代のGCを稀に実行
+    
+    // 若い世代のGC
+    collectYoungGeneration();
+    
+    // 必要に応じて古い世代のGC
+    if (shouldCollectOldGeneration()) {
+        collectOldGeneration();
+    }
+}
+
+void GarbageCollector::performIncremental() {
+    // インクリメンタルGCの実装
+    // GCを小さなステップに分割して実行
+    
+    static int phase = 0;
+    const int maxPhases = 10;
+    
+    switch (phase % maxPhases) {
+        case 0: case 1: case 2:
+            // マークフェーズを分割実行
+            incrementalMark();
+            break;
+        case 3: case 4:
+            // スイープフェーズを分割実行
+            incrementalSweep();
+            break;
+        default:
+            // 休止フェーズ
+            break;
+    }
+    
+    phase++;
+}
+
+void GarbageCollector::performConcurrent() {
+    // 並行GCの実装
+    // メインスレッドと並行してGCを実行
+    
+    // 簡易実装：バックグラウンドでマーク＆スイープを実行
+    std::thread gcThread([this]() {
+        performMarkSweep();
     });
-  }
-  
-  // WeakRefオブジェクトの処理
-  // マーク後に生き残っているオブジェクトを参照しているWeakRefのみ有効
-  processWeakReferences();
-}
-
-std::vector<Object*> GarbageCollector::sweepPhase() {
-  std::vector<Object*> collectedObjects;
-  
-  // マークされていないオブジェクトを収集
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
     
-    auto it = m_managedObjects.begin();
-    while (it != m_managedObjects.end()) {
-      Object* obj = *it;
-      
-      if (!obj->isMarked()) {
-        // マークされていないオブジェクトは解放対象
-        collectedObjects.push_back(obj);
-        it = m_managedObjects.erase(it);
-        
-        // ファイナライザがある場合は実行
-        obj->finalize();
-        
-        // WeakHandleがあれば無効化
-        invalidateWeakHandles(obj);
-        
-        // オブジェクトのメモリを解放
-        delete obj;
-      } else {
-        // 次のGCサイクルのためにマークをリセット
-        obj->setMarked(false);
-        ++it;
-      }
-    }
-  }
-  
-  return collectedObjects;
+    gcThread.detach();
 }
 
-void GarbageCollector::processWeakReferences() {
-  // WeakRefオブジェクトを処理
-  for (const auto& provider : m_weakRefProviders) {
-    try {
-      provider();
-    } catch (...) {
-      // エラーを無視
+void GarbageCollector::markReachableObjects() {
+    std::lock_guard<std::mutex> lock(rootsMutex_);
+    
+    // ルートオブジェクトから開始してマーク
+    for (void* root : roots_) {
+        markObject(root);
     }
-  }
 }
 
-void GarbageCollector::invalidateWeakHandles(Object* obj) {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  for (auto handle : m_registeredWeakHandles) {
-    // WeakHandleが対象オブジェクトを参照している場合は無効化
-    if (handle && static_cast<void*>(obj) == handle->getTarget()) {
-      handle->invalidate();
+void GarbageCollector::markObject(void* object) {
+    if (!object || markedObjects_.count(object)) {
+        return; // nullまたは既にマーク済み
     }
-  }
+    
+    markedObjects_.insert(object);
+    
+    // オブジェクトが参照する他のオブジェクトも再帰的にマーク
+    // 実際の実装では、オブジェクトの型に応じて参照を辿る
 }
 
-void GarbageCollector::updateWeakRefs() {
-  std::vector<std::function<void()>> providers;
-  
-  {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    providers = m_weakRefProviders;
-  }
-  
-  // 各プロバイダを実行
-  for (const auto& provider : providers) {
-    try {
-      provider();
-    } catch (...) {
-      // エラーを無視
+void GarbageCollector::sweepUnmarkedObjects() {
+    // アロケータから全オブジェクトを取得し、未マークのものを回収
+    auto allocatedObjects = allocator_->getAllocatedObjects();
+    
+    for (void* object : allocatedObjects) {
+        if (markedObjects_.count(object) == 0) {
+            // 未マークのオブジェクトを回収
+            allocator_->deallocate(object);
+        }
     }
-  }
+    
+    // マークをクリア
+    markedObjects_.clear();
 }
 
-} // namespace aero 
+bool GarbageCollector::shouldCompact() const {
+    // ヒープの断片化率に基づいてコンパクションの必要性を判断
+    size_t totalSize = allocator_->getTotalAllocatedSize();
+    size_t usedSize = allocator_->getCurrentAllocatedSize();
+    
+    if (totalSize == 0) return false;
+    
+    double fragmentationRatio = 1.0 - (static_cast<double>(usedSize) / totalSize);
+    return fragmentationRatio > 0.3; // 30%以上断片化している場合
+}
+
+void GarbageCollector::compactHeap() {
+    // ヒープのコンパクション実装
+    // 生きているオブジェクトを連続したメモリ領域に移動
+}
+
+void GarbageCollector::collectYoungGeneration() {
+    // 若い世代のGC実装
+}
+
+void GarbageCollector::collectOldGeneration() {
+    // 古い世代のGC実装
+}
+
+bool GarbageCollector::shouldCollectOldGeneration() const {
+    // 古い世代のGCが必要かどうかを判断
+    return totalCollections_ % 10 == 0; // 10回に1回
+}
+
+void GarbageCollector::incrementalMark() {
+    // インクリメンタルマークの実装
+}
+
+void GarbageCollector::incrementalSweep() {
+    // インクリメンタルスイープの実装
+}
+
+} // namespace memory
+} // namespace utils
+} // namespace aerojs 

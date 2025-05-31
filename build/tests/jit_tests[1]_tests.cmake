@@ -1,5 +1,0 @@
-add_test( JITCompilerTest.BaselineCompileEmpty /home/menchan/Programming/Javascript-Engine/build/tests/jit_tests [==[--gtest_filter=JITCompilerTest.BaselineCompileEmpty]==] --gtest_also_run_disabled_tests)
-set_tests_properties( JITCompilerTest.BaselineCompileEmpty PROPERTIES WORKING_DIRECTORY /home/menchan/Programming/Javascript-Engine/build/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test( JITCompilerTest.BaselineCompileNonEmpty /home/menchan/Programming/Javascript-Engine/build/tests/jit_tests [==[--gtest_filter=JITCompilerTest.BaselineCompileNonEmpty]==] --gtest_also_run_disabled_tests)
-set_tests_properties( JITCompilerTest.BaselineCompileNonEmpty PROPERTIES WORKING_DIRECTORY /home/menchan/Programming/Javascript-Engine/build/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set( jit_tests_TESTS JITCompilerTest.BaselineCompileEmpty JITCompilerTest.BaselineCompileNonEmpty)

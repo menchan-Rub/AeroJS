@@ -20,20 +20,20 @@ void registerFinalizationRegistryBuiltin(GlobalObject* globalObj) {
   // FinalizationRegistryオブジェクトを初期化
   initFinalizationRegistryObject(globalObj);
   
-  // ガベージコレクタとの連携を確保
+  // GCとFinalizationRegistryの連携を本格実装
   GarbageCollector* gc = GarbageCollector::getInstance();
   if (gc) {
-    // FinalizationRegistryオブジェクトをGCに登録し、ガベージコレクション後のコールバックを設定
+    // FinalizationRegistryインスタンスをGCが直接管理し、GCサイクル後にcleanupSomeを呼び出す
     gc->registerFinalizationCallback([globalObj]() {
-      // グローバルオブジェクトから登録されているFinalizationRegistryを取得
       Value registryVal = globalObj->get("FinalizationRegistry");
       if (!registryVal.isObject() || !registryVal.asObject()->isConstructor()) {
-        return; // FinalizationRegistryが存在しない場合は何もしない
+        return;
       }
-      
-      // コンストラクタから作成されたインスタンスをトラバースし、cleanupSomeを呼び出す
-      // 実際の実装ではGC自体が直接FinalizationRegistryを認識しているはず
-      gc->processFinalizationRegistries();
+      // GCが全FinalizationRegistryインスタンスを列挙し、各インスタンスのcleanupSomeを呼び出す
+      auto registries = GarbageCollector::getInstance()->getAllFinalizationRegistries();
+      for (auto* reg : registries) {
+        if (reg) reg->cleanupSome();
+      }
     });
   }
   

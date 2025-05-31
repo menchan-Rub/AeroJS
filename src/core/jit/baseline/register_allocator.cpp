@@ -276,9 +276,6 @@ bool RegisterAllocator::AllocateRegistersGreedy() noexcept {
 
 // グラフ彩色法でレジスタを割り当てる
 bool RegisterAllocator::AllocateRegistersGraph() noexcept {
-  // 実装は簡略化されています
-  // 実際の実装では干渉グラフの構築と彩色アルゴリズムが必要です
-  
   // 既に割り当てられているレジスタをクリア
   for (auto& pair : m_virtualRegisters) {
     VirtualRegister& vreg = pair.second;
@@ -286,102 +283,108 @@ bool RegisterAllocator::AllocateRegistersGraph() noexcept {
     vreg.isSpilled = false;
     vreg.spillSlot = -1;
   }
-  
-  // 干渉グラフの構築（簡略化）
+
+  // 干渉グラフの構築
   std::unordered_map<uint32_t, std::unordered_set<uint32_t>> interferenceGraph;
-  
   for (const auto& pair1 : m_virtualRegisters) {
     const VirtualRegister& vreg1 = pair1.second;
-    
     for (const auto& pair2 : m_virtualRegisters) {
       const VirtualRegister& vreg2 = pair2.second;
-      
-      // 同じレジスタでなく、生存範囲が重なる場合
-      if (vreg1.id != vreg2.id && 
-          vreg1.type == vreg2.type &&
-          ((vreg1.liveRangeStart <= vreg2.liveRangeEnd && 
-            vreg1.liveRangeEnd >= vreg2.liveRangeStart))) {
+      if (vreg1.id != vreg2.id && vreg1.type == vreg2.type &&
+          (vreg1.liveRangeStart <= vreg2.liveRangeEnd && vreg1.liveRangeEnd >= vreg2.liveRangeStart)) {
         interferenceGraph[vreg1.id].insert(vreg2.id);
       }
     }
   }
-  
-  // ノードの次数に基づいてソート
-  std::vector<uint32_t> sortedNodes;
-  for (const auto& pair : interferenceGraph) {
-    sortedNodes.push_back(pair.first);
-  }
-  
-  std::sort(sortedNodes.begin(), sortedNodes.end(), 
-            [&interferenceGraph](uint32_t a, uint32_t b) {
-              return interferenceGraph[a].size() > interferenceGraph[b].size();
-            });
-  
-  // 各ノードに色（レジスタ）を割り当てる
-  for (uint32_t nodeId : sortedNodes) {
-    auto it = m_virtualRegisters.find(nodeId);
-    if (it == m_virtualRegisters.end()) continue;
-    
-    VirtualRegister& vreg = it->second;
-    
-    // 隣接ノードが使用している色のセット
-    std::unordered_set<uint32_t> usedColors;
-    for (uint32_t neighborId : interferenceGraph[nodeId]) {
-      auto neighborIt = m_virtualRegisters.find(neighborId);
-      if (neighborIt != m_virtualRegisters.end() && !neighborIt->second.isSpilled) {
-        usedColors.insert(neighborIt->second.physicalRegId);
+
+  // Chaitin/Briggsアルゴリズム: ノードの次数がK未満のノードをスタックに積む
+  const size_t K = m_physicalRegisters.size();
+  std::vector<uint32_t> stack;
+  std::unordered_map<uint32_t, std::unordered_set<uint32_t>> graphCopy = interferenceGraph;
+  std::unordered_set<uint32_t> spilledNodes;
+
+  while (!graphCopy.empty()) {
+    bool removed = false;
+    for (auto it = graphCopy.begin(); it != graphCopy.end(); ++it) {
+      if (it->second.size() < K) {
+        stack.push_back(it->first);
+        // 隣接ノードからこのノードを除去
+        for (uint32_t neighbor : it->second) {
+          graphCopy[neighbor].erase(it->first);
+        }
+        graphCopy.erase(it);
+        removed = true;
+        break;
       }
     }
-    
-    // 使用されていない色を探す
+    if (!removed) {
+      // すべてのノードの次数がK以上→スピル候補
+      // スピルコスト最小のノードを選ぶ（ここではlive range最長を仮定）
+      uint32_t spillId = 0;
+      int maxRange = -1;
+      for (const auto& pair : graphCopy) {
+        const VirtualRegister& vreg = m_virtualRegisters[pair.first];
+        int range = vreg.liveRangeEnd - vreg.liveRangeStart;
+        if (range > maxRange) {
+          maxRange = range;
+          spillId = pair.first;
+        }
+      }
+      spilledNodes.insert(spillId);
+      // 隣接ノードからこのノードを除去
+      for (uint32_t neighbor : graphCopy[spillId]) {
+        graphCopy[neighbor].erase(spillId);
+      }
+      graphCopy.erase(spillId);
+    }
+  }
+
+  // スタックから逆順に色（物理レジスタ）を割り当て
+  std::reverse(stack.begin(), stack.end());
+  for (uint32_t nodeId : stack) {
+    auto& vreg = m_virtualRegisters[nodeId];
+    std::unordered_set<uint32_t> usedColors;
+    for (uint32_t neighborId : interferenceGraph[nodeId]) {
+      auto it = m_virtualRegisters.find(neighborId);
+      if (it != m_virtualRegisters.end() && !it->second.isSpilled) {
+        usedColors.insert(it->second.physicalRegId);
+      }
+    }
     bool found = false;
     for (const PhysicalRegister& preg : m_physicalRegisters) {
-      if (preg.type == vreg.type && !preg.isReserved && 
-          usedColors.find(preg.id) == usedColors.end()) {
+      if (preg.type == vreg.type && !preg.isReserved && usedColors.find(preg.id) == usedColors.end()) {
         vreg.physicalRegId = preg.id;
         found = true;
         break;
       }
     }
-    
-    // 利用可能な色がない場合、スピル
     if (!found) {
       vreg.isSpilled = true;
       vreg.spillSlot = m_nextSpillSlot++;
     }
   }
-  
+
+  // スピルノードに対してはスピル処理
+  for (uint32_t nodeId : spilledNodes) {
+    auto& vreg = m_virtualRegisters[nodeId];
+    vreg.isSpilled = true;
+    vreg.spillSlot = m_nextSpillSlot++;
+  }
+
   return true;
 }
 
 // 生存範囲分析を行う
 void RegisterAllocator::AnalyzeLiveRanges(const std::vector<uint32_t>& instructions) noexcept {
-  // 実際の実装ではバイトコードの解析が必要
-  // 簡略化のため、命令列の各位置でのレジスタの使用を疑似的に解析
-  
-  // デモンストレーション用の簡易解析
-  // 実際のコンパイラでは、より複雑なデータフロー解析が必要
-  
-  // 実装例：命令のインデックスを生存範囲として使用
-  for (size_t i = 0; i < instructions.size(); i++) {
-    uint32_t ins = instructions[i];
-    
-    // 命令からレジスタを抽出する処理（実際には命令のデコードが必要）
-    // このデモでは、命令の値自体を仮想レジスタIDとみなす
-    uint32_t virtualRegId = ins % 10;  // 単純化のため、0-9の仮想レジスタを使用
-    
-    // 仮想レジスタが存在しない場合は作成
-    if (m_virtualRegisters.find(virtualRegId) == m_virtualRegisters.end()) {
-      AllocateVirtualRegister(PhysicalRegisterType::kGeneral);
+  std::unordered_map<uint32_t, std::pair<size_t, size_t>> liveRanges;
+  for (size_t i = 0; i < instructions.size(); ++i) {
+    uint32_t reg = extractRegisterFromInstruction(instructions[i]);
+    if (liveRanges.find(reg) == liveRanges.end()) {
+      liveRanges[reg].first = i;
     }
-    
-    // 生存範囲の更新
-    auto& vreg = m_virtualRegisters[virtualRegId];
-    if (vreg.liveRangeStart < 0) {
-      vreg.liveRangeStart = static_cast<int>(i);
-    }
-    vreg.liveRangeEnd = static_cast<int>(i);
+    liveRanges[reg].second = i;
   }
+  m_liveRanges = liveRanges;
 }
 
 // 物理レジスタの一覧を初期化する

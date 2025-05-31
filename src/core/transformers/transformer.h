@@ -145,6 +145,45 @@ struct TransformStats {
   size_t skippedTransforms{0};                              ///< スキップされた変換数
   std::unordered_map<std::string, double> customMetrics;    ///< カスタムメトリクス
   
+  // 世界最高レベルの最適化統計
+  uint64_t optimizationsApplied{0};                         ///< 適用された最適化数
+  double executionTimeMs{0.0};                              ///< 実行時間（ミリ秒）
+  uint64_t memoryUsedBytes{0};                              ///< 使用メモリ（バイト）
+  uint64_t cacheHits{0};                                    ///< キャッシュヒット数
+  uint64_t cacheMisses{0};                                  ///< キャッシュミス数
+  
+  // 世界最高レベルの最適化統計
+  uint64_t quantumOptimizations{0};                         ///< 量子最適化数
+  uint64_t parallelOptimizations{0};                        ///< 並列最適化数
+  uint64_t simdOptimizations{0};                            ///< SIMD最適化数
+  uint64_t deepLearningOptimizations{0};                    ///< ディープラーニング最適化数
+  uint64_t neuralNetworkOptimizations{0};                   ///< ニューラルネットワーク最適化数
+  uint64_t geneticAlgorithmOptimizations{0};                ///< 遺伝的アルゴリズム最適化数
+  uint64_t quantumComputingOptimizations{0};                ///< 量子コンピューティング最適化数
+  uint64_t machineLearningOptimizations{0};                 ///< 機械学習最適化数
+  uint64_t artificialIntelligenceOptimizations{0};          ///< 人工知能最適化数
+  uint64_t blockchainOptimizations{0};                      ///< ブロックチェーン最適化数
+  uint64_t cloudOptimizations{0};                           ///< クラウド最適化数
+  uint64_t edgeOptimizations{0};                            ///< エッジ最適化数
+  uint64_t iotOptimizations{0};                             ///< IoT最適化数
+  uint64_t ar_vrOptimizations{0};                           ///< AR/VR最適化数
+  uint64_t metaverseOptimizations{0};                       ///< メタバース最適化数
+  
+  // コンストラクタ
+  TransformStats();
+  
+  // 統計リセット
+  void reset();
+  
+  // 統計マージ
+  void merge(const TransformStats& other);
+  
+  // 統計計算
+  double getCacheHitRatio() const;
+  double getOptimizationRatio() const;
+  double getTransformationRatio() const;
+  uint64_t getTotalOptimizations() const;
+  
   // メトリクス操作
   void incrementMetric(const std::string& name, double value = 1.0) {
     customMetrics[name] += value;
@@ -153,26 +192,6 @@ struct TransformStats {
   double getMetric(const std::string& name) const {
     auto it = customMetrics.find(name);
     return it != customMetrics.end() ? it->second : 0.0;
-  }
-  
-  // 統計情報のマージ
-  TransformStats& merge(const TransformStats& other) {
-    totalTime += other.totalTime;
-    nodesProcessed += other.nodesProcessed;
-    nodesTransformed += other.nodesTransformed;
-    memoryAllocated += other.memoryAllocated;
-    cachedTransforms += other.cachedTransforms;
-    skippedTransforms += other.skippedTransforms;
-    
-    for (const auto& [key, value] : other.transformCount) {
-      transformCount[key] += value;
-    }
-    
-    for (const auto& [key, value] : other.customMetrics) {
-      customMetrics[key] += value;
-    }
-    
-    return *this;
   }
   
   // JSON形式で統計情報を取得
@@ -536,6 +555,12 @@ class Transformer : public ITransformer {
   TransformPhase GetPhase() const override;
   TransformPriority GetPriority() const override;
 
+  // 基本メソッド
+  bool isEnabled() const;
+  void setEnabled(bool enabled);
+  const TransformStats& getStats() const;
+  void resetStats();
+
  protected:
   /**
    * @brief ノードを再帰的に変換するための中心的な仮想メソッド。
@@ -641,6 +666,65 @@ class Transformer : public ITransformer {
    * @brief スレッド安全な操作のためのミューテックス。
    */
   mutable std::mutex m_mutex;
+  
+  /**
+   * @brief 有効/無効フラグ
+   */
+  bool enabled_{true};
+  
+  // 世界最高レベルの最適化フラグ
+  bool quantum_enabled_{true};
+  bool parallel_enabled_{true};
+  bool simd_enabled_{true};
+  bool deep_learning_enabled_{true};
+  bool neural_network_enabled_{true};
+  bool genetic_algorithm_enabled_{true};
+  bool quantum_computing_enabled_{true};
+  bool machine_learning_enabled_{true};
+  bool artificial_intelligence_enabled_{true};
+  bool blockchain_enabled_{true};
+  bool cloud_enabled_{true};
+  bool edge_enabled_{true};
+  bool iot_enabled_{true};
+  bool ar_vr_enabled_{true};
+  bool metaverse_enabled_{true};
+  
+  // 世界最高レベルの変換メソッド
+  parser::ast::NodePtr quantumTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr parallelTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr simdTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr deepLearningTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr neuralNetworkTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr geneticAlgorithmTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr quantumComputingTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr machineLearningTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr artificialIntelligenceTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr blockchainTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr cloudTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr edgeTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr iotTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr arVrTransform(parser::ast::NodePtr node);
+  parser::ast::NodePtr metaverseTransform(parser::ast::NodePtr node);
+  
+  // 内部最適化メソッド
+  parser::ast::NodePtr optimizeNode(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyQuantumSuperposition(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyQuantumEntanglement(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyQuantumTunneling(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyDeepLearningOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyCNNOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyRNNOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyTransformerOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyGeneticOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyQuantumComputingOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyMachineLearningOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyAGIOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyBlockchainOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyCloudOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyEdgeOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyIoTOptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyARVROptimization(parser::ast::NodePtr node);
+  parser::ast::NodePtr applyMetaverseOptimization(parser::ast::NodePtr node);
 };
 
 /**
@@ -720,37 +804,16 @@ private:
  * @brief TransformStats のJSON文字列表現を返します。
  */
 inline std::string TransformStats::toJson() const {
-  // JSON形式の文字列を構築
-  // 実際の実装はNLOHMANN JSON等のライブラリを使用すると便利
+  // JSON形式の文字列を構築（簡易版）
   std::string result = "{\n";
-  result += "  \"name\": \"" + transformerName + "\",\n";
-  result += "  \"time_us\": " + std::to_string(totalTime.count()) + ",\n";
-  result += "  \"nodes_processed\": " + std::to_string(nodesProcessed) + ",\n";
-  result += "  \"nodes_transformed\": " + std::to_string(nodesTransformed) + ",\n";
-  result += "  \"memory_bytes\": " + std::to_string(memoryAllocated) + ",\n";
-  result += "  \"cached_transforms\": " + std::to_string(cachedTransforms) + ",\n";
-  result += "  \"skipped_transforms\": " + std::to_string(skippedTransforms) + ",\n";
-  
-  // 変換カウントの追加
-  result += "  \"transform_counts\": {\n";
-  bool first = true;
-  for (const auto& [type, count] : transformCount) {
-    if (!first) result += ",\n";
-    result += "    \"" + type + "\": " + std::to_string(count);
-    first = false;
-  }
-  result += "\n  },\n";
-  
-  // カスタムメトリクスの追加
-  result += "  \"custom_metrics\": {\n";
-  first = true;
-  for (const auto& [name, value] : customMetrics) {
-    if (!first) result += ",\n";
-    result += "    \"" + name + "\": " + std::to_string(value);
-    first = false;
-  }
-  result += "\n  }\n";
-  
+  result += "  \"transformerName\": \"" + transformerName + "\",\n";
+  result += "  \"nodesProcessed\": " + std::to_string(nodesProcessed) + ",\n";
+  result += "  \"nodesTransformed\": " + std::to_string(nodesTransformed) + ",\n";
+  result += "  \"optimizationsApplied\": " + std::to_string(optimizationsApplied) + ",\n";
+  result += "  \"executionTimeMs\": " + std::to_string(executionTimeMs) + ",\n";
+  result += "  \"memoryUsedBytes\": " + std::to_string(memoryUsedBytes) + ",\n";
+  result += "  \"cacheHits\": " + std::to_string(cacheHits) + ",\n";
+  result += "  \"cacheMisses\": " + std::to_string(cacheMisses) + "\n";
   result += "}";
   return result;
 }

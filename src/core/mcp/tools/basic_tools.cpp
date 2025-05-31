@@ -1178,12 +1178,11 @@ std::string BasicTools::handleEngineStop(const std::string& args) {
 
     std::string engineId = argsJson["engineId"];
 
-    // エンジン停止処理（ここではダミー実装）
-    // 実際の実装では、指定されたIDのAeroJSエンジンインスタンスを停止する
-
-    return nlohmann::json({{"success", true},
-                           {"message", "エンジンが正常に停止しました"}})
-        .dump();
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      engine->shutdown();
+      return true;
+    }
+    return false;
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"message", std::string("エンジン停止中にエラーが発生しました: ") + e.what()}})
@@ -1226,14 +1225,10 @@ std::string BasicTools::handleEngineStatus(const std::string& args) {
 
     std::string engineId = argsJson["engineId"];
 
-    // エンジンのステータス取得（ここではダミー実装）
-    // 実際の実装では、指定されたIDのAeroJSエンジンインスタンスの状態を取得する
-
-    return nlohmann::json({{"running", true},
-                           {"uptime", 123.45},
-                           {"status", "idle"},
-                           {"stats", {{"instructionsExecuted", 12345}, {"memoryUsage", {{"heapUsed", 1024 * 1024}, {"heapSize", 10 * 1024 * 1024}}}, {"lastGC", 5.67}}}})
-        .dump();
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      return engine->getStatus();
+    }
+    return EngineStatus::Unknown;
   } catch (const std::exception& e) {
     return nlohmann::json({{"running", false},
                            {"message", std::string("エンジンステータス取得中にエラーが発生しました: ") + e.what()}})
@@ -1259,26 +1254,10 @@ std::string BasicTools::handleExecuteScript(const std::string& args) {
     bool strictMode = options.contains("strictMode") ? options["strictMode"].get<bool>() : false;
     std::string sourceType = options.contains("sourceType") ? options["sourceType"].get<std::string>() : "script";
 
-    // スクリプト実行（ここではダミー実装）
-    // 実際の実装では、指定されたエンジンIDのAeroJSエンジンインスタンスでスクリプトを実行する
-
-    // 計測開始
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    // ダミーの結果
-    bool success = true;
-    nlohmann::json result = {
-        {"type", "object"},
-        {"value", {{"prop1", "value1"}, {"prop2", 42}, {"prop3", true}}}};
-
-    // 計測終了
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
-
-    return nlohmann::json({{"success", success},
-                           {"result", result},
-                           {"executionTime", duration}})
-        .dump();
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      return engine->executeScript(script);
+    }
+    return ScriptResult::Error;
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"error", {{"name", "ExecutionError"}, {"message", std::string("スクリプト実行中にエラーが発生しました: ") + e.what()}}}})
@@ -1300,37 +1279,10 @@ std::string BasicTools::handleEvaluateExpression(const std::string& args) {
     std::string expression = argsJson["expression"];
     nlohmann::json context = argsJson.contains("context") ? argsJson["context"] : nlohmann::json::object();
 
-    // 式評価（ここではダミー実装）
-    // 実際の実装では、指定されたエンジンIDのAeroJSエンジンインスタンスで式を評価する
-
-    // 計測開始
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    // ダミーの結果
-    bool success = true;
-    nlohmann::json result;
-
-    // 簡単な式は実際に評価してみる（デモンストレーション用）
-    if (expression == "1 + 1") {
-      result = 2;
-    } else if (expression == "true && false") {
-      result = false;
-    } else if (expression == "'hello' + ' world'") {
-      result = "hello world";
-    } else {
-      result = {
-          {"type", "unknown"},
-          {"value", "<evaluated result>"}};
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      return engine->evaluateExpression(expression);
     }
-
-    // 計測終了
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
-
-    return nlohmann::json({{"success", success},
-                           {"result", result},
-                           {"executionTime", duration}})
-        .dump();
+    return EvalResult::Error;
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"error", {{"name", "EvaluationError"}, {"message", std::string("式評価中にエラーが発生しました: ") + e.what()}}}})
@@ -1354,18 +1306,10 @@ std::string BasicTools::handleImportModule(const std::string& args) {
     nlohmann::json options = argsJson.contains("options") ? argsJson["options"] : nlohmann::json::object();
     std::string asType = options.contains("asType") ? options["asType"].get<std::string>() : "esm";
 
-    // モジュールインポート（ここではダミー実装）
-    // 実際の実装では、指定されたエンジンIDのAeroJSエンジンインスタンスでモジュールをインポートする
-
-    // ダミーのエクスポート
-    nlohmann::json exports = {
-        {"default", {{"name", "DefaultExport"}, {"type", "function"}}},
-        {"namedExport1", "value1"},
-        {"namedExport2", 42}};
-
-    return nlohmann::json({{"success", true},
-                           {"exports", exports}})
-        .dump();
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      return engine->importModule(modulePath);
+    }
+    return ImportResult::Error;
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"error", {{"name", "ImportError"}, {"message", std::string("モジュールインポート中にエラーが発生しました: ") + e.what()}, {"stack", "ImportError: " + std::string(e.what()) + "\n    at MCPServer.importModule (mcp_server.cpp:123:45)"}}}})
@@ -1386,28 +1330,10 @@ std::string BasicTools::handleGetMemoryUsage(const std::string& args) {
     std::string engineId = argsJson["engineId"];
     bool detailed = argsJson.contains("detailed") ? argsJson["detailed"].get<bool>() : false;
 
-    // メモリ使用状況取得（ここではダミー実装）
-    // 実際の実装では、指定されたIDのAeroJSエンジンインスタンスのメモリ使用状況を取得する
-
-    nlohmann::json memoryInfo = {
-        {"heapSize", 10 * 1024 * 1024},      // 10MB
-        {"heapUsed", 3 * 1024 * 1024},       // 3MB
-        {"heapAvailable", 7 * 1024 * 1024},  // 7MB
-        {"objectCount", 12345},
-        {"stringCount", 5678},
-        {"arrayCount", 910},
-        {"functionCount", 1112},
-        {"gcMetrics", {{"lastGCTime", 0.123}, {"totalGCTime", 1.234}, {"gcCount", 5}}}};
-
-    if (detailed) {
-      memoryInfo["details"] = {
-          {"byType", {{"Object", 2345}, {"Array", 910}, {"Function", 1112}, {"String", 5678}, {"Number", 3456}, {"Boolean", 789}, {"Symbol", 123}, {"RegExp", 45}, {"Date", 67}, {"Map", 89}, {"Set", 90}}},
-          {"bySize", {{"0-16B", 1000}, {"16-64B", 2000}, {"64-256B", 3000}, {"256B-1KB", 4000}, {"1-4KB", 2000}, {"4-16KB", 1000}, {"16-64KB", 500}, {"64KB+", 100}}}};
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      return engine->getMemoryUsage();
     }
-
-    return nlohmann::json({{"success", true},
-                           {"memory", memoryInfo}})
-        .dump();
+    return MemoryUsageInfo{};
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"message", std::string("メモリ使用状況取得中にエラーが発生しました: ") + e.what()}})
@@ -1428,14 +1354,11 @@ std::string BasicTools::handleRunGarbageCollection(const std::string& args) {
     std::string engineId = argsJson["engineId"];
     bool fullGC = argsJson.contains("fullGC") ? argsJson["fullGC"].get<bool>() : false;
 
-    // ガベージコレクション実行（ここではダミー実装）
-    // 実際の実装では、指定されたIDのAeroJSエンジンインスタンスでGCを実行する
-
-    return nlohmann::json({{"success", true},
-                           {"freedBytes", 1024 * 1024},  // 1MB
-                           {"duration", 0.123},          // 123ms
-                           {"message", fullGC ? "フルGCが完了しました" : "部分的なGCが完了しました"}})
-        .dump();
+    if (auto engine = EngineManager::getInstance()->getEngineById(engineId)) {
+      engine->runGC();
+      return true;
+    }
+    return false;
   } catch (const std::exception& e) {
     return nlohmann::json({{"success", false},
                            {"message", std::string("ガベージコレクション実行中にエラーが発生しました: ") + e.what()}})
@@ -1444,38 +1367,451 @@ std::string BasicTools::handleRunGarbageCollection(const std::string& args) {
 }
 
 std::string BasicTools::handleGetDebugInfo(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    // デバッグ情報の収集
+    response["runtime_info"] = {
+      {"version", "AeroJS-1.0.0"},
+      {"build_type", 
+#ifdef _DEBUG
+        "Debug"
+#else
+        "Release"
+#endif
+      },
+      {"architecture", 
+#if defined(__x86_64__) || defined(_M_X64)
+        "x64"
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        "arm64"
+#else
+        "unknown"
+#endif
+      },
+      {"memory_usage", getMemoryUsage()},
+      {"threads", getThreadCount()}
+    };
+    
+    // JIT情報
+    if (m_context && m_context->getJITManager()) {
+      auto* jitManager = m_context->getJITManager();
+      response["jit_info"] = {
+        {"enabled", true},
+        {"compilation_stats", jitManager->getCompilationStatistics()},
+        {"optimization_level", static_cast<int>(jitManager->getOptimizationLevel())}
+      };
+    }
+    
+    // GC情報
+    if (m_context && m_context->getGC()) {
+      auto* gc = m_context->getGC();
+      response["gc_info"] = {
+        {"type", gc->getType()},
+        {"heap_size", gc->getHeapSize()},
+        {"used_memory", gc->getUsedMemory()},
+        {"collection_count", gc->getCollectionCount()}
+      };
+    }
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to get debug info"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleSetBreakpoint(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    std::string filename = request.value("filename", "");
+    int lineNumber = request.value("line", 0);
+    bool enabled = request.value("enabled", true);
+    std::string condition = request.value("condition", "");
+    
+    if (filename.empty() || lineNumber <= 0) {
+      response["error"] = "Invalid filename or line number";
+      return response.dump();
+    }
+    
+    // デバッガーコンテキストの取得
+    if (!m_context || !m_context->getDebugger()) {
+      response["error"] = "Debugger not available";
+      return response.dump();
+    }
+    
+    auto* debugger = m_context->getDebugger();
+    
+    // ブレークポイントの設定
+    BreakpointInfo breakpoint;
+    breakpoint.filename = filename;
+    breakpoint.lineNumber = lineNumber;
+    breakpoint.enabled = enabled;
+    breakpoint.condition = condition;
+    breakpoint.hitCount = 0;
+    
+    uint32_t breakpointId = debugger->setBreakpoint(breakpoint);
+    
+    response["success"] = true;
+    response["breakpoint_id"] = breakpointId;
+    response["location"] = {
+      {"filename", filename},
+      {"line", lineNumber},
+      {"enabled", enabled}
+    };
+    
+    if (!condition.empty()) {
+      response["condition"] = condition;
+    }
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to set breakpoint"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleStartProfiling(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    std::string profileType = request.value("type", "cpu");
+    int durationMs = request.value("duration", 30000);
+    int sampleRate = request.value("sample_rate", 1000);
+    bool includeNative = request.value("include_native", false);
+    
+    if (!m_context || !m_context->getProfiler()) {
+      response["error"] = "Profiler not available";
+      return response.dump();
+    }
+    
+    auto* profiler = m_context->getProfiler();
+    
+    ProfilingConfig config;
+    config.type = (profileType == "memory") ? ProfilingType::Memory : ProfilingType::CPU;
+    config.durationMs = durationMs;
+    config.sampleRateHz = sampleRate;
+    config.includeNativeCode = includeNative;
+    config.captureStackTraces = true;
+    config.captureSourceInfo = true;
+    
+    uint32_t sessionId = profiler->startProfiling(config);
+    
+    response["success"] = true;
+    response["session_id"] = sessionId;
+    response["config"] = {
+      {"type", profileType},
+      {"duration_ms", durationMs},
+      {"sample_rate_hz", sampleRate},
+      {"include_native", includeNative}
+    };
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to start profiling"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleStopProfiling(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    uint32_t sessionId = request.value("session_id", 0);
+    std::string outputFormat = request.value("format", "json");
+    std::string outputFile = request.value("output_file", "");
+    
+    if (!m_context || !m_context->getProfiler()) {
+      response["error"] = "Profiler not available";
+      return response.dump();
+    }
+    
+    auto* profiler = m_context->getProfiler();
+    
+    if (sessionId == 0) {
+      // 現在実行中のすべてのプロファイリングセッションを停止
+      profiler->stopAllProfiling();
+    } else {
+      if (!profiler->stopProfiling(sessionId)) {
+        response["error"] = "Invalid session ID or session not active";
+        return response.dump();
+      }
+    }
+    
+    // プロファイル結果の取得
+    ProfilingResult result = profiler->getProfilingResult(sessionId);
+    
+    response["success"] = true;
+    response["session_id"] = sessionId;
+    response["profile_data"] = {
+      {"total_samples", result.totalSamples},
+      {"duration_ms", result.durationMs},
+      {"memory_usage", result.memoryUsage},
+      {"function_stats", result.functionStats}
+    };
+    
+    // ファイルへの出力
+    if (!outputFile.empty()) {
+      if (outputFormat == "flamegraph") {
+        profiler->exportFlameGraph(sessionId, outputFile);
+      } else if (outputFormat == "callgrind") {
+        profiler->exportCallgrind(sessionId, outputFile);
+      } else {
+        profiler->exportJSON(sessionId, outputFile);
+      }
+      response["output_file"] = outputFile;
+    }
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to stop profiling"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleReadFile(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    std::string filename = request.value("filename", "");
+    std::string encoding = request.value("encoding", "utf8");
+    int maxSize = request.value("max_size", 1024 * 1024); // 1MB default
+    
+    if (filename.empty()) {
+      response["error"] = "Filename is required";
+      return response.dump();
+    }
+    
+    // セキュリティチェック: パスの正規化と制限
+    std::filesystem::path filepath(filename);
+    filepath = std::filesystem::canonical(filepath);
+    
+    // セキュリティ制限: 作業ディレクトリ外のアクセスを禁止
+    std::filesystem::path workDir = std::filesystem::current_path();
+    if (!filepath.string().starts_with(workDir.string())) {
+      response["error"] = "Access denied: file outside working directory";
+      return response.dump();
+    }
+    
+    if (!std::filesystem::exists(filepath)) {
+      response["error"] = "File not found";
+      return response.dump();
+    }
+    
+    auto fileSize = std::filesystem::file_size(filepath);
+    if (fileSize > maxSize) {
+      response["error"] = "File too large";
+      response["file_size"] = fileSize;
+      response["max_size"] = maxSize;
+      return response.dump();
+    }
+    
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+      response["error"] = "Failed to open file";
+      return response.dump();
+    }
+    
+    std::string content;
+    content.resize(fileSize);
+    file.read(content.data(), fileSize);
+    
+    if (encoding == "base64") {
+      content = base64Encode(content);
+    } else if (encoding != "utf8" && encoding != "binary") {
+      response["error"] = "Unsupported encoding";
+      return response.dump();
+    }
+    
+    response["success"] = true;
+    response["filename"] = filename;
+    response["content"] = content;
+    response["size"] = fileSize;
+    response["encoding"] = encoding;
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to read file"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleWriteFile(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json request = nlohmann::json::parse(args);
+    nlohmann::json response;
+    
+    std::string filename = request.value("filename", "");
+    std::string content = request.value("content", "");
+    std::string encoding = request.value("encoding", "utf8");
+    bool append = request.value("append", false);
+    bool createDirs = request.value("create_dirs", false);
+    
+    if (filename.empty()) {
+      response["error"] = "Filename is required";
+      return response.dump();
+    }
+    
+    // セキュリティチェック
+    std::filesystem::path filepath(filename);
+    if (createDirs) {
+      std::filesystem::create_directories(filepath.parent_path());
+    }
+    
+    // パスの正規化
+    filepath = std::filesystem::absolute(filepath);
+    
+    // セキュリティ制限
+    std::filesystem::path workDir = std::filesystem::current_path();
+    if (!filepath.string().starts_with(workDir.string())) {
+      response["error"] = "Access denied: file outside working directory";
+      return response.dump();
+    }
+    
+    // エンコーディング処理
+    std::string decodedContent = content;
+    if (encoding == "base64") {
+      decodedContent = base64Decode(content);
+    } else if (encoding != "utf8" && encoding != "binary") {
+      response["error"] = "Unsupported encoding";
+      return response.dump();
+    }
+    
+    std::ios::openmode mode = std::ios::binary;
+    if (append) {
+      mode |= std::ios::app;
+    } else {
+      mode |= std::ios::trunc;
+    }
+    
+    std::ofstream file(filepath, mode);
+    if (!file.is_open()) {
+      response["error"] = "Failed to open file for writing";
+      return response.dump();
+    }
+    
+    file.write(decodedContent.data(), decodedContent.size());
+    file.close();
+    
+    if (file.fail()) {
+      response["error"] = "Failed to write file";
+      return response.dump();
+    }
+    
+    response["success"] = true;
+    response["filename"] = filename;
+    response["bytes_written"] = decodedContent.size();
+    response["encoding"] = encoding;
+    response["append"] = append;
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to write file"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 std::string BasicTools::handleGetEnvironmentInfo(const std::string& args) {
-  // 実装サンプルのため省略
-  return "{}";
+  try {
+    nlohmann::json response;
+    
+    // システム情報
+    response["system"] = {
+      {"platform", getPlatformName()},
+      {"architecture", getArchitectureName()},
+      {"cpu_count", std::thread::hardware_concurrency()},
+      {"page_size", getPageSize()},
+      {"endianness", isLittleEndian() ? "little" : "big"}
+    };
+    
+    // メモリ情報
+    response["memory"] = {
+      {"total_physical", getTotalPhysicalMemory()},
+      {"available_physical", getAvailablePhysicalMemory()},
+      {"total_virtual", getTotalVirtualMemory()},
+      {"process_working_set", getProcessWorkingSet()}
+    };
+    
+    // 環境変数
+    response["environment"] = getEnvironmentVariables();
+    
+    // プロセス情報
+    response["process"] = {
+      {"pid", getCurrentProcessId()},
+      {"executable_path", getExecutablePath()},
+      {"working_directory", std::filesystem::current_path().string()},
+      {"command_line", getCommandLine()}
+    };
+    
+    // AeroJS固有情報
+    response["aerojs"] = {
+      {"version", AEROJS_VERSION},
+      {"build_date", __DATE__ " " __TIME__},
+      {"jit_enabled", 
+#ifdef AEROJS_JIT_ENABLED
+        true
+#else
+        false
+#endif
+      },
+      {"debug_build",
+#ifdef _DEBUG
+        true
+#else
+        false
+#endif
+      }
+    };
+    
+    // ランタイム情報
+    if (m_context) {
+      response["runtime"] = {
+        {"heap_size", m_context->getHeapSize()},
+        {"stack_size", m_context->getStackSize()},
+        {"global_objects", m_context->getGlobalObjectCount()},
+        {"active_functions", m_context->getActiveFunctionCount()}
+      };
+    }
+    
+    return response.dump();
+    
+  } catch (const std::exception& e) {
+    nlohmann::json error = {
+      {"error", "Failed to get environment info"},
+      {"message", e.what()}
+    };
+    return error.dump();
+  }
 }
 
 }  // namespace tools

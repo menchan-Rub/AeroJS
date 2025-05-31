@@ -1,260 +1,278 @@
 /**
  * @file garbage_collector.h
- * @brief ガベージコレクタのインターフェース
- * @copyright 2023 AeroJS プロジェクト
+ * @brief AeroJS ガベージコレクタヘッダー
+ * @version 0.1.0
+ * @license MIT
  */
 
-#ifndef AERO_GARBAGE_COLLECTOR_H
-#define AERO_GARBAGE_COLLECTOR_H
+#ifndef AEROJS_UTILS_MEMORY_GC_GARBAGE_COLLECTOR_H
+#define AEROJS_UTILS_MEMORY_GC_GARBAGE_COLLECTOR_H
 
-#include <atomic>
-#include <functional>
-#include <memory>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
-#include <thread>
-#include <vector>
 #include <unordered_set>
+#include <vector>
+#include <memory>
 
-namespace aero {
+namespace aerojs {
+namespace utils {
+namespace memory {
 
 // 前方宣言
-class Object;
-template <typename T> class WeakHandle;
+class MemoryAllocator;
+class MemoryPool;
 
 /**
- * @brief ガベージコレクタクラス
- * 
- * JavaScriptオブジェクトのメモリ管理を行うガベージコレクタ。
- * WeakRefやFinalizationRegistryとの連携機能を持つ。
+ * @brief ガベージコレクションモード
+ */
+enum class GCMode {
+    MARK_SWEEP,      // マーク&スイープ
+    GENERATIONAL,    // 世代別GC
+    INCREMENTAL,     // インクリメンタルGC
+    CONCURRENT       // 並行GC
+};
+
+/**
+ * @brief GC統計情報
+ */
+struct GCStats {
+    size_t totalCollections{0};      // 総GC実行回数
+    uint64_t totalCollectionTime{0}; // 総GC実行時間（マイクロ秒）
+    uint64_t lastCollectionTime{0};  // 最後のGC実行時間（マイクロ秒）
+    size_t objectsCollected{0};      // 回収されたオブジェクト数
+    size_t bytesCollected{0};        // 回収されたバイト数
+    double averageCollectionTime{0}; // 平均GC実行時間
+};
+
+/**
+ * @brief ガベージコレクタ基底クラス
+ */
+class GCCollector {
+public:
+    virtual ~GCCollector() = default;
+
+    /**
+     * @brief ガベージコレクションを実行
+     */
+    virtual void collect() = 0;
+
+    /**
+     * @brief オブジェクトをマーク
+     * @param object マークするオブジェクト
+     */
+    virtual void markObject(void* object) = 0;
+
+    /**
+     * @brief ルートオブジェクトを追加
+     * @param root ルートオブジェクト
+     */
+    virtual void addRoot(void* root) = 0;
+
+    /**
+     * @brief ルートオブジェクトを削除
+     * @param root ルートオブジェクト
+     */
+    virtual void removeRoot(void* root) = 0;
+
+    /**
+     * @brief 統計情報を取得
+     * @return GCStats 統計情報
+     */
+    virtual GCStats getStats() const = 0;
+};
+
+/**
+ * @brief マーク&スイープガベージコレクタ
+ */
+class MarkSweepCollector : public GCCollector {
+public:
+    explicit MarkSweepCollector(MemoryAllocator* allocator);
+    ~MarkSweepCollector() override;
+
+    void collect() override;
+    void markObject(void* object) override;
+    void addRoot(void* root) override;
+    void removeRoot(void* root) override;
+    GCStats getStats() const override;
+
+private:
+    MemoryAllocator* allocator_;
+    std::unordered_set<void*> roots_;
+    std::unordered_set<void*> markedObjects_;
+    mutable std::mutex mutex_;
+    GCStats stats_;
+
+    void markPhase();
+    void sweepPhase();
+    void markReachableObjects();
+    void sweepUnmarkedObjects();
+};
+
+/**
+ * @brief 世代別ガベージコレクタ
+ */
+class GenerationalCollector : public GCCollector {
+public:
+    explicit GenerationalCollector(MemoryAllocator* allocator);
+    ~GenerationalCollector() override;
+
+    void collect() override;
+    void markObject(void* object) override;
+    void addRoot(void* root) override;
+    void removeRoot(void* root) override;
+    GCStats getStats() const override;
+
+    /**
+     * @brief 若い世代のGCを実行
+     */
+    void collectYoungGeneration();
+
+    /**
+     * @brief 古い世代のGCを実行
+     */
+    void collectOldGeneration();
+
+private:
+    MemoryAllocator* allocator_;
+    std::unordered_set<void*> roots_;
+    std::unordered_set<void*> youngGeneration_;
+    std::unordered_set<void*> oldGeneration_;
+    mutable std::mutex mutex_;
+    GCStats stats_;
+    size_t youngGenThreshold_;
+
+    void promoteToOldGeneration(void* object);
+    bool shouldPromote(void* object) const;
+};
+
+/**
+ * @brief ガベージコレクタマネージャー
  */
 class GarbageCollector {
 public:
-  /**
-   * @brief シングルトンインスタンスを取得
-   * @return GarbageCollectorのインスタンス
-   */
-  static GarbageCollector* getInstance() {
-    static GarbageCollector instance;
-    return &instance;
-  }
+    explicit GarbageCollector(MemoryAllocator* allocator, MemoryPool* pool = nullptr);
+    ~GarbageCollector();
 
-  /**
-   * @brief コピーコンストラクタを削除（シングルトン）
-   */
-  GarbageCollector(const GarbageCollector&) = delete;
+    /**
+     * @brief ガベージコレクションを実行
+     */
+    void collect();
 
-  /**
-   * @brief 代入演算子を削除（シングルトン）
-   */
-  GarbageCollector& operator=(const GarbageCollector&) = delete;
+    /**
+     * @brief GCモードを設定
+     * @param mode GCモード
+     */
+    void setMode(GCMode mode);
 
-  /**
-   * @brief WeakHandleを登録
-   * @param handle 登録するWeakHandleへのポインタ
-   */
-  template <typename T>
-  void registerWeakHandle(WeakHandle<T>* handle) {
-    if (handle) {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      m_registeredWeakHandles.insert(static_cast<void*>(handle));
-    }
-  }
+    /**
+     * @brief GCモードを取得
+     * @return GCMode 現在のGCモード
+     */
+    GCMode getMode() const;
 
-  /**
-   * @brief WeakRefのプロバイダコールバックを登録
-   * @param provider プロバイダコールバック
-   */
-  void registerWeakRefProvider(std::function<void()> provider);
+    /**
+     * @brief GC閾値を設定
+     * @param threshold 閾値（バイト）
+     */
+    void setThreshold(size_t threshold);
 
-  /**
-   * @brief Finalizationコールバックを登録
-   * @param callback Finalizationコールバック
-   */
-  void registerFinalizationCallback(std::function<void()> callback);
+    /**
+     * @brief GC閾値を取得
+     * @return size_t 現在の閾値
+     */
+    size_t getThreshold() const;
 
-  /**
-   * @brief GCをトリガー
-   * @param force 強制的にGCを実行する場合はtrue
-   */
-  void triggerGC(bool force = false);
+    /**
+     * @brief 最大ヒープサイズを設定
+     * @param maxSize 最大サイズ（バイト）
+     */
+    void setMaxHeapSize(size_t maxSize);
 
-  /**
-   * @brief FinalizationRegistryの処理
-   * ガベージコレクション後にFinalizationRegistryのコールバックを実行
-   */
-  void processFinalizationRegistries();
+    /**
+     * @brief 最大ヒープサイズを取得
+     * @return size_t 最大ヒープサイズ
+     */
+    size_t getMaxHeapSize() const;
 
-  /**
-   * @brief 並列コレクションの設定
-   * @param enabled 有効にする場合はtrue
-   */
-  void setParallelCollection(bool enabled);
+    /**
+     * @brief GCが実行中かどうか
+     * @return bool 実行中の場合true
+     */
+    bool isRunning() const;
 
-  /**
-   * @brief デバッグモードの設定
-   * @param enabled 有効にする場合はtrue
-   */
-  void setDebugMode(bool enabled);
+    /**
+     * @brief 総GC実行回数を取得
+     * @return size_t 総実行回数
+     */
+    size_t getTotalCollections() const;
 
-  /**
-   * @brief オブジェクトをGC管理対象として登録
-   * @param obj 管理対象のオブジェクト
-   */
-  void registerObject(Object* obj) {
-    if (obj) {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      m_managedObjects.insert(obj);
-    }
-  }
+    /**
+     * @brief 総GC実行時間を取得
+     * @return uint64_t 総実行時間（マイクロ秒）
+     */
+    uint64_t getTotalCollectionTime() const;
 
-  /**
-   * @brief ルートオブジェクトを登録
-   * @param root ルートオブジェクトへのポインタ
-   */
-  void addRoot(Object** root) {
-    if (root) {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      m_roots.push_back(root);
-    }
-  }
+    /**
+     * @brief 最後のGC実行時間を取得
+     * @return uint64_t 最後の実行時間（マイクロ秒）
+     */
+    uint64_t getLastCollectionTime() const;
 
-  /**
-   * @brief ルートオブジェクトの登録解除
-   * @param root 登録解除するルートオブジェクトへのポインタ
-   */
-  void removeRoot(Object** root) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_roots.erase(
-      std::remove(m_roots.begin(), m_roots.end(), root),
-      m_roots.end()
-    );
-  }
+    /**
+     * @brief ルートオブジェクトを追加
+     * @param root ルートオブジェクト
+     */
+    void addRoot(void* root);
 
-  /**
-   * @brief グローバルハンドルを登録
-   * @param handle グローバルハンドルへのポインタ
-   */
-  void addGlobalHandle(Object** handle) {
-    if (handle) {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      m_globalHandles.push_back(handle);
-    }
-  }
-
-  /**
-   * @brief グローバルハンドルの登録解除
-   * @param handle 登録解除するグローバルハンドルへのポインタ
-   */
-  void removeGlobalHandle(Object** handle) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_globalHandles.erase(
-      std::remove(m_globalHandles.begin(), m_globalHandles.end(), handle),
-      m_globalHandles.end()
-    );
-  }
+    /**
+     * @brief ルートオブジェクトを削除
+     * @param root ルートオブジェクト
+     */
+    void removeRoot(void* root);
 
 private:
-  /**
-   * @brief コンストラクタ（シングルトン）
-   */
-  GarbageCollector() 
-    : m_isCollecting(false),
-      m_parallelCollection(true),
-      m_debugMode(false) {}
+    MemoryAllocator* allocator_;
+    MemoryPool* pool_;
+    GCMode mode_;
+    std::unique_ptr<GCCollector> collector_;
+    
+    std::unordered_set<void*> roots_;
+    std::unordered_set<void*> markedObjects_;
+    mutable std::mutex rootsMutex_;
+    
+    bool isRunning_;
+    size_t totalCollections_;
+    uint64_t totalCollectionTime_;
+    uint64_t lastCollectionTime_;
+    size_t threshold_;
+    size_t maxHeapSize_;
 
-  /**
-   * @brief デストラクタ
-   */
-  ~GarbageCollector() = default;
+    // GC実装メソッド
+    void performMarkSweep();
+    void performGenerational();
+    void performIncremental();
+    void performConcurrent();
 
-  /**
-   * @brief ガベージコレクション処理
-   * オブジェクトの収集と解放を行う
-   */
-  void collectGarbage();
-
-  /**
-   * @brief マーク処理
-   * 到達可能なオブジェクトをマークする
-   */
-  void markPhase();
-
-  /**
-   * @brief スイープ処理
-   * マークされていないオブジェクトを解放する
-   * @return 収集されたオブジェクトのリスト
-   */
-  std::vector<Object*> sweepPhase();
-
-  /**
-   * @brief WeakRefの更新
-   * GC後にWeakRefオブジェクトを更新する
-   */
-  void updateWeakRefs();
-
-  /**
-   * @brief WeakRefオブジェクトの処理
-   * 生存しているオブジェクトを参照するWeakRefのみ有効にする
-   */
-  void processWeakReferences();
-
-  /**
-   * @brief WeakHandleの無効化
-   * @param obj 無効化の対象となるオブジェクト
-   */
-  void invalidateWeakHandles(Object* obj);
-
-  /**
-   * @brief ミューテックス
-   */
-  std::mutex m_mutex;
-
-  /**
-   * @brief GC実行中フラグ
-   */
-  std::atomic<bool> m_isCollecting;
-
-  /**
-   * @brief 並列コレクションフラグ
-   */
-  bool m_parallelCollection;
-
-  /**
-   * @brief デバッグモードフラグ
-   */
-  bool m_debugMode;
-
-  /**
-   * @brief 登録されたWeakHandleのセット
-   */
-  std::unordered_set<void*> m_registeredWeakHandles;
-
-  /**
-   * @brief WeakRefプロバイダのリスト
-   */
-  std::vector<std::function<void()>> m_weakRefProviders;
-
-  /**
-   * @brief Finalizationコールバックのリスト
-   */
-  std::vector<std::function<void()>> m_finalizationCallbacks;
-
-  /**
-   * @brief 管理対象オブジェクトのセット
-   */
-  std::unordered_set<Object*> m_managedObjects;
-
-  /**
-   * @brief ルートオブジェクトリスト
-   */
-  std::vector<Object**> m_roots;
-
-  /**
-   * @brief グローバルハンドルリスト
-   */
-  std::vector<Object**> m_globalHandles;
+    // ヘルパーメソッド
+    void markReachableObjects();
+    void markObject(void* object);
+    void sweepUnmarkedObjects();
+    bool shouldCompact() const;
+    void compactHeap();
+    
+    // 世代別GC用
+    void collectYoungGeneration();
+    void collectOldGeneration();
+    bool shouldCollectOldGeneration() const;
+    
+    // インクリメンタルGC用
+    void incrementalMark();
+    void incrementalSweep();
 };
 
-} // namespace aero
+} // namespace memory
+} // namespace utils
+} // namespace aerojs
 
-#endif // AERO_GARBAGE_COLLECTOR_H 
+#endif // AEROJS_UTILS_MEMORY_GC_GARBAGE_COLLECTOR_H 

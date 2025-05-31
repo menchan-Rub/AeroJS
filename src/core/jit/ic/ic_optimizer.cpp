@@ -213,10 +213,14 @@ std::unordered_map<std::string, ICOptimizationResult> ICOptimizer::OptimizeAllCa
     
     // 各キャッシュIDに対して最適化を実行
     for (const std::string& cacheId : cacheIds) {
-        // キャッシュタイプを取得（実際の実装ではキャッシュマネージャから取得する必要がある）
-        // この例では、Property タイプを仮定
+        // キャッシュタイプをキャッシュマネージャから取得
         ICType type = ICType::Property;
-        
+        if (cacheManager) {
+            auto cache = cacheManager->GetCache(cacheId);
+            if (cache) {
+                type = cache->GetType();
+            }
+        }
         ICOptimizationResult result = OptimizeCache(cacheId, type, options, cacheManager);
         results[cacheId] = result;
     }
@@ -425,9 +429,24 @@ void ICOptimizer::BackgroundOptimizationWorker(
             for (const std::string& cacheId : cacheIds) {
                 // 優先度がBackgroundのキャッシュのみを処理
                 if (GetCachePriority(cacheId) == ICPriorityLevel::Background) {
-                    // キャッシュタイプを取得（実際の実装ではキャッシュマネージャから取得する必要がある）
-                    // この例では、Property タイプを仮定
-                    ICType type = ICType::Property;
+                    // キャッシュタイプを取得
+                    ICType type = ICType::Property; // デフォルト値。取得失敗時に使用される。
+                    if (cacheManager) {
+                        auto cache = cacheManager->GetCache(cacheId);
+                        if (cache) {
+                            type = cache->GetType();
+                        } else {
+                            // キャッシュIDに対応するキャッシュが見つからない場合
+                            std::stringstream ss;
+                            ss << "Cache not found for ID: " << cacheId << ". Using default ICType::Property.";
+                            ICLogger::Instance().Warning(ss.str(), "ICOptimizer");
+                        }
+                    } else {
+                        // キャッシュマネージャが無効な場合
+                        std::stringstream ss;
+                        ss << "CacheManager is null. Cannot retrieve ICType for cache ID: " << cacheId << ". Using default ICType::Property.";
+                        ICLogger::Instance().Warning(ss.str(), "ICOptimizer");
+                    }
                     
                     // 最適化が必要かどうか確認
                     if (NeedsOptimization(cacheId, type, options.thresholds)) {
@@ -605,63 +624,244 @@ ICOptimizationResult ICOptimizer::OptimizeByPattern(
         result.success = true;
         result.state = ICOptimizationState::Optimizing;
         
-        // アクセスパターンを分析
-        // （実際の実装では、もっと複雑なパターン検出アルゴリズムが必要）
+        // より洗練されたパターン分析アルゴリズムの実装
+        struct PatternFeatures {
+            double hitRate;
+            double missRate;
+            double invalidationRate;
+            double typeErrorRate;
+            size_t maxConsecutiveHits;
+            size_t maxConsecutiveMisses;
+            double hitMissRatio;
+            double patternEstropy; // Entropy of access results (Hit, Miss, etc.)
+            bool hasAlternatingPattern;
+            bool hasCyclicPattern;
+            size_t patternPeriod;
+            bool hasShapeConflict;
+            double objectTypeVariety;
+            bool hasPolymorphicAccess;
+
+            // N-gram features (bigrams of ICAccessResult)
+            size_t missMissCount; // Count of Miss -> Miss sequences
+            size_t missHitCount;  // Count of Miss -> Hit sequences
+            size_t hitMissCount;  // Count of Hit -> Miss sequences
+            size_t hitHitCount;   // Count of Hit -> Hit sequences
+            // Add more n-grams or other sequence features as needed
+        };
         
-        // ヒットとミスのパターンを調べる簡易版
+        // パターン特徴量を抽出
+        PatternFeatures features{}; // Initialize all members to zero/false/default
+        
+        // ヒットとミスの基本的な統計
+        size_t hitCount = 0;
+        size_t missCount = 0;
+        size_t invalidationCount = 0;
+        size_t typeErrorCount = 0;
+        
         std::vector<ICAccessResult> resultPattern;
+        std::vector<std::string> objectTypes;
+        std::vector<uint64_t> shapeIds;
+        
+        // アクセス履歴から詳細情報を抽出
         for (const auto& entry : history) {
             resultPattern.push_back(entry.result);
-        }
-        
-        // パターン：連続するミスが多い場合は、キャッシュを拡大または特化する
-        size_t consecutiveMissCount = 0;
-        size_t maxConsecutiveMisses = 0;
-        
-        for (const auto& result : resultPattern) {
-            if (result == ICAccessResult::Miss) {
-                consecutiveMissCount++;
-                maxConsecutiveMisses = std::max(maxConsecutiveMisses, consecutiveMissCount);
-            } else {
-                consecutiveMissCount = 0;
+            
+            // カウンタを更新
+            if (entry.result == ICAccessResult::Hit) {
+                hitCount++;
+            } else if (entry.result == ICAccessResult::Miss) {
+                missCount++;
+            } else if (entry.result == ICAccessResult::Invalidated) {
+                invalidationCount++;
+            } else if (entry.result == ICAccessResult::TypeError) {
+                typeErrorCount++;
+            }
+            
+            // オブジェクトタイプと形状情報を収集
+            if (entry.objectType && !entry.objectType->empty()) {
+                objectTypes.push_back(*entry.objectType);
+            }
+            
+            if (entry.shapeId) {
+                shapeIds.push_back(*entry.shapeId);
             }
         }
         
-        if (maxConsecutiveMisses > 5) {  // 閾値は調整可能
-            // 連続するミスが多い場合は拡大操作
+        const size_t totalAccesses = resultPattern.size();
+        if (totalAccesses == 0) {
+            result.success = false;
+            result.state = ICOptimizationState::NotOptimized;
+            result.errorMessage = "No access history available for analysis";
+            return result;
+        }
+        
+        // 基本的な統計特徴量
+        features.hitRate = static_cast<double>(hitCount) / totalAccesses;
+        features.missRate = static_cast<double>(missCount) / totalAccesses;
+        features.invalidationRate = static_cast<double>(invalidationCount) / totalAccesses;
+        features.typeErrorRate = static_cast<double>(typeErrorCount) / totalAccesses;
+        features.hitMissRatio = missCount > 0 ? static_cast<double>(hitCount) / missCount : hitCount;
+        
+        // 連続する同じ結果の最大数を計算
+        size_t consecutiveHits = 0;
+        size_t consecutiveMisses = 0;
+        features.maxConsecutiveHits = 0;
+        features.maxConsecutiveMisses = 0;
+        
+        // Initialize N-gram counts
+        features.missMissCount = 0;
+        features.missHitCount = 0;
+        features.hitMissCount = 0;
+        features.hitHitCount = 0;
+
+        ICAccessResult previousResult = ICAccessResult::Unknown; // Initialize with a value not part of typical sequence start
+
+        for (size_t i = 0; i < resultPattern.size(); ++i) {
+            const auto& currentResult = resultPattern[i];
+            if (currentResult == ICAccessResult::Hit) {
+                consecutiveHits++;
+                consecutiveMisses = 0;
+                features.maxConsecutiveHits = std::max(features.maxConsecutiveHits, consecutiveHits);
+                if (i > 0 && previousResult == ICAccessResult::Hit) {
+                    features.hitHitCount++;
+                } else if (i > 0 && previousResult == ICAccessResult::Miss) {
+                    features.missHitCount++;
+                }
+            } else if (currentResult == ICAccessResult::Miss) {
+                consecutiveMisses++;
+                consecutiveHits = 0;
+                features.maxConsecutiveMisses = std::max(features.maxConsecutiveMisses, consecutiveMisses);
+                if (i > 0 && previousResult == ICAccessResult::Miss) {
+                    features.missMissCount++;
+                } else if (i > 0 && previousResult == ICAccessResult::Hit) {
+                    features.hitMissCount++;
+                }
+            } else { // For TypeError, Invalidated, etc.
+                consecutiveHits = 0;
+                consecutiveMisses = 0;
+                // N-grams involving these could be added if deemed useful
+            }
+            previousResult = currentResult;
+        }
+        
+        // パターンのエントロピー計算（パターンの複雑さの指標）
+        std::unordered_map<ICAccessResult, size_t> resultCounts;
+        for (const auto& result : resultPattern) {
+            resultCounts[result]++;
+        }
+        
+        double entropy = 0.0;
+        for (const auto& pair : resultCounts) {
+            double probability = static_cast<double>(pair.second) / totalAccesses;
+            if (probability > 0) {
+                entropy -= probability * log2(probability);
+            }
+        }
+        features.patternEstropy = entropy;
+        
+        // 交互パターン検出（ヒット/ミスが交互に発生）
+        features.hasAlternatingPattern = resultPattern.size() >= 4;
+        for (size_t i = 2; i < resultPattern.size() && features.hasAlternatingPattern; i++) {
+            if ((resultPattern[i] == resultPattern[i-2]) != (resultPattern[i-1] == resultPattern[i-3])) {
+                features.hasAlternatingPattern = false;
+            }
+        }
+        
+        // 周期的パターン検出（周期的なアクセスパターンの有無と周期）
+        features.hasCyclicPattern = false;
+        features.patternPeriod = 0;
+        
+        // 周期は2から全体の1/3までの範囲で検索（短い周期を優先）
+        for (size_t period = 2; period <= totalAccesses / 3 && !features.hasCyclicPattern; period++) {
+            bool isPeriodic = true;
+            // 少なくとも3周期分のデータがある場合のみ検討
+            if (totalAccesses >= period * 3) {
+                for (size_t i = 0; i < 2 * period && isPeriodic; i++) {
+                    for (size_t j = 1; j < totalAccesses / period - 1 && isPeriodic; j++) {
+                        if (i + j * period < totalAccesses && 
+                            resultPattern[i] != resultPattern[i + j * period]) {
+                            isPeriodic = false;
+                        }
+                    }
+                }
+                if (isPeriodic) {
+                    features.hasCyclicPattern = true;
+                    features.patternPeriod = period;
+                    break;
+                }
+            }
+        }
+        
+        // シェイプの競合検出（同じプロパティに対して異なるシェイプからのアクセス）
+        std::unordered_set<uint64_t> uniqueShapes(shapeIds.begin(), shapeIds.end());
+        features.hasShapeConflict = uniqueShapes.size() > 1;
+        
+        // オブジェクトタイプの多様性
+        std::unordered_set<std::string> uniqueTypes(objectTypes.begin(), objectTypes.end());
+        features.objectTypeVariety = static_cast<double>(uniqueTypes.size()) / std::max<size_t>(objectTypes.size(), 1);
+        
+        // 多態アクセスの検出（複数の異なるタイプによるアクセス）
+        features.hasPolymorphicAccess = uniqueTypes.size() > 1;
+        
+        // パターン特徴量に基づいて最適化戦略を選択
+        // コメント更新: 既存の統計的特徴に加え、アクセス結果のバイグラム（連続2要素のパターン）も考慮して最適化判断を行う。
+        // さらなる改善として、より長いN-gram、隠れマルコフモデル、時系列分析などが考えられる。
+        
+        // パターン1: 連続するミスが多い、またはMiss-Missバイグラムが多い場合
+        // （ポリモーフィック/メガモーフィックキャッシュへの拡大が必要）
+        if (features.maxConsecutiveMisses > options.thresholds.maxConsecutiveMissesForExpansion || 
+            (features.missRate > options.thresholds.missRateForExpansion && features.hasShapeConflict) ||
+            (totalAccesses > 1 && static_cast<double>(features.missMissCount) / (totalAccesses -1) > options.thresholds.missMissBigramRateForExpansion) ) {
             if (PerformExpandOperation(cacheId, type, options, cacheManager, result)) {
                 result.modifiedCacheCount++;
+                result.recommendations.push_back("キャッシュを拡大して複数のシェイプや高頻度の連続ミスに対応");
             }
         }
         
-        // パターン：ヒットとミスが交互に続く場合は、多態性の問題かもしれない
-        bool alternatingPattern = true;
-        for (size_t i = 2; i < resultPattern.size(); i++) {
-            if ((resultPattern[i] == ICAccessResult::Hit && resultPattern[i-1] == ICAccessResult::Hit) ||
-                (resultPattern[i] == ICAccessResult::Miss && resultPattern[i-1] == ICAccessResult::Miss)) {
-                alternatingPattern = false;
-                break;
-            }
-        }
-        
-        if (alternatingPattern && resultPattern.size() > 10) {
-            // 特化操作を実行
+        // パターン2: 周期的なアクセスパターン（特定の使用パターンに合わせた最適化）
+        if (features.hasCyclicPattern && features.patternPeriod <= 5) {
             if (PerformSpecializeOperation(cacheId, type, options, cacheManager, result)) {
                 result.modifiedCacheCount++;
+                result.recommendations.push_back("周期的アクセスパターンに合わせた特化最適化");
             }
         }
         
-        // パターン：無効化が多い場合は、プルーニングが必要かもしれない
-        size_t invalidationCount = 0;
-        for (const auto& result : resultPattern) {
-            if (result == ICAccessResult::Invalidated) {
-                invalidationCount++;
-            }
-        }
-        
-        if (static_cast<double>(invalidationCount) / resultPattern.size() > 0.1) {  // 10%以上が無効化
+        // パターン3: 高い無効化率（キャッシュエントリの不安定さ）
+        if (features.invalidationRate > 0.15) {
             if (PerformPruneOperation(cacheId, type, options, cacheManager, result)) {
                 result.modifiedCacheCount++;
+                result.recommendations.push_back("不安定なエントリを削除してキャッシュを安定化");
+            }
+        }
+        
+        // パターン4: 型エラーが多い（より汎用的なキャッシュが必要）
+        if (features.typeErrorRate > 0.2) {
+            if (PerformGeneralizeOperation(cacheId, type, options, cacheManager, result)) {
+                result.modifiedCacheCount++;
+                result.recommendations.push_back("キャッシュを一般化して型エラーを減少");
+            }
+        }
+        
+        // パターン5: 多態アクセスがあるが型は安定している（特化最適化）
+        if (features.hasPolymorphicAccess && features.objectTypeVariety < 0.3) {
+            if (PerformSpecializeOperation(cacheId, type, options, cacheManager, result)) {
+                result.modifiedCacheCount++;
+                result.recommendations.push_back("複数タイプに対して特化したキャッシュを作成");
+            }
+        }
+        
+        // パターン6: 高いヒット率と安定したパターン（事前ロードの候補）
+        if (features.hitRate > 0.8 && features.patternEstropy < 0.5) {
+            if (PerformPreloadOperation(cacheId, type, options, cacheManager, result)) {
+                result.modifiedCacheCount++;
+                result.recommendations.push_back("高頻度アクセスパターンを事前にロード");
+            }
+        }
+        
+        // 複数のパターンが検出された場合は複合最適化を適用
+        if (result.modifiedCacheCount > 1) {
+            if (PerformMergeOperation(cacheId, type, options, cacheManager, result)) {
+                result.recommendations.push_back("複数の最適化を組み合わせた複合最適化");
             }
         }
         
@@ -938,27 +1138,36 @@ bool ICOptimizer::PerformSpecializeOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 特化操作のログを出力
     std::stringstream ss;
     ss << "Performing specialization operation on cache '" << cacheId << "'";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して特化操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // キャッシュエントリの特化の成功を記録
-        result.specializedEntryCount++;
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) {
+            ICLogger::Instance().Error("Cache manager is null", "ICOptimizer");
+            return false;
+        }
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) {
+            ICLogger::Instance().Error("Cache not found: " + cacheId, "ICOptimizer");
+            return false;
+        }
+        // 全エントリを取得し、ヒット回数が閾値以上のものを特化
+        auto entries = cache->GetEntries();
+        size_t specialized = 0;
+        for (auto& entry : entries) {
+            if (entry.hitCount > options.specialization.minHitThreshold) {
+                // 高度な特化処理の実装
+                performAdvancedSpecialization(entry, type, options, cacheManager, result);
+                specialized++;
+            }
+        }
+        result.specializedEntryCount = specialized;
+        cacheManager->GetCache(cacheId)->ResetStats();
+        return specialized > 0;
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during specialization operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -970,28 +1179,23 @@ bool ICOptimizer::PerformGeneralizeOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 一般化操作のログを出力
     std::stringstream ss;
     ss << "Performing generalization operation on cache '" << cacheId << "'";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して一般化操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの削除と追加を記録（一般化では通常、より具体的なエントリが削除され、より一般的なエントリが追加される）
-        result.deletedEntryCount += 2;  // 仮の値
-        result.addedEntryCount += 1;    // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) return false;
+        // より具体的なエントリを削除し、より一般的なエントリを追加
+        size_t deleted = cache->RemoveSpecializedEntries();
+        size_t added = cache->AddGenericEntry();
+        result.deletedEntryCount += deleted;
+        result.addedEntryCount += added;
+        return (deleted > 0 || added > 0);
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during generalization operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1009,18 +1213,261 @@ bool ICOptimizer::PerformExpandOperation(
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
     
     try {
-        // 実際の実装では、キャッシュマネージャを使用して拡大操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
+        // キャッシュマネージャーの確認
+        if (!cacheManager) {
+            ICLogger::Instance().Error("キャッシュマネージャーがnullです", "ICOptimizer");
+            return false;
+        }
         
-        // エントリの追加を記録（拡大では通常、より多くのエントリが追加される）
-        result.addedEntryCount += 3;  // 仮の値
+        // キャッシュを取得
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) {
+            ICLogger::Instance().Error("キャッシュが見つかりません: " + cacheId, "ICOptimizer");
+            return false;
+        }
+
+        // 現在のキャッシュ容量とエントリ数
+        size_t currentCapacity = cache->GetCapacity();
+        size_t currentEntryCount = cache->GetEntryCount();
         
-        // 操作が成功したことを記録
+        // 拡大が必要かどうかを判断
+        if (currentEntryCount >= currentCapacity * 0.75) {  // 75%以上の使用率
+            // キャッシュ容量を拡大するために必要な新しいサイズを計算
+            size_t newCapacity = currentCapacity * 2;  // 2倍に拡大
+            if (newCapacity <= currentCapacity) {  // オーバーフロー対策
+                newCapacity = currentCapacity + 8;
+            }
+            newCapacity = std::min(newCapacity, options.expansion.maxCacheSize); // 上限を設定
+            
+            // 一定以上の拡大率の場合、警告をログに出力
+            if (newCapacity > currentCapacity * 4) {
+                std::stringstream warnSs;
+                warnSs << "警告: キャッシュ '" << cacheId << "' の容量が大幅に増加しています。" 
+                       << currentCapacity << " -> " << newCapacity;
+                ICLogger::Instance().Warning(warnSs.str(), "ICOptimizer");
+            }
+            
+            // 統計情報を収集
+            auto stats = ICPerformanceAnalyzer::Instance().GetStatsForCache(cacheId);
+            
+            // 拡大操作の実行
+            bool resizeSuccess = cache->Resize(newCapacity);
+            if (!resizeSuccess) {
+                ICLogger::Instance().Error("キャッシュのリサイズに失敗しました: " + cacheId, "ICOptimizer");
+                return false;
+            }
+            
+            // エントリ拡大のための戦略を選択
+            size_t targetEntryCount = std::min(
+                currentEntryCount + options.expansion.maxNewEntries,
+                newCapacity - 1 // 1つの空きスロットを残す
+            );
+            
+            // ミスパターンを分析して適切なエントリを追加
+            std::vector<ICAccessHistoryEntry> missHistory = 
+                ICPerformanceAnalyzer::Instance().GetMissHistory(cacheId, options.expansion.historyWindow);
+            
+            // 型情報に基づいてエントリを作成
+            std::unordered_map<uint64_t, size_t> shapeFrequency;  // シェイプIDとその頻度
+            std::unordered_map<std::string, size_t> typeFrequency; // 型名とその頻度
+            
+            // ミスパターンからシェイプと型の頻度を抽出
+            for (const auto& entry : missHistory) {
+                if (entry.shapeId) {
+                    shapeFrequency[*entry.shapeId]++;
+                }
+                
+                if (entry.objectType && !entry.objectType->empty()) {
+                    typeFrequency[*entry.objectType]++;
+                }
+            }
+            
+            // エントリの作成数をカウント
+            size_t addedEntries = 0;
+            
+            // 頻度に基づいて新しいシェイプエントリを追加
+            if (!shapeFrequency.empty()) {
+                // シェイプ頻度に基づいてソート
+                std::vector<std::pair<uint64_t, size_t>> shapePairs(
+                    shapeFrequency.begin(), shapeFrequency.end()
+                );
+                std::sort(shapePairs.begin(), shapePairs.end(), 
+                    [](const auto& a, const auto& b) { return a.second > b.second; });
+                
+                // 最も頻度の高いシェイプから順に追加
+                size_t maxShapeEntries = std::min(
+                    shapePairs.size(), 
+                    options.expansion.maxNewShapeEntries
+                );
+                
+                for (size_t i = 0; i < maxShapeEntries && addedEntries < options.expansion.maxNewEntries; ++i) {
+                    uint64_t shapeId = shapePairs[i].first;
+                    
+                    // シェイプ情報の取得
+                    auto shapeInfo = m_runtime->getShapeRegistry()->getShapeById(shapeId);
+                    if (!shapeInfo) continue;
+                    
+                    // コード生成器を取得
+                    ICCodeGenerator* codeGen = cacheManager->GetCodeGenerator();
+                    if (!codeGen) continue;
+                    
+                    // 新しいICエントリの作成とキャッシュへの追加
+                    ICEntry* newEntry = new ICEntry();
+                    newEntry->SetShapeId(shapeId);
+                    
+                    // シェイプに基づく専用コードの生成
+                    void* specializedCode = codeGen->GenerateShapeSpecificCode(cache, shapeInfo);
+                    if (specializedCode) {
+                        newEntry->SetCode(specializedCode);
+                        newEntry->SetPriority(ICEntryPriority::High); // 高優先度を設定
+                        
+                        // キャッシュに追加
+                        if (cache->AddEntry(newEntry)) {
+                            addedEntries++;
+                            
+                            std::stringstream debugSs;
+                            debugSs << "シェイプID " << shapeId << " 用の新しいICエントリを追加しました";
+                            ICLogger::Instance().Debug(debugSs.str(), "ICOptimizer");
+                        } else {
+                            delete newEntry; // 追加に失敗した場合、メモリリークを防ぐ
+                        }
+                    } else {
+                        delete newEntry;
+                    }
+                }
+            }
+            
+            // 型情報に基づいて汎用エントリを追加（シェイプが不足している場合）
+            if (addedEntries < options.expansion.maxNewEntries && !typeFrequency.empty()) {
+                // 型頻度でソート
+                std::vector<std::pair<std::string, size_t>> typePairs(
+                    typeFrequency.begin(), typeFrequency.end()
+                );
+                std::sort(typePairs.begin(), typePairs.end(), 
+                    [](const auto& a, const auto& b) { return a.second > b.second; });
+                
+                // 最も頻度の高い型から順に追加
+                size_t maxTypeEntries = std::min(
+                    typePairs.size(), 
+                    options.expansion.maxNewTypeEntries
+                );
+                
+                for (size_t i = 0; i < maxTypeEntries && addedEntries < options.expansion.maxNewEntries; ++i) {
+                    const std::string& typeName = typePairs[i].first;
+                    
+                    // コード生成器を取得
+                    ICCodeGenerator* codeGen = cacheManager->GetCodeGenerator();
+                    if (!codeGen) continue;
+                    
+                    // 新しい汎用ICエントリの作成
+                    ICEntry* newEntry = new ICEntry();
+                    newEntry->SetTypeName(typeName);
+                    
+                    // 型に基づく汎用コードの生成
+                    void* genericCode = codeGen->GenerateTypeBasedCode(cache, typeName);
+                    if (genericCode) {
+                        newEntry->SetCode(genericCode);
+                        newEntry->SetPriority(ICEntryPriority::Medium); // 中程度の優先度
+                        
+                        // キャッシュに追加
+                        if (cache->AddEntry(newEntry)) {
+                            addedEntries++;
+                            
+                            std::stringstream debugSs;
+                            debugSs << "型 '" << typeName << "' 用の汎用ICエントリを追加しました";
+                            ICLogger::Instance().Debug(debugSs.str(), "ICOptimizer");
+                        } else {
+                            delete newEntry; // 追加に失敗した場合、メモリリークを防ぐ
+                        }
+                    } else {
+                        delete newEntry;
+                    }
+                }
+            }
+            
+            // どんな型にも対応する汎用フォールバックエントリを追加
+            if (addedEntries < options.expansion.maxNewEntries && 
+                !cache->HasGenericFallback() && 
+                options.expansion.addGenericFallback) {
+                
+                // コード生成器を取得
+                ICCodeGenerator* codeGen = cacheManager->GetCodeGenerator();
+                if (codeGen) {
+                    // フォールバック用の汎用エントリを作成
+                    ICEntry* fallbackEntry = new ICEntry();
+                    fallbackEntry->SetGeneric(true);
+                    
+                    // 汎用コードの生成
+                    void* fallbackCode = codeGen->GenerateGenericFallbackCode(cache);
+                    if (fallbackCode) {
+                        fallbackEntry->SetCode(fallbackCode);
+                        fallbackEntry->SetPriority(ICEntryPriority::Low); // 低優先度
+                        
+                        // キャッシュに追加
+                        if (cache->AddEntry(fallbackEntry)) {
+                            addedEntries++;
+                            
+                            ICLogger::Instance().Debug(
+                                "汎用フォールバックICエントリを追加しました", "ICOptimizer");
+                        } else {
+                            delete fallbackEntry; // 追加に失敗した場合、メモリリークを防ぐ
+                        }
+                    } else {
+                        delete fallbackEntry;
+                    }
+                }
+            }
+            
+            // 追加したエントリ数を記録
+            result.addedEntryCount += addedEntries;
+            
+            // キャッシュの再編成を実行
+            if (addedEntries > 0) {
+                cacheManager->ReorganizeCache(cacheId);
+                
+                // 拡大後の統計情報をログに出力
+                std::stringstream infoSs;
+                infoSs << "キャッシュ '" << cacheId << "' を拡大しました: "
+                       << currentCapacity << " -> " << newCapacity
+                       << "、" << addedEntries << " エントリを追加";
+                ICLogger::Instance().Info(infoSs.str(), "ICOptimizer");
+                
+                // 最適化イベントを記録
+                cacheManager->RecordOptimizationEvent(
+                    cacheId, "expand", true, 
+                    {{"newCapacity", std::to_string(newCapacity)},
+                     {"addedEntries", std::to_string(addedEntries)}}
+                );
+                
+                // デバッグ情報の更新
+                if (options.collectDebugInfo) {
+                    std::stringstream debugInfo;
+                    debugInfo << "キャッシュ '" << cacheId << "' を" 
+                             << currentCapacity << "から" << newCapacity 
+                             << "に拡大し、" << addedEntries << "エントリを追加しました";
+                    result.debugInfo.push_back(debugInfo.str());
+                }
+                
+                // フラグを設定（操作が成功したことを示す）
         return true;
+            } else {
+                ICLogger::Instance().Warning(
+                    "キャッシュ '" + cacheId + "' の容量を拡大しましたが、新しいエントリは追加されませんでした", 
+                    "ICOptimizer");
+                return false;
+            }
+        } else {
+            // 拡大が必要ない場合
+            ICLogger::Instance().Info(
+                "キャッシュ '" + cacheId + "' は十分な容量があります (" + 
+                std::to_string(currentEntryCount) + "/" + std::to_string(currentCapacity) + ")", 
+                "ICOptimizer");
+            return false;
+        }
     } catch (const std::exception& e) {
         // エラーをログに記録
         std::stringstream errorSs;
-        errorSs << "Error during expand operation: " << e.what();
+        errorSs << "拡大操作中にエラーが発生しました: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
         
         // 操作が失敗したことを記録
@@ -1041,18 +1488,259 @@ bool ICOptimizer::PerformContractOperation(
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
     
     try {
-        // 実際の実装では、キャッシュマネージャを使用して縮小操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
+        // キャッシュマネージャーの確認
+        if (!cacheManager) {
+            ICLogger::Instance().Error("キャッシュマネージャーがnullです", "ICOptimizer");
+            return false;
+        }
         
-        // エントリの削除を記録（縮小では通常、エントリが削除される）
-        result.deletedEntryCount += 2;  // 仮の値
+        // キャッシュを取得
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) {
+            ICLogger::Instance().Error("キャッシュが見つかりません: " + cacheId, "ICOptimizer");
+            return false;
+        }
+
+        // 現在のキャッシュステータス
+        size_t currentCapacity = cache->GetCapacity();
+        size_t currentEntryCount = cache->GetEntryCount();
         
-        // 操作が成功したことを記録
+        // キャッシュエントリを取得
+        std::vector<ICEntry*> entries;
+        cache->GetAllEntries(entries);
+        
+        // 縮小が必要かどうかを判断
+        if (entries.empty() || currentEntryCount < options.contraction.minEntryCount) {
+            ICLogger::Instance().Info("キャッシュ '" + cacheId + "' は縮小する必要がありません", "ICOptimizer");
+            return false;
+        }
+        
+        // キャッシュ使用率が低すぎるかチェック
+        double usageRatio = static_cast<double>(currentEntryCount) / currentCapacity;
+        if (usageRatio >= options.contraction.minUsageRatio) {
+            ICLogger::Instance().Info(
+                "キャッシュ '" + cacheId + "' の使用率が十分高いため縮小は不要です (" + 
+                std::to_string(usageRatio * 100.0) + "%)", 
+                "ICOptimizer");
+            return false;
+        }
+        
+        // パフォーマンスアナライザからヒット統計を取得
+        ICAccessStats stats = ICPerformanceAnalyzer::Instance().GetStatsForCache(cacheId);
+        
+        // ヒット統計に基づいてエントリをランク付け
+        struct EntryStats {
+            ICEntry* entry;
+            uint32_t hits;
+            uint32_t misses;
+            double hitRatio;
+            uint64_t lastUsed;
+        };
+        
+        std::vector<EntryStats> entryStats;
+        entryStats.reserve(entries.size());
+        
+        // 各エントリの統計情報を収集
+        for (auto* entry : entries) {
+            EntryStats es;
+            es.entry = entry;
+            es.hits = entry->GetHitCount();
+            es.misses = entry->GetMissCount();
+            es.lastUsed = entry->GetLastUsedTimestamp();
+            
+            // ヒット率を計算（ゼロ除算を回避）
+            if (es.hits + es.misses > 0) {
+                es.hitRatio = static_cast<double>(es.hits) / (es.hits + es.misses);
+            } else {
+                es.hitRatio = 0.0;
+            }
+            
+            entryStats.push_back(es);
+        }
+        
+        // 縮小アルゴリズムの選択
+        switch (options.contraction.algorithm) {
+            case ICContractionAlgorithm::LeastRecentlyUsed: {
+                // 最後に使用された時刻でソート
+                std::sort(entryStats.begin(), entryStats.end(), 
+                    [](const EntryStats& a, const EntryStats& b) {
+                        return a.lastUsed < b.lastUsed;  // 古いものが先頭
+                    });
+                break;
+            }
+            
+            case ICContractionAlgorithm::LeastFrequentlyUsed: {
+                // ヒット数でソート
+                std::sort(entryStats.begin(), entryStats.end(), 
+                    [](const EntryStats& a, const EntryStats& b) {
+                        return a.hits < b.hits;  // ヒット数が少ないものが先頭
+                    });
+                break;
+            }
+            
+            case ICContractionAlgorithm::WorstHitRatio: {
+                // ヒット率でソート
+                std::sort(entryStats.begin(), entryStats.end(), 
+                    [](const EntryStats& a, const EntryStats& b) {
+                        return a.hitRatio < b.hitRatio;  // ヒット率が低いものが先頭
+                    });
+                break;
+            }
+            
+            case ICContractionAlgorithm::Hybrid:
+            default: {
+                // ヒット率と最終使用時刻の組み合わせでスコアリング
+                const double hitRatioWeight = 0.7;  // ヒット率の重み
+                const double recencyWeight = 0.3;   // 最新度の重み
+                
+                // 最大最終使用時刻を取得
+                uint64_t maxLastUsed = 0;
+                for (const auto& es : entryStats) {
+                    maxLastUsed = std::max(maxLastUsed, es.lastUsed);
+                }
+                
+                // ハイブリッドスコアでソート
+                std::sort(entryStats.begin(), entryStats.end(), 
+                    [hitRatioWeight, recencyWeight, maxLastUsed](const EntryStats& a, const EntryStats& b) {
+                        // 最新度スコア（0〜1、1が最も新しい）
+                        double recencyScoreA = maxLastUsed > 0 ? 
+                            static_cast<double>(a.lastUsed) / maxLastUsed : 0;
+                        double recencyScoreB = maxLastUsed > 0 ? 
+                            static_cast<double>(b.lastUsed) / maxLastUsed : 0;
+                        
+                        // 総合スコア（高いほど良い）
+                        double scoreA = hitRatioWeight * a.hitRatio + recencyWeight * recencyScoreA;
+                        double scoreB = hitRatioWeight * b.hitRatio + recencyWeight * recencyScoreB;
+                        
+                        return scoreA < scoreB; // スコアが低いものが先頭
+                    });
+                break;
+            }
+        }
+        
+        // 削除する候補数を計算
+        size_t idealCapacity = std::max(
+            static_cast<size_t>(currentEntryCount / options.contraction.targetUsageRatio),
+            options.contraction.minCapacity
+        );
+        
+        // キャパシティはべき乗に調整するか、最小値を保証
+        size_t newCapacity = idealCapacity;
+        if (options.contraction.usePowerOfTwo) {
+            // 次の2のべき乗を見つける
+            newCapacity = 1;
+            while (newCapacity < idealCapacity) {
+                newCapacity *= 2;
+            }
+        }
+        
+        // 削除するエントリ数を計算
+        size_t entriesToRemove = 0;
+        
+        if (newCapacity < currentCapacity) {
+            // 新しいキャパシティのターゲットが現在より小さい場合
+            // まずキャッシュをリサイズする
+            bool resizeSuccess = cache->Resize(newCapacity);
+            
+            if (!resizeSuccess) {
+                ICLogger::Instance().Warning(
+                    "キャッシュ '" + cacheId + "' のリサイズに失敗しました", 
+                    "ICOptimizer");
+            } else {
+                std::stringstream infoSs;
+                infoSs << "キャッシュ '" << cacheId << "' のキャパシティを縮小しました: " 
+                       << currentCapacity << " -> " << newCapacity;
+                ICLogger::Instance().Info(infoSs.str(), "ICOptimizer");
+            }
+            
+            // 削除するエントリ数を計算
+            size_t maxEntriesAfterResize = static_cast<size_t>(newCapacity * options.contraction.targetUsageRatio);
+            entriesToRemove = currentEntryCount > maxEntriesAfterResize ? 
+                              currentEntryCount - maxEntriesAfterResize : 0;
+        } else {
+            // キャパシティの縮小が不要な場合でも、使用率を調整するためにエントリを削除
+            size_t targetEntryCount = static_cast<size_t>(currentCapacity * options.contraction.targetUsageRatio);
+            entriesToRemove = currentEntryCount > targetEntryCount ? 
+                              currentEntryCount - targetEntryCount : 0;
+        }
+        
+        // 維持すべき最小エントリ数をチェック
+        entriesToRemove = std::min(
+            entriesToRemove, 
+            currentEntryCount > options.contraction.minEntryCount ? 
+                currentEntryCount - options.contraction.minEntryCount : 0
+        );
+        
+        // エントリを削除（最も価値の低いものから）
+        size_t removedCount = 0;
+        for (size_t i = 0; i < entryStats.size() && removedCount < entriesToRemove; i++) {
+            auto* entry = entryStats[i].entry;
+            
+            // 汎用フォールバックエントリは保持する
+            if (entry->IsGeneric() && options.contraction.preserveGenericFallback) {
+                continue;
+            }
+            
+            // 必須エントリは削除しない（例: グローバルオブジェクト用など）
+            if (entry->IsCritical() && options.contraction.preserveCriticalEntries) {
+                continue;
+            }
+            
+            // エントリを削除
+            if (cache->RemoveEntry(entry)) {
+                removedCount++;
+                
+                // デバッグ情報
+                std::stringstream debugSs;
+                debugSs << "キャッシュ '" << cacheId << "' からエントリを削除しました "
+                       << "(ヒット率: " << std::fixed << std::setprecision(2) << (entryStats[i].hitRatio * 100.0) 
+                       << "%, ヒット数: " << entryStats[i].hits << ")";
+                ICLogger::Instance().Debug(debugSs.str(), "ICOptimizer");
+            }
+        }
+        
+        // 操作結果を更新
+        result.deletedEntryCount += removedCount;
+        
+        // キャッシュ再編成
+        if (removedCount > 0) {
+            cacheManager->ReorganizeCache(cacheId);
+            
+            // イベント記録
+            cacheManager->RecordOptimizationEvent(
+                cacheId, "contract", true,
+                {{"removedEntries", std::to_string(removedCount)},
+                 {"newCapacity", std::to_string(cache->GetCapacity())}}
+            );
+            
+            // 詳細情報をログに出力
+            std::stringstream infoSs;
+            infoSs << "キャッシュ '" << cacheId << "' を縮小しました: "
+                   << removedCount << " エントリを削除し、キャパシティは "
+                   << currentCapacity << " -> " << cache->GetCapacity() << " になりました";
+            ICLogger::Instance().Info(infoSs.str(), "ICOptimizer");
+            
+            // デバッグ情報
+            if (options.collectDebugInfo) {
+                std::stringstream debugInfo;
+                debugInfo << "キャッシュ '" << cacheId << "' を縮小しました: "
+                         << removedCount << " エントリを削除、キャパシティ " 
+                         << currentCapacity << " -> " << cache->GetCapacity();
+                result.debugInfo.push_back(debugInfo.str());
+            }
+            
         return true;
+        } else {
+            ICLogger::Instance().Info(
+                "キャッシュ '" + cacheId + "' からのエントリ削除はできませんでした", 
+                "ICOptimizer");
+                
+            return false;
+        }
     } catch (const std::exception& e) {
         // エラーをログに記録
         std::stringstream errorSs;
-        errorSs << "Error during contract operation: " << e.what();
+        errorSs << "縮小操作中にエラーが発生しました: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
         
         // 操作が失敗したことを記録
@@ -1067,29 +1755,26 @@ bool ICOptimizer::PerformMergeOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // マージ操作のログを出力
     std::stringstream ss;
     ss << "Performing merge operation on " << cacheIds.size() << " caches";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用してマージ操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの削除と追加を記録（マージでは通常、複数のキャッシュからエントリが削除され、
-        // 新しいマージされたキャッシュにエントリが追加される）
-        result.deletedEntryCount += cacheIds.size() * 2;  // 仮の値
-        result.addedEntryCount += cacheIds.size();       // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        size_t deleted = 0, added = 0;
+        for (const auto& id : cacheIds) {
+            auto cache = cacheManager->GetCache(id);
+            if (cache) {
+                deleted += cache->RemoveRedundantEntries();
+            }
+        }
+        added = cacheManager->MergeCaches(cacheIds);
+        result.deletedEntryCount += deleted;
+        result.addedEntryCount += added;
+        return (deleted > 0 || added > 0);
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during merge operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1101,29 +1786,22 @@ bool ICOptimizer::PerformSplitOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 分割操作のログを出力
     std::stringstream ss;
     ss << "Performing split operation on cache '" << cacheId << "'";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して分割操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの削除と追加を記録（分割では通常、1つのキャッシュからエントリが削除され、
-        // 複数の新しいキャッシュにエントリが追加される）
-        result.deletedEntryCount += 1;  // 仮の値
-        result.addedEntryCount += 2;    // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) return false;
+        size_t deleted = cache->RemovePolymorphicEntries();
+        size_t added = cacheManager->SplitCache(cacheId);
+        result.deletedEntryCount += deleted;
+        result.addedEntryCount += added;
+        return (deleted > 0 || added > 0);
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during split operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1135,29 +1813,22 @@ bool ICOptimizer::PerformReorganizeOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 整理操作のログを出力
     std::stringstream ss;
     ss << "Performing reorganize operation on cache '" << cacheId << "'";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して整理操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの削除と追加を記録（整理では通常、エントリの順序が変更されるだけで、
-        // 数は変わらないが、内部的には削除と追加のように見える場合がある）
-        result.deletedEntryCount += 1;  // 仮の値
-        result.addedEntryCount += 1;    // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) return false;
+        size_t deleted = cache->ReorderEntries();
+        size_t added = cache->AddOptimizedEntry();
+        result.deletedEntryCount += deleted;
+        result.addedEntryCount += added;
+        return (deleted > 0 || added > 0);
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during reorganize operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1169,27 +1840,20 @@ bool ICOptimizer::PerformPruneOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 刈り込み操作のログを出力
     std::stringstream ss;
     ss << "Performing prune operation on cache '" << cacheId << "'";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して刈り込み操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの削除を記録（刈り込みでは通常、不要なエントリが削除される）
-        result.deletedEntryCount += 3;  // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        auto cache = cacheManager->GetCache(cacheId);
+        if (!cache) return false;
+        size_t deleted = cache->PruneUnstableEntries();
+        result.deletedEntryCount += deleted;
+        return (deleted > 0);
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during prune operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1201,27 +1865,25 @@ bool ICOptimizer::PerformPreloadOperation(
     InlineCacheManager* cacheManager,
     ICOptimizationResult& result)
 {
-    // 先読み操作のログを出力
     std::stringstream ss;
     ss << "Performing preload operation on " << cacheIds.size() << " caches";
     ICLogger::Instance().Debug(ss.str(), "ICOptimizer");
-    
     try {
-        // 実際の実装では、キャッシュマネージャを使用して先読み操作を実行する
-        // この例では、操作が成功したと仮定して結果を更新するだけ
-        
-        // エントリの追加を記録（先読みでは通常、予測されるエントリが事前に追加される）
-        result.addedEntryCount += cacheIds.size() * 2;  // 仮の値
-        
-        // 操作が成功したことを記録
-        return true;
+        if (!cacheManager) return false;
+        for (const auto& cacheId : cacheIds) {
+            auto cache = cacheManager->GetCache(cacheId);
+            if (!cache) continue;
+            // 予測されるキー（例: 0〜N）を事前に追加
+            for (uint64_t k = 0; k < options.preload.numPreloadKeys; ++k) {
+                cache->Add(k, 0, 0);
+                result.addedEntryCount++;
+            }
+        }
+        return result.addedEntryCount > 0;
     } catch (const std::exception& e) {
-        // エラーをログに記録
         std::stringstream errorSs;
         errorSs << "Error during preload operation: " << e.what();
         ICLogger::Instance().Error(errorSs.str(), "ICOptimizer");
-        
-        // 操作が失敗したことを記録
         return false;
     }
 }
@@ -1463,6 +2125,201 @@ std::string ICOptimizer::GenerateJsonOptimizationReport() const {
     report["cache_histories"] = cacheHistories;
     
     return report.dump(4); // インデント付きでJSON文字列を生成
+}
+
+//==============================================================================
+// 複雑なアクセスパターン検出
+//==============================================================================
+
+void ICOptimizer::AnalyzeAccessPatterns(const std::vector<ICAccess>& accesses) {
+    std::unordered_map<std::string, int> histogram;
+    for (const auto& access : accesses) {
+        histogram[access.pattern]++;
+    }
+    for (const auto& pair : histogram) {
+        if (pair.second > kPatternOptimizeThreshold) {
+            OptimizePattern(pair.first);
+        }
+    }
+}
+
+ICType ICOptimizer::GetCacheType(const std::string& cacheId) const {
+    return m_cacheManager->getTypeForCache(cacheId);
+}
+
+// 高度な特化処理の実装
+void ICOptimizer::performAdvancedSpecialization(ICEntry& entry, ICType type,
+                                               const ICOptimizationOptions& options,
+                                               InlineCacheManager* cacheManager,
+                                               ICOptimizationResult& result) {
+    // 基本的な特化フラグの設定
+    entry.flags |= ICEntryFlags::Specialized;
+    
+    // IC種別に応じた特化処理
+    switch (type) {
+        case ICType::Property: {
+            // プロパティアクセスの特化
+            if (entry.shapeInfo.isMonomorphic()) {
+                // モノモーフィックな場合は直接オフセットアクセスに特化
+                entry.specialized.propertyOffset = entry.shapeInfo.getPropertyOffset();
+                entry.specialized.directAccess = true;
+                
+                // 境界チェックの除去
+                if (options.eliminateBoundsChecks) {
+                    entry.flags |= ICEntryFlags::BoundsCheckEliminated;
+                }
+                
+                // 型チェックの最適化
+                if (options.optimizeTypeChecks) {
+                    entry.specialized.typeCheckCode = generateOptimizedTypeCheck(entry.shapeInfo);
+                }
+            } else if (entry.shapeInfo.isPolymorphic() && entry.shapeInfo.getShapeCount() <= 4) {
+                // ポリモーフィック（4つまで）の場合はディスパッチテーブル特化
+                entry.specialized.dispatchTable = generateDispatchTable(entry.shapeInfo.getShapes());
+                entry.specialized.polymorphicOptimized = true;
+            }
+            break;
+        }
+        
+        case ICType::Method: {
+            // メソッド呼び出しの特化
+            if (entry.callInfo.isDirectCall()) {
+                // 直接呼び出し可能な場合
+                entry.specialized.directCallTarget = entry.callInfo.getTargetFunction();
+                entry.specialized.inlineCandidate = 
+                    (entry.callInfo.getTargetSize() <= options.inlineThreshold);
+                
+                // インライン展開の実行
+                if (entry.specialized.inlineCandidate && options.enableInlining) {
+                    entry.specialized.inlinedCode = inlineFunction(entry.callInfo.getTargetFunction());
+                    entry.flags |= ICEntryFlags::Inlined;
+                }
+            } else if (entry.callInfo.isVirtualCall()) {
+                // 仮想呼び出しの場合は仮想テーブル最適化
+                entry.specialized.vtableOffset = entry.callInfo.getVTableOffset();
+                entry.specialized.vtableOptimized = true;
+            }
+            break;
+        }
+        
+        case ICType::Constructor: {
+            // コンストラクタ呼び出しの特化
+            if (entry.constructorInfo.hasFixedShape()) {
+                // 固定シェイプのオブジェクト作成
+                entry.specialized.preAllocatedShape = entry.constructorInfo.getShape();
+                entry.specialized.fastConstruction = true;
+                
+                // プロパティの事前初期化
+                if (options.preInitializeProperties) {
+                    entry.specialized.propertyInitCode = 
+                        generatePropertyInitCode(entry.constructorInfo.getInitialProperties());
+                }
+            }
+            break;
+        }
+        
+        case ICType::BinaryOperation: {
+            // 二項演算の特化
+            auto& operandTypes = entry.operandTypes;
+            if (operandTypes.size() >= 2) {
+                auto lhsType = operandTypes[0];
+                auto rhsType = operandTypes[1];
+                
+                // 数値演算の特化
+                if (lhsType.isNumeric() && rhsType.isNumeric()) {
+                    entry.specialized.numericOperation = true;
+                    entry.specialized.operationType = determineNumericOperationType(lhsType, rhsType);
+                    
+                    // 整数オーバーフローチェックの最適化
+                    if (options.optimizeIntegerOverflow) {
+                        entry.specialized.overflowChecks = 
+                            generateOptimizedOverflowChecks(entry.operation, lhsType, rhsType);
+                    }
+                }
+                
+                // 文字列連結の特化
+                else if (lhsType.isString() && rhsType.isString()) {
+                    entry.specialized.stringConcatenation = true;
+                    entry.specialized.stringOptimizations = 
+                        generateStringConcatenationOptimizations(options);
+                }
+            }
+            break;
+        }
+        
+        case ICType::Comparison: {
+            // 比較演算の特化
+            auto& operandTypes = entry.operandTypes;
+            if (operandTypes.size() >= 2) {
+                auto lhsType = operandTypes[0];
+                auto rhsType = operandTypes[1];
+                
+                // 数値比較の特化
+                if (lhsType.isNumeric() && rhsType.isNumeric()) {
+                    entry.specialized.numericComparison = true;
+                    entry.specialized.comparisonType = determineComparisonType(lhsType, rhsType);
+                }
+                
+                // 文字列比較の特化
+                else if (lhsType.isString() && rhsType.isString()) {
+                    entry.specialized.stringComparison = true;
+                    entry.specialized.stringComparisonOptimizations = 
+                        generateStringComparisonOptimizations(options);
+                }
+                
+                // オブジェクト参照比較の特化
+                else if (lhsType.isObject() && rhsType.isObject()) {
+                    entry.specialized.referenceComparison = true;
+                }
+            }
+            break;
+        }
+        
+        default:
+            // その他のIC種別は基本的な特化のみ実行
+            break;
+    }
+    
+    // 共通の最適化処理
+    
+    // ガード条件の最適化
+    if (options.optimizeGuards) {
+        entry.specialized.optimizedGuards = generateOptimizedGuards(entry, type);
+    }
+    
+    // プロファイルフィードバックベースの最適化
+    if (options.useProfileFeedback && entry.profileData.isAvailable()) {
+        applyProfileBasedOptimizations(entry, options);
+    }
+    
+    // マシンコード特化の実行
+    if (options.generateSpecializedCode) {
+        entry.specialized.nativeCode = generateSpecializedNativeCode(entry, type, options);
+        entry.specialized.nativeCodeSize = entry.specialized.nativeCode.size();
+    }
+    
+    // 特化後の検証
+    if (options.validateSpecialization) {
+        bool isValid = validateSpecializedEntry(entry, type);
+        if (!isValid) {
+            // 特化に失敗した場合は元に戻す
+            entry.flags &= ~ICEntryFlags::Specialized;
+            result.specializedEntryCount--;
+            return;
+        }
+    }
+    
+    // 統計情報の更新
+    entry.specialized.creationTime = std::chrono::steady_clock::now();
+    entry.specialized.hitCountAtSpecialization = entry.hitCount;
+    
+    // 結果に詳細情報を追加
+    if (options.collectDebugInfo) {
+        std::stringstream debugInfo;
+        debugInfo << "エントリ " << entry.id << " を " << ICTypeToString(type) 
+                  << " 用に特化しました (ヒット数: " << entry.hitCount << ")";
+        result.debugInfo.push_back(debugInfo.str());
+    }
 }
 
 } // namespace core

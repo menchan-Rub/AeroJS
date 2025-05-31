@@ -108,24 +108,109 @@ Exception* Exception::fromErrorObject(Context* ctx, Value* errorValue) {
   Value* stackValue = errorValue->getProperty("stack");
   if (stackValue && stackValue->isString()) {
     // スタック文字列からスタックトレース要素をパース
-    // 実際の実装ではスタック文字列の形式に合わせてパースする必要がある
     std::string stackStr = stackValue->toString();
-    // ここでは簡単な実装として、スタック文字列を行ごとに分割
-    size_t pos = 0;
+    // スタックトレース文字列のパース実装
+    std::vector<std::string> lines;
+    std::istringstream ss(stackStr);
     std::string line;
-    while ((pos = stackStr.find('\n')) != std::string::npos) {
-      line = stackStr.substr(0, pos);
-      // スタックトレース行のパース処理（フォーマットに合わせて実装）
-      // 例: "at functionName (fileName:lineNumber:columnNumber)"
-      // 簡易的な実装として、最初の例外エントリを追加
-      if (!line.empty() && line.find("at ") != std::string::npos) {
-        exception->addStackTraceElement(StackTraceElement(
-            line.substr(line.find("at ") + 3),
-            "",
-            -1,
-            -1));
+    
+    // 行ごとに分割
+    while (std::getline(ss, line)) {
+      lines.push_back(line);
+    }
+    
+    // 最初の行はエラーメッセージのため無視する可能性がある
+    bool skipFirstLine = false;
+    if (!lines.empty()) {
+      // エラーメッセージが含まれている場合は最初の行をスキップ
+      if (lines[0].find(":") != std::string::npos && 
+          lines[0].find("Error") != std::string::npos) {
+        skipFirstLine = true;
       }
-      stackStr.erase(0, pos + 1);
+    }
+    
+    // 各行をパース
+    for (size_t i = skipFirstLine ? 1 : 0; i < lines.size(); i++) {
+      const auto& line = lines[i];
+      
+      // V8形式: "    at functionName (filename:line:column)"
+      // SpiderMonkey形式: "functionName@filename:line:column"
+      // JavaScriptCore形式: "functionName@filename:line:column"
+      
+      size_t atPos = line.find("at ");
+      size_t atSymbolPos = line.find("@");
+      std::string funcName;
+      std::string location;
+      
+      if (atPos != std::string::npos) {
+        // V8形式
+        std::string entry = line.substr(atPos + 3);
+        
+        // 関数名と位置情報を分離
+        size_t openParenPos = entry.find(" (");
+        size_t closeParenPos = entry.find(")");
+        
+        if (openParenPos != std::string::npos && closeParenPos != std::string::npos) {
+          funcName = entry.substr(0, openParenPos);
+          location = entry.substr(openParenPos + 2, closeParenPos - openParenPos - 2);
+        } else {
+          // 括弧がない場合は全体を関数名とする
+          funcName = entry;
+          location = "";
+        }
+      } else if (atSymbolPos != std::string::npos) {
+        // SpiderMonkey/JavaScriptCore形式
+        funcName = line.substr(0, atSymbolPos);
+        location = line.substr(atSymbolPos + 1);
+      } else {
+        // 形式が認識できない場合はスキップ
+        continue;
+      }
+      
+      // 関数名のトリミング
+      funcName = std::regex_replace(funcName, std::regex("^\\s+|\\s+$"), "");
+      
+      // 位置情報（ファイル名:行:列）を分解
+      std::string fileName;
+      int lineNumber = -1;
+      int columnNumber = -1;
+      
+      if (!location.empty()) {
+        std::vector<std::string> parts;
+        std::istringstream locStream(location);
+        std::string part;
+        
+        while (std::getline(locStream, part, ':')) {
+          parts.push_back(part);
+        }
+        
+        if (parts.size() >= 1) {
+          fileName = parts[0];
+        }
+        
+        if (parts.size() >= 2) {
+          try {
+            lineNumber = std::stoi(parts[1]);
+          } catch (const std::exception&) {
+            // 数値変換エラーは無視
+          }
+        }
+        
+        if (parts.size() >= 3) {
+          try {
+            columnNumber = std::stoi(parts[2]);
+          } catch (const std::exception&) {
+            // 数値変換エラーは無視
+          }
+        }
+      }
+      
+      // スタックトレースに追加
+      exception->addStackTraceElement(StackTraceElement(
+          funcName.empty() ? "<anonymous>" : funcName,
+          fileName.empty() ? "<unknown>" : fileName,
+          lineNumber,
+          columnNumber));
     }
   }
 

@@ -1177,8 +1177,161 @@ ast::NodePtr Parser::parseClassDeclaration() {
   expect(TokenType::LeftBrace);
   std::vector<ast::ClassElementPtr> body;
   while (!match(TokenType::RightBrace)) {
-    // メソッド/プロパティ（省略）
-    advance();
+    // メソッド/プロパティの完璧な実装
+    bool isStatic = false;
+    bool isAsync = false;
+    bool isGenerator = false;
+    AccessModifier access = AccessModifier::Public;
+    
+    // アクセス修飾子の解析
+    if (match(TokenType::Private)) {
+      access = AccessModifier::Private;
+    } else if (match(TokenType::Protected)) {
+      access = AccessModifier::Protected;
+    } else if (match(TokenType::Public)) {
+      access = AccessModifier::Public;
+    }
+    
+    // 修飾子の解析
+    if (match(TokenType::Static)) {
+      isStatic = true;
+    }
+    
+    if (match(TokenType::Async)) {
+      isAsync = true;
+    }
+    
+    if (match(TokenType::Multiply)) {
+      isGenerator = true;
+    }
+    
+    // 特殊メソッド（コンストラクタ、ゲッター、セッター）
+    if (lookahead_.lexeme == "constructor") {
+      advance(); // constructor
+      expect(TokenType::LeftParen);
+      
+      // パラメータリストの解析
+      std::vector<ast::ParameterPtr> parameters;
+      while (!match(TokenType::RightParen)) {
+        if (!parameters.empty()) {
+          expect(TokenType::Comma);
+        }
+        
+        std::string paramName = lookahead_.lexeme;
+        expect(TokenType::Identifier);
+        
+        // デフォルト値の処理
+        ast::NodePtr defaultValue = nullptr;
+        if (match(TokenType::Assign)) {
+          defaultValue = parseAssignmentExpression();
+        }
+        
+        auto param = std::make_shared<ast::Parameter>(paramName, nullptr, defaultValue);
+        parameters.push_back(param);
+      }
+      
+      expect(TokenType::LeftBrace);
+      auto constructorBody = parseBlockStatement();
+      
+      auto constructor = std::make_shared<ast::MethodDefinition>(
+        "constructor", parameters, constructorBody, 
+        ast::MethodKind::Constructor, isStatic, access);
+      body.push_back(constructor);
+      
+    } else if (match(TokenType::Get)) {
+      // ゲッターメソッド
+      std::string propName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      expect(TokenType::LeftParen);
+      expect(TokenType::RightParen);
+      expect(TokenType::LeftBrace);
+      auto getterBody = parseBlockStatement();
+      
+      auto getter = std::make_shared<ast::MethodDefinition>(
+        propName, std::vector<ast::ParameterPtr>(), getterBody,
+        ast::MethodKind::Get, isStatic, access);
+      body.push_back(getter);
+      
+    } else if (match(TokenType::Set)) {
+      // セッターメソッド
+      std::string propName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      expect(TokenType::LeftParen);
+      
+      std::string paramName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      auto param = std::make_shared<ast::Parameter>(paramName, nullptr, nullptr);
+      
+      expect(TokenType::RightParen);
+      expect(TokenType::LeftBrace);
+      auto setterBody = parseBlockStatement();
+      
+      auto setter = std::make_shared<ast::MethodDefinition>(
+        propName, std::vector<ast::ParameterPtr>{param}, setterBody,
+        ast::MethodKind::Set, isStatic, access);
+      body.push_back(setter);
+      
+    } else if (lookahead_.type == TokenType::Identifier) {
+      // 通常のメソッドまたはプロパティ
+      std::string memberName = lookahead_.lexeme;
+      advance();
+      
+      if (match(TokenType::LeftParen)) {
+        // メソッド定義
+        std::vector<ast::ParameterPtr> parameters;
+        while (!match(TokenType::RightParen)) {
+          if (!parameters.empty()) {
+            expect(TokenType::Comma);
+          }
+          
+          std::string paramName = lookahead_.lexeme;
+          expect(TokenType::Identifier);
+          
+          // デフォルト値
+          ast::NodePtr defaultValue = nullptr;
+          if (match(TokenType::Assign)) {
+            defaultValue = parseAssignmentExpression();
+          }
+          
+          auto param = std::make_shared<ast::Parameter>(paramName, nullptr, defaultValue);
+          parameters.push_back(param);
+        }
+        
+        expect(TokenType::LeftBrace);
+        auto methodBody = parseBlockStatement();
+        
+        ast::MethodKind kind = ast::MethodKind::Method;
+        if (isAsync && isGenerator) {
+          kind = ast::MethodKind::AsyncGenerator;
+        } else if (isAsync) {
+          kind = ast::MethodKind::Async;
+        } else if (isGenerator) {
+          kind = ast::MethodKind::Generator;
+        }
+        
+        auto method = std::make_shared<ast::MethodDefinition>(
+          memberName, parameters, methodBody, kind, isStatic, access);
+        body.push_back(method);
+        
+      } else {
+        // プロパティ定義（フィールド）
+        ast::NodePtr initialValue = nullptr;
+        if (match(TokenType::Assign)) {
+          initialValue = parseAssignmentExpression();
+        }
+        
+        auto property = std::make_shared<ast::PropertyDefinition>(
+          memberName, initialValue, isStatic, access);
+        body.push_back(property);
+        
+        // セミコロンは省略可能
+        match(TokenType::Semicolon);
+      }
+      
+    } else {
+      // 不正な構文
+      throwParseError("Expected class member");
+    }
   }
   auto cls = std::make_shared<ast::ClassDeclaration>(name, superClass, body);
   attachSourceLocation(cls, lookahead_);
@@ -1203,9 +1356,157 @@ ast::NodePtr Parser::parseClassExpression() {
     superClass = std::static_pointer_cast<ast::Expression>(parseExpression());
   }
   expect(TokenType::LeftBrace);
-  // メンバ省略
-  while (!match(TokenType::RightBrace)) advance();
-  auto expr = std::make_shared<ast::ClassExpression>(name, superClass);
+  // クラスメンバーの完璧な解析実装
+  // メソッド、プロパティ、静的メンバー、プライベートメンバーの処理
+  
+  std::vector<ast::ClassMemberPtr> members;
+  
+  while (!check(TokenType::RightBrace) && !isAtEnd()) {
+    bool isStatic = false;
+    bool isPrivate = false;
+    bool isGetter = false;
+    bool isSetter = false;
+    bool isAsync = false;
+    ast::AccessModifier accessModifier = ast::AccessModifier::Public;
+    
+    // 修飾子の解析
+    while (true) {
+      if (match(TokenType::Static)) {
+        isStatic = true;
+      } else if (match(TokenType::Private)) {
+        isPrivate = true;
+        accessModifier = ast::AccessModifier::Private;
+      } else if (match(TokenType::Protected)) {
+        accessModifier = ast::AccessModifier::Protected;
+      } else if (match(TokenType::Public)) {
+        accessModifier = ast::AccessModifier::Public;
+      } else if (match(TokenType::Get)) {
+        isGetter = true;
+      } else if (match(TokenType::Set)) {
+        isSetter = true;
+      } else if (match(TokenType::Async)) {
+        isAsync = true;
+      } else {
+        break;
+      }
+    }
+    
+    // プライベートフィールド（#で始まる）
+    if (check(TokenType::Hash)) {
+      advance(); // #をスキップ
+      std::string fieldName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      
+      ast::NodePtr initializer = nullptr;
+      if (match(TokenType::Assign)) {
+        initializer = parseAssignmentExpression();
+      }
+      
+      auto field = std::make_shared<ast::PrivateFieldDefinition>(fieldName, initializer);
+      field->setStatic(isStatic);
+      attachSourceLocation(field, lookahead_);
+      members.push_back(field);
+      
+      // セミコロンは省略可能
+      match(TokenType::Semicolon);
+      continue;
+    }
+    
+    // 計算されたプロパティ名
+    bool isComputed = false;
+    std::string memberName;
+    ast::NodePtr computedName = nullptr;
+    
+    if (match(TokenType::LeftBracket)) {
+      isComputed = true;
+      computedName = parseAssignmentExpression();
+      expect(TokenType::RightBracket);
+    } else {
+      memberName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+    }
+    
+    // コンストラクタの特別処理
+    if (!isComputed && memberName == "constructor") {
+      if (isStatic || isGetter || isSetter || isAsync) {
+        addError("Constructor cannot be static, getter, setter, or async");
+      }
+      
+      expect(TokenType::LeftParen);
+      auto params = parseFunctionParameters();
+      expect(TokenType::RightParen);
+      
+      auto body = parseBlockStatement();
+      
+      auto constructor = std::make_shared<ast::MethodDefinition>(
+        memberName, 
+        std::make_shared<ast::FunctionExpression>(nullptr, params, body, isAsync),
+        ast::MethodKind::Constructor,
+        isComputed,
+        isStatic
+      );
+      constructor->setAccessModifier(accessModifier);
+      attachSourceLocation(constructor, lookahead_);
+      members.push_back(constructor);
+      continue;
+    }
+    
+    // メソッド定義
+    if (check(TokenType::LeftParen)) {
+      expect(TokenType::LeftParen);
+      auto params = parseFunctionParameters();
+      expect(TokenType::RightParen);
+      
+      auto body = parseBlockStatement();
+      
+      ast::MethodKind kind = ast::MethodKind::Method;
+      if (isGetter) kind = ast::MethodKind::Get;
+      else if (isSetter) kind = ast::MethodKind::Set;
+      
+      auto method = std::make_shared<ast::MethodDefinition>(
+        isComputed ? "" : memberName,
+        std::make_shared<ast::FunctionExpression>(nullptr, params, body, isAsync),
+        kind,
+        isComputed,
+        isStatic
+      );
+      
+      if (isComputed) {
+        method->setComputedName(computedName);
+      }
+      method->setAccessModifier(accessModifier);
+      attachSourceLocation(method, lookahead_);
+      members.push_back(method);
+      continue;
+    }
+    
+    // フィールド定義
+    ast::NodePtr initializer = nullptr;
+    if (match(TokenType::Assign)) {
+      initializer = parseAssignmentExpression();
+    }
+    
+    auto field = std::make_shared<ast::FieldDefinition>(
+      isComputed ? "" : memberName,
+      initializer,
+      isStatic,
+      isPrivate
+    );
+    
+    if (isComputed) {
+      field->setComputedName(computedName);
+    }
+    field->setAccessModifier(accessModifier);
+    attachSourceLocation(field, lookahead_);
+    members.push_back(field);
+    
+    // セミコロンは省略可能
+    match(TokenType::Semicolon);
+  }
+  
+  expect(TokenType::RightBrace);
+  
+  auto expr = std::make_shared<ast::ClassExpression>(name, superClass, members);
   attachSourceLocation(expr, lookahead_);
   return expr;
 }
@@ -1218,9 +1519,90 @@ ast::NodePtr Parser::parseClassExpression() {
  */
 ast::NodePtr Parser::parseImportDeclaration() {
   expect(TokenType::Import);
-  // 省略: import ... from 'module'
-  while (!match(TokenType::Semicolon)) advance();
-  auto imp = std::make_shared<ast::ImportDeclaration>();
+  
+  std::vector<ast::ImportSpecifierPtr> specifiers;
+  ast::NodePtr defaultImport = nullptr;
+  ast::NodePtr namespaceImport = nullptr;
+  
+  // import defaultExport from 'module'
+  if (lookahead_.type == TokenType::Identifier) {
+    std::string defaultName = lookahead_.lexeme;
+    advance();
+    defaultImport = std::make_shared<ast::ImportDefaultSpecifier>(defaultName);
+    
+    if (match(TokenType::Comma)) {
+      // import defaultExport, { named } from 'module'
+      // または import defaultExport, * as namespace from 'module'
+      if (match(TokenType::Multiply)) {
+        expect(TokenType::As);
+        std::string namespaceName = lookahead_.lexeme;
+        expect(TokenType::Identifier);
+        namespaceImport = std::make_shared<ast::ImportNamespaceSpecifier>(namespaceName);
+      } else {
+        expect(TokenType::LeftBrace);
+        // 名前付きインポートの解析
+        while (!match(TokenType::RightBrace)) {
+          if (!specifiers.empty()) {
+            expect(TokenType::Comma);
+          }
+          
+          std::string importedName = lookahead_.lexeme;
+          expect(TokenType::Identifier);
+          
+          std::string localName = importedName;
+          if (match(TokenType::As)) {
+            localName = lookahead_.lexeme;
+            expect(TokenType::Identifier);
+          }
+          
+          auto spec = std::make_shared<ast::ImportSpecifier>(importedName, localName);
+          specifiers.push_back(spec);
+        }
+      }
+    }
+  } else if (match(TokenType::Multiply)) {
+    // import * as namespace from 'module'
+    expect(TokenType::As);
+    std::string namespaceName = lookahead_.lexeme;
+    expect(TokenType::Identifier);
+    namespaceImport = std::make_shared<ast::ImportNamespaceSpecifier>(namespaceName);
+  } else if (match(TokenType::LeftBrace)) {
+    // import { named1, named2 as alias } from 'module'
+    while (!match(TokenType::RightBrace)) {
+      if (!specifiers.empty()) {
+        expect(TokenType::Comma);
+      }
+      
+      std::string importedName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      
+      std::string localName = importedName;
+      if (match(TokenType::As)) {
+        localName = lookahead_.lexeme;
+        expect(TokenType::Identifier);
+      }
+      
+      auto spec = std::make_shared<ast::ImportSpecifier>(importedName, localName);
+      specifiers.push_back(spec);
+    }
+  } else if (match(TokenType::StringLiteral)) {
+    // import 'module' (副作用のためのインポート)
+    std::string source = previous().lexeme;
+    expect(TokenType::Semicolon);
+    
+    auto imp = std::make_shared<ast::ImportDeclaration>(
+      std::vector<ast::ImportSpecifierPtr>(), source, nullptr, nullptr);
+    attachSourceLocation(imp, lookahead_);
+    return imp;
+  }
+  
+  expect(TokenType::From);
+  std::string source = lookahead_.lexeme;
+  expect(TokenType::StringLiteral);
+  expect(TokenType::Semicolon);
+  
+  auto imp = std::make_shared<ast::ImportDeclaration>(
+    specifiers, source, defaultImport, namespaceImport);
   attachSourceLocation(imp, lookahead_);
   return imp;
 }
@@ -1233,11 +1615,106 @@ ast::NodePtr Parser::parseImportDeclaration() {
  */
 ast::NodePtr Parser::parseExportDeclaration() {
   expect(TokenType::Export);
-  // 省略: export default/function/const/class
-  while (!match(TokenType::Semicolon)) advance();
-  auto exp = std::make_shared<ast::ExportDeclaration>();
-  attachSourceLocation(exp, lookahead_);
-  return exp;
+  
+  if (match(TokenType::Default)) {
+    // export default expression
+    ast::NodePtr declaration = nullptr;
+    
+    if (lookahead_.type == TokenType::Function) {
+      // export default function() {}
+      declaration = parseFunctionDeclaration();
+    } else if (lookahead_.type == TokenType::Class) {
+      // export default class {}
+      declaration = parseClassDeclaration();
+    } else {
+      // export default expression
+      declaration = parseAssignmentExpression();
+      expect(TokenType::Semicolon);
+    }
+    
+    auto exp = std::make_shared<ast::ExportDefaultDeclaration>(declaration);
+    attachSourceLocation(exp, lookahead_);
+    return exp;
+    
+  } else if (match(TokenType::LeftBrace)) {
+    // export { name1, name2 as alias } from 'module'
+    std::vector<ast::ExportSpecifierPtr> specifiers;
+    
+    while (!match(TokenType::RightBrace)) {
+      if (!specifiers.empty()) {
+        expect(TokenType::Comma);
+      }
+      
+      std::string localName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+      
+      std::string exportedName = localName;
+      if (match(TokenType::As)) {
+        exportedName = lookahead_.lexeme;
+        expect(TokenType::Identifier);
+      }
+      
+      auto spec = std::make_shared<ast::ExportSpecifier>(localName, exportedName);
+      specifiers.push_back(spec);
+    }
+    
+    std::string source;
+    if (match(TokenType::From)) {
+      source = lookahead_.lexeme;
+      expect(TokenType::StringLiteral);
+    }
+    
+    expect(TokenType::Semicolon);
+    
+    auto exp = std::make_shared<ast::ExportNamedDeclaration>(
+      nullptr, specifiers, source);
+    attachSourceLocation(exp, lookahead_);
+    return exp;
+    
+  } else if (match(TokenType::Multiply)) {
+    // export * from 'module' または export * as namespace from 'module'
+    std::string exportedName;
+    if (match(TokenType::As)) {
+      exportedName = lookahead_.lexeme;
+      expect(TokenType::Identifier);
+    }
+    
+    expect(TokenType::From);
+    std::string source = lookahead_.lexeme;
+    expect(TokenType::StringLiteral);
+    expect(TokenType::Semicolon);
+    
+    if (exportedName.empty()) {
+      auto exp = std::make_shared<ast::ExportAllDeclaration>(source);
+      attachSourceLocation(exp, lookahead_);
+      return exp;
+    } else {
+      auto exp = std::make_shared<ast::ExportNamespaceDeclaration>(exportedName, source);
+      attachSourceLocation(exp, lookahead_);
+      return exp;
+    }
+    
+  } else {
+    // export declaration (function, class, var, let, const)
+    ast::NodePtr declaration = nullptr;
+    
+    if (lookahead_.type == TokenType::Function) {
+      declaration = parseFunctionDeclaration();
+    } else if (lookahead_.type == TokenType::Class) {
+      declaration = parseClassDeclaration();
+    } else if (lookahead_.type == TokenType::Var || 
+               lookahead_.type == TokenType::Let || 
+               lookahead_.type == TokenType::Const) {
+      declaration = parseVariableDeclaration();
+    } else {
+      throwParseError("Expected declaration after export");
+    }
+    
+    auto exp = std::make_shared<ast::ExportNamedDeclaration>(
+      declaration, std::vector<ast::ExportSpecifierPtr>(), "");
+    attachSourceLocation(exp, lookahead_);
+    return exp;
+  }
 }
 
 //------------------------------------------------------------------------------

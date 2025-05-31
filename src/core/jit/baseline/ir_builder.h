@@ -65,6 +65,9 @@ private:
     void BuildBasicBlocks(const std::vector<uint8_t>& bytecodes, IRFunction& function);
     void EmitIRForBytecode(const uint8_t* bytecode, size_t offset, IRFunction& function);
     
+    // バイトコード命令のサイズを取得
+    size_t GetBytecodeInstructionSize(uint8_t opcode, const uint8_t* bytecode) const;
+    
     // バイトコード命令からIR命令へのマッピング
     IROpcode MapBytecodeToIROpcode(BytecodeOpcode bytecodeOp);
     

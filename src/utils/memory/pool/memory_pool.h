@@ -1,445 +1,306 @@
 /**
  * @file memory_pool.h
- * @brief 固定サイズメモリブロック用のメモリプール
+ * @brief AeroJS メモリプール管理
  * @version 0.1.0
  * @license MIT
  */
 
-#ifndef AEROJS_MEMORY_POOL_H
-#define AEROJS_MEMORY_POOL_H
+#ifndef AEROJS_UTILS_MEMORY_POOL_MEMORY_POOL_H
+#define AEROJS_UTILS_MEMORY_POOL_MEMORY_POOL_H
 
-#include <cassert>
-#include <cstdint>
+#include <cstddef>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
-
-#include "../allocators/memory_allocator.h"
+#include <memory>
 
 namespace aerojs {
 namespace utils {
+namespace memory {
+
+// 前方宣言
+class MemoryAllocator;
 
 /**
- * @brief 固定サイズのメモリブロックを管理するメモリプール
- *
- * 指定されたサイズのメモリブロックを効率的に確保・解放するためのメモリプールです。
- * 小さなオブジェクトの頻繁な確保と解放に最適化されています。
+ * @brief メモリプールのタイプ
  */
-class MemoryPool : public MemoryAllocator {
+enum class PoolType {
+  SMALL_OBJECTS,     // 小さなオブジェクト用 (1-64 bytes)
+  MEDIUM_OBJECTS,    // 中程度のオブジェクト用 (65-512 bytes) 
+  LARGE_OBJECTS,     // 大きなオブジェクト用 (513-4096 bytes)
+  HUGE_OBJECTS,      // 巨大なオブジェクト用 (4097+ bytes)
+  STRINGS,           // 文字列専用
+  ARRAYS,            // 配列専用
+  FUNCTIONS,         // 関数オブジェクト専用
+  BYTECODE,          // バイトコード専用
+  JIT_CODE,          // JITコンパイル後のコード専用
+  TEMP_OBJECTS       // 一時オブジェクト用
+};
+
+/**
+ * @brief メモリブロック
+ */
+struct MemoryBlock {
+  void* data;
+  size_t size;
+  size_t alignment;
+  bool inUse;
+  PoolType poolType;
+  uint64_t allocationId;
+  uint64_t timestamp;
+  MemoryBlock* next;
+  MemoryBlock* prev;
+};
+
+/**
+ * @brief メモリプール統計情報
+ */
+struct PoolStats {
+  size_t totalBlocks;
+  size_t usedBlocks;
+  size_t freeBlocks;
+  size_t totalBytes;
+  size_t usedBytes;
+  size_t freeBytes;
+  size_t peakUsage;
+  size_t allocationCount;
+  size_t deallocationCount;
+  double fragmentationRatio;
+};
+
+/**
+ * @brief 単一サイズのメモリプール
+ */
+class FixedSizePool {
  public:
-  /**
-   * @brief コンストラクタ
-   * @param blockSize メモリブロックのサイズ (バイト単位)
-   * @param alignment メモリブロックのアライメント (バイト単位)
-   * @param blocksPerChunk 一度に確保するブロック数
-   * @param baseAllocator 下層のアロケータ
-   */
-  MemoryPool(
-      std::size_t blockSize,
-      std::size_t alignment = alignof(std::max_align_t),
-      std::size_t blocksPerChunk = 1024,
-      MemoryAllocator* baseAllocator = nullptr)
-      : m_blockSize(std::max(blockSize, sizeof(void*))), m_alignment(alignment), m_blocksPerChunk(blocksPerChunk), m_baseAllocator(baseAllocator ? baseAllocator : &m_defaultAllocator), m_freeList(nullptr), m_stats{0, 0, 0, 0, 0, 0, 0} {
-    // ブロックサイズをアライメントに合わせる
-    m_blockSize = (m_blockSize + m_alignment - 1) & ~(m_alignment - 1);
-  }
+  FixedSizePool(size_t blockSize, size_t poolSize, MemoryAllocator* allocator);
+  ~FixedSizePool();
 
   /**
-   * @brief デストラクタ
+   * @brief ブロックを割り当てる
+   * @return MemoryBlock* 割り当てられたブロック（失敗時はnullptr）
    */
-  virtual ~MemoryPool() {
-    // すべてのチャンクを解放
-    for (auto& chunk : m_chunks) {
-      m_baseAllocator->deallocate(chunk.memory, chunk.size);
-    }
-    m_chunks.clear();
-    m_freeList = nullptr;
-  }
+  MemoryBlock* allocate();
 
   /**
-   * @brief メモリを確保する
-   * @param size 確保するサイズ (バイト単位)
-   * @param alignment アライメント (バイト単位)
-   * @param flags メモリ領域のフラグ
-   * @return 確保されたメモリへのポインタ、失敗した場合はnullptr
+   * @brief ブロックを解放する
+   * @param block 解放するブロック
    */
-  virtual void* allocate(std::size_t size, std::size_t alignment = alignof(std::max_align_t), MemoryRegionFlags flags = MemoryRegionFlags::DefaultData) override {
-    // 要求サイズが大きすぎる場合は基底アロケータにフォールバック
-    if (size > m_blockSize || alignment > m_alignment) {
-      return m_baseAllocator->allocate(size, alignment, flags);
-    }
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    // フリーリストが空の場合は新しいチャンクを確保
-    if (m_freeList == nullptr) {
-      if (!allocateChunk()) {
-        m_stats.failedAllocations++;
-        return nullptr;
-      }
-    }
-
-    assert(m_freeList != nullptr);
-
-    // フリーリストから最初のブロックを取得
-    void* block = m_freeList;
-    m_freeList = *reinterpret_cast<void**>(block);
-
-    // 統計情報を更新
-    m_stats.totalAllocated += m_blockSize;
-    m_stats.currentAllocated += m_blockSize;
-    m_stats.maxAllocated = std::max(m_stats.maxAllocated, m_stats.currentAllocated);
-    m_stats.totalAllocations++;
-    m_stats.activeAllocations++;
-
-    return block;
-  }
+  void deallocate(MemoryBlock* block);
 
   /**
-   * @brief メモリを解放する
-   * @param ptr 解放するメモリへのポインタ
-   * @param size 確保時のサイズ (バイト単位)
-   * @param alignment 確保時のアライメント (バイト単位)
-   * @return 成功した場合はtrue、それ以外はfalse
+   * @brief 統計情報を取得
+   * @return PoolStats 統計情報
    */
-  virtual bool deallocate(void* ptr, std::size_t size = 0, std::size_t alignment = alignof(std::max_align_t)) override {
-    if (ptr == nullptr) {
-      return true;
-    }
-
-    // サイズやアライメントが異なる場合は基底アロケータに委譲
-    if ((size > 0 && size > m_blockSize) || (alignment > m_alignment)) {
-      return m_baseAllocator->deallocate(ptr, size, alignment);
-    }
-
-    // このプールで確保したメモリかどうかを確認
-    if (!ownsMemory(ptr)) {
-      return m_baseAllocator->deallocate(ptr, size, alignment);
-    }
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    // フリーリストに追加
-    *reinterpret_cast<void**>(ptr) = m_freeList;
-    m_freeList = ptr;
-
-    // 統計情報を更新
-    m_stats.currentAllocated -= m_blockSize;
-    m_stats.totalDeallocations++;
-    m_stats.activeAllocations--;
-
-    return true;
-  }
-
-  /**
-   * @brief 統計情報を取得する
-   * @return 統計情報
-   */
-  virtual Stats getStats() const override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_stats;
-  }
-
-  /**
-   * @brief 統計情報をリセットする
-   */
-  virtual void resetStats() override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_stats = {0, 0, 0, 0, 0, 0, 0};
-  }
-
-  /**
-   * @brief アロケータ名を取得する
-   * @return アロケータ名
-   */
-  virtual const char* getName() const override {
-    return "MemoryPool";
-  }
-
-  /**
-   * @brief プールで管理しているメモリかどうかを確認
-   * @param ptr 確認するメモリへのポインタ
-   * @return プールで管理しているメモリの場合はtrue、それ以外はfalse
-   */
-  bool ownsMemory(void* ptr) const {
-    // 各チャンクに対してポインタが含まれるかを確認
-    for (const auto& chunk : m_chunks) {
-      const char* start = static_cast<const char*>(chunk.memory);
-      const char* end = start + chunk.size;
-      if (ptr >= start && ptr < end) {
-        return true;
-      }
-    }
-    return false;
-  }
+  PoolStats getStats() const;
 
   /**
    * @brief ブロックサイズを取得
-   * @return ブロックサイズ (バイト単位)
+   * @return size_t ブロックサイズ
    */
-  std::size_t getBlockSize() const {
-    return m_blockSize;
-  }
+  size_t getBlockSize() const { return blockSize_; }
 
   /**
-   * @brief アライメントを取得
-   * @return アライメント (バイト単位)
+   * @brief プールをリセット
    */
-  std::size_t getAlignment() const {
-    return m_alignment;
-  }
+  void reset();
 
   /**
-   * @brief チャンクあたりのブロック数を取得
-   * @return チャンクあたりのブロック数
+   * @brief デフラグメンテーション実行
    */
-  std::size_t getBlocksPerChunk() const {
-    return m_blocksPerChunk;
-  }
+  void defragment();
 
  private:
-  struct Chunk {
-    void* memory;      // チャンクのメモリ
-    std::size_t size;  // チャンクのサイズ
-  };
-
-  std::size_t m_blockSize;               // メモリブロックのサイズ
-  std::size_t m_alignment;               // メモリブロックのアライメント
-  std::size_t m_blocksPerChunk;          // チャンクあたりのブロック数
-  MemoryAllocator* m_baseAllocator;      // 下層のアロケータ
-  StandardAllocator m_defaultAllocator;  // デフォルトの基底アロケータ
-  void* m_freeList;                      // 空きブロックのリスト
-  std::vector<Chunk> m_chunks;           // 確保したチャンクのリスト
-  mutable std::mutex m_mutex;            // スレッド同期用のミューテックス
-  Stats m_stats;                         // 統計情報
+  size_t blockSize_;
+  size_t poolSize_;
+  MemoryAllocator* allocator_;
+  void* memory_;
+  MemoryBlock* freeList_;
+  MemoryBlock* usedList_;
+  mutable std::mutex mutex_;
+  PoolStats stats_;
+  uint64_t nextAllocationId_;
 
   /**
-   * @brief 新しいチャンクを確保する
-   * @return 成功した場合はtrue、失敗した場合はfalse
+   * @brief プールを初期化
    */
-  bool allocateChunk() {
-    // チャンクのサイズを計算
-    std::size_t chunkSize = m_blockSize * m_blocksPerChunk;
+  void initializePool();
 
-    // メモリを確保
-    void* memory = m_baseAllocator->allocate(chunkSize, m_alignment);
-    if (memory == nullptr) {
-      return false;
-    }
-
-    // チャンク情報を保存
-    m_chunks.push_back({memory, chunkSize});
-
-    // ブロックをフリーリストに追加
-    char* blockPtr = static_cast<char*>(memory);
-    for (std::size_t i = 0; i < m_blocksPerChunk - 1; ++i) {
-      *reinterpret_cast<void**>(blockPtr) = blockPtr + m_blockSize;
-      blockPtr += m_blockSize;
-    }
-
-    // 最後のブロックのnextポインタはnullptr
-    *reinterpret_cast<void**>(blockPtr) = nullptr;
-
-    // フリーリストを新しいチャンクの先頭に設定
-    m_freeList = memory;
-
-    return true;
-  }
+  /**
+   * @brief 新しいチャンクを追加
+   */
+  bool expandPool();
 };
 
 /**
- * @brief 複数サイズのメモリプールを管理するクラス
- *
- * 複数の異なるサイズのメモリプールを管理し、適切なサイズのプールを選択します。
+ * @brief メモリプールマネージャー
  */
-class MemoryPoolManager : public MemoryAllocator {
+class MemoryPoolManager {
  public:
-  /**
-   * @brief コンストラクタ
-   * @param baseAllocator 下層のアロケータ
-   */
-  explicit MemoryPoolManager(MemoryAllocator* baseAllocator = nullptr)
-      : m_baseAllocator(baseAllocator ? baseAllocator : &m_defaultAllocator), m_stats{0, 0, 0, 0, 0, 0, 0} {
-    // デフォルトで一般的なサイズのプールを初期化
-    initializeDefaultPools();
-  }
+  explicit MemoryPoolManager(MemoryAllocator* allocator);
+  ~MemoryPoolManager();
 
   /**
-   * @brief デストラクタ
+   * @brief 指定サイズのメモリを割り当て
+   * @param size サイズ
+   * @param poolType プールタイプ
+   * @param alignment アライメント（デフォルト: 8）
+   * @return void* 割り当てられたメモリ（失敗時はnullptr）
    */
-  virtual ~MemoryPoolManager() = default;
+  void* allocate(size_t size, PoolType poolType = PoolType::SMALL_OBJECTS, size_t alignment = 8);
 
   /**
-   * @brief メモリを確保する
-   * @param size 確保するサイズ (バイト単位)
-   * @param alignment アライメント (バイト単位)
-   * @param flags メモリ領域のフラグ
-   * @return 確保されたメモリへのポインタ、失敗した場合はnullptr
+   * @brief メモリを解放
+   * @param ptr 解放するメモリ
    */
-  virtual void* allocate(std::size_t size, std::size_t alignment = alignof(std::max_align_t), MemoryRegionFlags flags = MemoryRegionFlags::DefaultData) override {
-    if (size == 0) {
-      return nullptr;
-    }
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    // 適切なプールを探す
-    for (auto& pool : m_pools) {
-      if (size <= pool->getBlockSize() && alignment <= pool->getAlignment()) {
-        void* ptr = pool->allocate(size, alignment, flags);
-        if (ptr) {
-          // 統計情報を更新
-          m_stats.totalAllocated += size;
-          m_stats.currentAllocated += size;
-          m_stats.maxAllocated = std::max(m_stats.maxAllocated, m_stats.currentAllocated);
-          m_stats.totalAllocations++;
-          m_stats.activeAllocations++;
-          return ptr;
-        }
-      }
-    }
-
-    // 適切なプールが見つからない場合は基底アロケータを使用
-    void* ptr = m_baseAllocator->allocate(size, alignment, flags);
-    if (ptr) {
-      // 統計情報を更新
-      m_stats.totalAllocated += size;
-      m_stats.currentAllocated += size;
-      m_stats.maxAllocated = std::max(m_stats.maxAllocated, m_stats.currentAllocated);
-      m_stats.totalAllocations++;
-      m_stats.activeAllocations++;
-    } else {
-      m_stats.failedAllocations++;
-    }
-
-    return ptr;
-  }
+  void deallocate(void* ptr);
 
   /**
-   * @brief メモリを解放する
-   * @param ptr 解放するメモリへのポインタ
-   * @param size 確保時のサイズ (バイト単位)
-   * @param alignment 確保時のアライメント (バイト単位)
-   * @return 成功した場合はtrue、それ以外はfalse
+   * @brief メモリを再割り当て
+   * @param ptr 元のメモリ
+   * @param newSize 新しいサイズ
+   * @param poolType プールタイプ
+   * @param alignment アライメント
+   * @return void* 再割り当てされたメモリ
    */
-  virtual bool deallocate(void* ptr, std::size_t size = 0, std::size_t alignment = alignof(std::max_align_t)) override {
-    if (ptr == nullptr) {
-      return true;
-    }
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    // メモリを所有しているプールを探す
-    for (auto& pool : m_pools) {
-      if (pool->ownsMemory(ptr)) {
-        bool result = pool->deallocate(ptr, size, alignment);
-        if (result && size > 0) {
-          // 統計情報を更新
-          m_stats.currentAllocated -= size;
-          m_stats.totalDeallocations++;
-          m_stats.activeAllocations--;
-        }
-        return result;
-      }
-    }
-
-    // どのプールも所有していない場合は基底アロケータに委譲
-    bool result = m_baseAllocator->deallocate(ptr, size, alignment);
-    if (result && size > 0) {
-      // 統計情報を更新
-      m_stats.currentAllocated -= size;
-      m_stats.totalDeallocations++;
-      m_stats.activeAllocations--;
-    }
-
-    return result;
-  }
+  void* reallocate(void* ptr, size_t newSize, PoolType poolType = PoolType::SMALL_OBJECTS, size_t alignment = 8);
 
   /**
-   * @brief 新しいプールを追加する
-   * @param blockSize ブロックサイズ (バイト単位)
-   * @param alignment アライメント (バイト単位)
-   * @param blocksPerChunk チャンクあたりのブロック数
-   * @return 追加されたプールへのポインタ
+   * @brief メモリサイズを取得
+   * @param ptr メモリポインタ
+   * @return size_t メモリサイズ
    */
-  MemoryPool* addPool(std::size_t blockSize, std::size_t alignment = alignof(std::max_align_t), std::size_t blocksPerChunk = 1024) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    // 同じサイズのプールがすでに存在するか確認
-    for (auto& pool : m_pools) {
-      if (pool->getBlockSize() == blockSize && pool->getAlignment() == alignment) {
-        return pool.get();
-      }
-    }
-
-    // 新しいプールを作成して追加
-    auto pool = std::make_unique<MemoryPool>(blockSize, alignment, blocksPerChunk, m_baseAllocator);
-    MemoryPool* result = pool.get();
-    m_pools.push_back(std::move(pool));
-
-    // プールをブロックサイズの昇順でソート
-    std::sort(m_pools.begin(), m_pools.end(),
-              [](const std::unique_ptr<MemoryPool>& a, const std::unique_ptr<MemoryPool>& b) {
-                return a->getBlockSize() < b->getBlockSize();
-              });
-
-    return result;
-  }
+  size_t getSize(void* ptr) const;
 
   /**
-   * @brief 統計情報を取得する
-   * @return 統計情報
+   * @brief プールタイプを取得
+   * @param ptr メモリポインタ
+   * @return PoolType プールタイプ
    */
-  virtual Stats getStats() const override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_stats;
-  }
+  PoolType getPoolType(void* ptr) const;
 
   /**
-   * @brief 統計情報をリセットする
+   * @brief 統計情報を取得
+   * @param poolType 指定プールの統計（省略時は全体）
+   * @return PoolStats 統計情報
    */
-  virtual void resetStats() override {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_stats = {0, 0, 0, 0, 0, 0, 0};
-    for (auto& pool : m_pools) {
-      pool->resetStats();
-    }
-  }
+  PoolStats getStats(PoolType poolType = PoolType::SMALL_OBJECTS) const;
 
   /**
-   * @brief アロケータ名を取得する
-   * @return アロケータ名
+   * @brief 全プールの統計情報を取得
+   * @return std::unordered_map<PoolType, PoolStats> プールごとの統計情報
    */
-  virtual const char* getName() const override {
-    return "MemoryPoolManager";
-  }
+  std::unordered_map<PoolType, PoolStats> getAllStats() const;
+
+  /**
+   * @brief ガベージコレクション準備
+   */
+  void prepareForGC();
+
+  /**
+   * @brief ガベージコレクション完了通知
+   */
+  void finishGC();
+
+  /**
+   * @brief デフラグメンテーション実行
+   * @param poolType 対象プール（省略時は全プール）
+   */
+  void defragment(PoolType poolType = PoolType::SMALL_OBJECTS);
+
+  /**
+   * @brief プールをリセット
+   * @param poolType 対象プール（省略時は全プール）
+   */
+  void resetPool(PoolType poolType = PoolType::SMALL_OBJECTS);
+
+  /**
+   * @brief メモリリークチェック
+   * @return std::vector<MemoryBlock*> リークしているブロックのリスト
+   */
+  std::vector<MemoryBlock*> checkMemoryLeaks() const;
+
+  /**
+   * @brief プール情報をダンプ
+   * @param verbose 詳細情報を含むかどうか
+   * @return std::string プール情報
+   */
+  std::string dumpPoolInfo(bool verbose = false) const;
 
  private:
-  MemoryAllocator* m_baseAllocator;                  // 下層のアロケータ
-  StandardAllocator m_defaultAllocator;              // デフォルトの基底アロケータ
-  std::vector<std::unique_ptr<MemoryPool>> m_pools;  // プールのリスト
-  mutable std::mutex m_mutex;                        // スレッド同期用のミューテックス
-  Stats m_stats;                                     // 統計情報
+  MemoryAllocator* allocator_;
+  std::unordered_map<PoolType, std::unique_ptr<FixedSizePool>> pools_;
+  std::unordered_map<void*, MemoryBlock*> blockMap_;
+  mutable std::mutex globalMutex_;
+
+  // プールサイズの設定
+  static const std::unordered_map<PoolType, std::pair<size_t, size_t>> POOL_CONFIGS;
 
   /**
-   * @brief デフォルトのプールを初期化する
+   * @brief プールを初期化
    */
-  void initializeDefaultPools() {
-    // 小さいサイズから大きいサイズまで、一般的なオブジェクトサイズをカバーするプールを作成
-    // 16バイトから始めて8KBまで
-    addPool(16);    // 16バイト
-    addPool(32);    // 32バイト
-    addPool(64);    // 64バイト
-    addPool(128);   // 128バイト
-    addPool(256);   // 256バイト
-    addPool(512);   // 512バイト
-    addPool(1024);  // 1KB
-    addPool(2048);  // 2KB
-    addPool(4096);  // 4KB
-    addPool(8192);  // 8KB
-  }
+  void initializePools();
+
+  /**
+   * @brief 適切なプールを取得
+   * @param size サイズ
+   * @param poolType プールタイプ
+   * @return FixedSizePool* プール（見つからない場合はnullptr）
+   */
+  FixedSizePool* getPool(size_t size, PoolType poolType);
+
+  /**
+   * @brief サイズに基づいてプールタイプを決定
+   * @param size サイズ
+   * @return PoolType 適切なプールタイプ
+   */
+  PoolType determinePoolType(size_t size) const;
+
+  /**
+   * @brief メモリブロックを作成
+   * @param data データポインタ
+   * @param size サイズ
+   * @param poolType プールタイプ
+   * @param alignment アライメント
+   * @return MemoryBlock* 作成されたブロック
+   */
+  MemoryBlock* createBlock(void* data, size_t size, PoolType poolType, size_t alignment);
+
+  /**
+   * @brief メモリブロックを削除
+   * @param block 削除するブロック
+   */
+  void destroyBlock(MemoryBlock* block);
 };
 
+/**
+ * @brief メモリプール管理クラス
+ */
+class MemoryPool {
+public:
+    MemoryPool();
+    ~MemoryPool();
+
+    // 初期化
+    bool initialize(MemoryAllocator* allocator);
+
+    // メモリ割り当て
+    void* allocate(size_t size);
+    void deallocate(void* ptr);
+
+    // 統計情報
+    size_t getTotalSize() const;
+    size_t getUsedSize() const;
+    size_t getFreeSize() const;
+
+private:
+    MemoryAllocator* allocator_;
+    size_t totalSize_;
+    size_t usedSize_;
+};
+
+}  // namespace memory
 }  // namespace utils
 }  // namespace aerojs
 
-#endif  // AEROJS_MEMORY_POOL_H
+#endif  // AEROJS_UTILS_MEMORY_POOL_MEMORY_POOL_H

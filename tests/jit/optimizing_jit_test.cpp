@@ -183,7 +183,68 @@ TEST_F(OptimizingJITTest, TypeSpecialization) {
   EXPECT_TRUE(resultWithoutTypes.success);
   
   // 型特化ありの方が最適化が多く適用されるはず
-  // (optimizationFlagsが異なるはずだが、モック環境では検証が難しいので省略)
+  // 完璧な型特化検証の実装
+  // 最適化フラグとコード品質の詳細な比較
+  
+  // コンパイル結果の詳細な比較
+  EXPECT_NE(nullptr, resultWithTypes.function);
+  EXPECT_NE(nullptr, resultWithoutTypes.function);
+  
+  // 型特化ありの場合の検証
+  EXPECT_TRUE(resultWithTypes.function->hasTypeSpecialization);
+  EXPECT_GT(resultWithTypes.function->optimizationFlags & OptimizationFlag::TypeSpecialization, 0);
+  
+  // 型特化なしの場合の検証
+  EXPECT_FALSE(resultWithoutTypes.function->hasTypeSpecialization);
+  EXPECT_EQ(resultWithoutTypes.function->optimizationFlags & OptimizationFlag::TypeSpecialization, 0);
+  
+  // コードサイズの比較（型特化により最適化されたコードが生成されるはず）
+  size_t sizeWithTypes = resultWithTypes.function->getCodeSize();
+  size_t sizeWithoutTypes = resultWithoutTypes.function->getCodeSize();
+  
+  // 型特化により効率的なコードが生成されることを検証
+  // （一般的に型特化により最適化が進み、コードサイズが変化する）
+  EXPECT_NE(sizeWithTypes, sizeWithoutTypes);
+  
+  // パフォーマンス特性の比較
+  uint32_t instrCountWithTypes = resultWithTypes.function->getInstructionCount();
+  uint32_t instrCountWithoutTypes = resultWithoutTypes.function->getInstructionCount();
+  
+  // 型特化により命令数が最適化される場合が多い
+  EXPECT_LE(instrCountWithTypes, instrCountWithoutTypes);
+  
+  // 最適化レベルの比較
+  OptimizationLevel levelWithTypes = resultWithTypes.function->level;
+  OptimizationLevel levelWithoutTypes = resultWithoutTypes.function->level;
+  
+  // 型特化により高いレベルの最適化が適用されることを検証
+  EXPECT_GE(static_cast<int>(levelWithTypes), static_cast<int>(levelWithoutTypes));
+  
+  // 実行時型チェックの削減を検証
+  uint32_t typeChecksWithTypes = resultWithTypes.function->getTypeCheckCount();
+  uint32_t typeChecksWithoutTypes = resultWithoutTypes.function->getTypeCheckCount();
+  
+  // 型特化により型チェックが削減されることを検証
+  EXPECT_LT(typeChecksWithTypes, typeChecksWithoutTypes);
+  
+  // コンパイル時間の比較
+  auto compileTimeWithTypes = resultWithTypes.compilationTime;
+  auto compileTimeWithoutTypes = resultWithoutTypes.compilationTime;
+  
+  // 型特化は追加の解析が必要なため、通常はコンパイル時間が増加する
+  EXPECT_GE(compileTimeWithTypes, compileTimeWithoutTypes);
+  
+  // 生成されたIRの詳細な検証
+  std::string irWithTypes = jit->dumpOptimizedIR(function->getId(), true);
+  std::string irWithoutTypes = jit->dumpOptimizedIR(function->getId(), false);
+  
+  // 型特化IRには型情報が含まれることを検証
+  EXPECT_NE(irWithTypes.find("TypeGuard"), std::string::npos);
+  EXPECT_NE(irWithTypes.find("SpecializedCall"), std::string::npos);
+  
+  // 非型特化IRには汎用的な操作が含まれることを検証
+  EXPECT_NE(irWithoutTypes.find("GenericCall"), std::string::npos);
+  EXPECT_NE(irWithoutTypes.find("RuntimeTypeCheck"), std::string::npos);
 }
 
 // 最適化フェーズテスト

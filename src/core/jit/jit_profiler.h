@@ -136,9 +136,25 @@ struct PropertyAccessProfile {
 struct ExecutionCounter {
     uint32_t executionCount = 0;            // 実行回数
     float averageIterations = 0.0f;         // ループの場合の平均反復回数
-    
-    // 呼び出しサイト用
+    uint32_t totalObservations = 0; // cpp側で使われているので追加
     std::pair<uint32_t, uint32_t> mostCommonTarget = {0, 0};  // 最も一般的なターゲット関数IDとその呼び出し回数
+
+    // recordIterationのようなメソッドが必要な場合、ここに追加
+    void recordIteration(uint32_t count) { // cpp側の呼び出しに合わせる
+        executionCount += count; // もしくは iterationCount メンバーを別途持つなど
+        totalObservations++;
+        // averageIterations の計算もここで行うのが適切
+    }
+};
+
+//==============================================================================
+// 新しい構造体の定義
+//==============================================================================
+
+struct BranchBiasRecord {
+    uint32_t takenCount = 0;
+    uint32_t notTakenCount = 0;
+    uint32_t totalObservations = 0;
 };
 
 //==============================================================================
@@ -157,12 +173,16 @@ struct FunctionProfile {
     std::unordered_map<uint32_t, PropertyAccessProfile> propertyAccesses;     // プロパティアクセス情報
     std::unordered_map<uint32_t, ExecutionCounter> loopExecutionCounts;       // ループ実行回数
     std::unordered_map<uint32_t, ExecutionCounter> callSiteExecutionCounts;   // 呼び出しサイト実行回数
+    std::unordered_map<uint32_t, BranchBiasRecord> branchBias;              // 分岐バイアス情報 (追加)
     
     // ホットスポット
     std::vector<uint32_t> hotSpots;                      // 実行頻度の高いバイトコードオフセット
     
     // バイトコードダンプ（解析用）
     std::shared_ptr<std::vector<uint8_t>> bytecodes;     // 関数のバイトコード
+
+    // コンストラクタ (必要であれば追加)
+    FunctionProfile() = default; 
 };
 
 //==============================================================================
@@ -179,27 +199,6 @@ struct FunctionProfile {
  */
 class JITProfiler {
 public:
-    /**
-     * @struct FunctionProfile
-     * @brief 関数のプロファイリング情報を保持する構造体
-     */
-    struct FunctionProfile {
-        uint32_t function_id;         ///< 関数のID
-        uint32_t bytecode_size;       ///< バイトコードのサイズ
-        uint32_t call_count;          ///< 呼び出し回数
-        uint64_t execution_time_us;   ///< 累積実行時間（マイクロ秒）
-        bool is_optimized;            ///< 最適化済みフラグ
-        std::vector<uint32_t> hot_paths; ///< ホットパスのオフセットリスト
-
-        FunctionProfile(uint32_t id, uint32_t size)
-            : function_id(id)
-            , bytecode_size(size)
-            , call_count(0)
-            , execution_time_us(0)
-            , is_optimized(false)
-        {}
-    };
-
     /**
      * @struct BlockProfile
      * @brief 基本ブロックのプロファイリング情報を保持する構造体
@@ -315,6 +314,15 @@ public:
      */
     void EnableProfiling(bool enable);
 
+    void RecordFunctionEntry(uint32_t functionId, const std::string& functionName);
+    void RecordFunctionExit(uint32_t functionId);
+
+    // メソッドシグネチャは変更せず、内部で m_currentFunctionId を参照するように変更する想定
+    void RecordTypeFeedback(uint32_t bytecodeOffset, Value value);
+    void RecordBranch(uint32_t bytecodeOffset, bool taken);
+    void RecordLoopIteration(uint32_t loopHeaderOffset, uint32_t iterationCount);
+    void RecordPropertyAccess(uint32_t bytecodeOffset, const std::string& propertyName, Value value);
+
 private:
     /**
      * @brief 現在時刻をマイクロ秒単位で取得
@@ -349,6 +357,12 @@ private:
     // 閾値設定
     static constexpr uint32_t m_hot_function_threshold = 100; ///< ホット関数判定の閾値（呼び出し回数）
     static constexpr uint32_t m_hot_block_threshold = 1000;   ///< ホットブロック判定の閾値（実行回数）
+
+    uint32_t m_currentFunctionId; // 現在プロファイル中の関数ID
+    std::mutex m_profiler_mutex; // m_currentFunctionId アクセス同期用
+
+    // functionId をキーとするプロファイルデータ
+    std::unordered_map<uint32_t, std::unique_ptr<FunctionProfile>> m_profileData;
 };
 
 } // namespace aerojs::core 

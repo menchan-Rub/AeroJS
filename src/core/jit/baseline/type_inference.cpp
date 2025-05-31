@@ -299,8 +299,12 @@ bool TypeInferenceEngine::InferInstruction(const IRInstruction& inst, TypeInfere
     case Opcode::StoreVar: {
       // StoreVarの場合、ソースレジスタの型を変数にコピー
       if (inst.args.size() >= 2) {
-        // この実装では、変数名情報がないため、実際には何もしない
-        // 実際の実装では、変数名テーブルなどから変数名を取得する必要がある
+        if (m_variableNameTable) {
+            auto it = m_variableNameTable->find(inst.args[1]);
+            if (it != m_variableNameTable->end()) {
+                resultType = m_knownVariableTypes[it->second];
+            }
+        }
       }
       break;
     }
@@ -521,6 +525,17 @@ std::string ValueTypeToString(ValueType type) {
     case ValueType::kDataView:   return "DataView";
     default:                    return "不明な型";
   }
+}
+
+// 変数名テーブルから変数名を取得
+std::string TypeInferenceEngine::GetVariableName(uint32_t varId) const {
+    if (m_variableNameTable) {
+        auto it = m_variableNameTable->find(varId);
+        if (it != m_variableNameTable->end()) {
+            return it->second;
+        }
+    }
+    return "<unknown>";
 }
 
 } // namespace core

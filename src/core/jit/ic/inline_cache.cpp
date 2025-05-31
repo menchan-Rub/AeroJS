@@ -120,8 +120,25 @@ void MethodCache::clear() {
 //-----------------------------------------------------------------------------
 
 InlineCacheManager::InlineCacheManager(Context* context)
-    : _context(context)
-    , _codeGenerator(nullptr) { // 実際の実装では適切なコードジェネレータを初期化
+    : _context(context) {
+    // アーキテクチャに基づいて適切なコードジェネレータを初期化
+#if defined(AEROJS_ARCH_X86_64)
+    _codeGenerator = std::make_unique<X86_64_ICGenerator>(context);
+#elif defined(AEROJS_ARCH_ARM64)
+    _codeGenerator = std::make_unique<ARM64_ICGenerator>(context);
+#elif defined(AEROJS_ARCH_RISCV)
+    _codeGenerator = std::make_unique<RISCV_ICGenerator>(context);
+#else
+    // 完璧なインタープリタモード向けインラインキャッシュジェネレータ
+    // 実際のマシンコードではなく、解釈実行最適化されたキャッシュを生成
+    _codeGenerator = std::make_unique<InterpreterOptimizedICGenerator>(context);
+#endif
+}
+
+InlineCacheManager::~InlineCacheManager() {
+    // 明示的にスタブコードを削除
+    _propertyStubs.clear();
+    _methodStubs.clear();
 }
 
 PropertyCache* InlineCacheManager::getPropertyCache(uint64_t siteId) {
@@ -421,331 +438,87 @@ size_t InlineCacheManager::getMegamorphicCacheCount() const {
 }
 
 void InlineCacheManager::generatePropertyStub(PropertyCache* cache, uint64_t siteId) {
-    // 実際の実装ではアーキテクチャ固有のスタブコードを生成
+    // アーキテクチャ固有のスタブコードを生成
     if (!_codeGenerator || !cache) {
         return;
     }
-
-    // キャッシュの状態に応じて異なるスタブを生成
-    NativeCode* stubCode = new NativeCode();
-    stubCode->buffer.reserve(256); // 十分なサイズを確保
-
-#ifdef __x86_64__
-    // x86_64アーキテクチャ用の実装
-    switch (cache->getState()) {
-        case CacheEntry::State::Monomorphic: {
-            // モノモーフィックスタブの生成
-            // - 単一形状に対する高速パス
-            // - シェイプIDの比較
-            // - プロパティオフセットからの直接ロード
-            
-            // シェイプIDをロード
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x8B); // mov
-            stubCode->buffer.emit8(0x47); // rdi+offset
-            stubCode->buffer.emit8(0x08); // シェイプIDのオフセット (仮)
-
-            // キャッシュのシェイプIDと比較
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x3D); // cmp rax, imm32
-            
-            // モノモーフィックキャッシュから最初のエントリのシェイプIDを取得
-            uint64_t expectedShapeId = 0;
-            uint32_t slotOffset = 0;
-            bool isInlineProperty = false;
-            
-            if (!cache->_entries.empty()) {
-                expectedShapeId = cache->_entries[0].shapeId;
-                slotOffset = cache->_entries[0].slotOffset;
-                isInlineProperty = cache->_entries[0].isInlineProperty;
-            }
-            
-            // 期待するシェイプIDを埋め込み
-            stubCode->buffer.emit32(static_cast<uint32_t>(expectedShapeId & 0xFFFFFFFF));
-            stubCode->buffer.emit32(static_cast<uint32_t>(expectedShapeId >> 32));
-            
-            // 不一致の場合はミスハンドラにジャンプ
-            stubCode->buffer.emit8(0x75); // jne
-            stubCode->buffer.emit8(0x15); // 相対オフセット
-
-            // プロパティをロード
-            stubCode->buffer.emit8(0x48); // REX.W
-            
-            if (isInlineProperty) {
-                // インラインプロパティの場合
-                stubCode->buffer.emit8(0x8B); // mov
-                stubCode->buffer.emit8(0x47); // rdi+offset
-                stubCode->buffer.emit8(static_cast<uint8_t>(0x10 + slotOffset * 8)); // プロパティオフセット
-            } else {
-                // アウトオブラインプロパティの場合
-                stubCode->buffer.emit8(0x8B); // mov
-                stubCode->buffer.emit8(0x8F); // rdi+offset
-                stubCode->buffer.emit8(static_cast<uint8_t>(0x18)); // プロパティテーブルへのポインタオフセット
-                
-                // テーブルからプロパティをロード
-                stubCode->buffer.emit8(0x48); // REX.W
-                stubCode->buffer.emit8(0x8B); // mov
-                stubCode->buffer.emit8(0x84); // rax+offset
-                stubCode->buffer.emit8(0xC8); // rax+rcx*8
-                stubCode->buffer.emit32(slotOffset * 8); // オフセット
-            }
-            
-            // 戻り値設定
-            stubCode->buffer.emit8(0xC3); // ret
-            
-            // ミスハンドラへのジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handlePropertyMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-        
-        case CacheEntry::State::Polymorphic: {
-            // ポリモーフィックスタブの生成
-            // - 複数の形状に対するチェック連鎖
-            // - 各形状IDの比較と対応するプロパティオフセットからのロード
-            
-            // シェイプIDをロード
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x8B); // mov
-            stubCode->buffer.emit8(0x47); // rdi+offset
-            stubCode->buffer.emit8(0x08); // シェイプIDのオフセット (仮)
-            
-            // 各エントリに対するチェック
-            size_t entryCount = std::min(cache->_entries.size(), static_cast<size_t>(CacheEntry::MEGAMORPHIC_THRESHOLD));
-            
-            for (size_t i = 0; i < entryCount; i++) {
-                uint64_t shapeId = cache->_entries[i].shapeId;
-                uint32_t slotOffset = cache->_entries[i].slotOffset;
-                bool isInlineProperty = cache->_entries[i].isInlineProperty;
-                
-                // シェイプIDの比較
-                stubCode->buffer.emit8(0x48); // REX.W
-                stubCode->buffer.emit8(0x3D); // cmp rax, imm32
-                stubCode->buffer.emit32(static_cast<uint32_t>(shapeId & 0xFFFFFFFF));
-                stubCode->buffer.emit32(static_cast<uint32_t>(shapeId >> 32));
-                
-                // 次のチェックにジャンプ（不一致の場合）
-                stubCode->buffer.emit8(0x75); // jne
-                
-                // プロパティロードコードのサイズを計算
-                size_t loadCodeSize = isInlineProperty ? 4 : 12;
-                stubCode->buffer.emit8(static_cast<uint8_t>(loadCodeSize + 1)); // +1 for ret
-                
-                // プロパティをロード
-                stubCode->buffer.emit8(0x48); // REX.W
-                
-                if (isInlineProperty) {
-                    // インラインプロパティの場合
-                    stubCode->buffer.emit8(0x8B); // mov
-                    stubCode->buffer.emit8(0x47); // rdi+offset
-                    stubCode->buffer.emit8(static_cast<uint8_t>(0x10 + slotOffset * 8)); // プロパティオフセット
-                } else {
-                    // アウトオブラインプロパティの場合
-                    stubCode->buffer.emit8(0x8B); // mov
-                    stubCode->buffer.emit8(0x8F); // rdi+offset
-                    stubCode->buffer.emit8(static_cast<uint8_t>(0x18)); // プロパティテーブルへのポインタオフセット
-                    
-                    // テーブルからプロパティをロード
-                    stubCode->buffer.emit8(0x48); // REX.W
-                    stubCode->buffer.emit8(0x8B); // mov
-                    stubCode->buffer.emit8(0x84); // rax+offset
-                    stubCode->buffer.emit8(0xC8); // rax+rcx*8
-                    stubCode->buffer.emit32(slotOffset * 8); // オフセット
-                }
-                
-                // 戻り値設定
-                stubCode->buffer.emit8(0xC3); // ret
-            }
-            
-            // すべてのチェックが失敗した場合、ミスハンドラにジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handlePropertyMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-        
-        case CacheEntry::State::Megamorphic:
-        default: {
-            // メガモーフィックスタブの生成
-            // - 直接ハッシュテーブルを使用
-            // - または単純にミスハンドラにジャンプ
-            
-            // ミスハンドラへのジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handlePropertyMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-    }
-#elif defined(__aarch64__)
-    // ARM64アーキテクチャ用の実装（省略）
-#elif defined(__riscv)
-    // RISC-Vアーキテクチャ用の実装（省略）
-#else
-    // 未サポートのアーキテクチャ
-    delete stubCode;
-    return;
-#endif
-
-    // スタブコードを実行可能にする
-    stubCode->buffer.makeExecutable();
     
-    // スタブコードを保存
-    _propertyStubs[siteId] = std::unique_ptr<NativeCode>(stubCode);
+    // キャッシュの状態に応じてスタブコードを生成
+    std::unique_ptr<NativeCode> stubCode;
+    
+    switch (cache->getState()) {
+        case CacheEntry::State::Monomorphic:
+            // モノモーフィックスタブの生成
+            stubCode = _codeGenerator->generateMonomorphicPropertyStub(cache);
+            break;
+            
+        case CacheEntry::State::Polymorphic:
+            // ポリモーフィックスタブの生成（2～8エントリ）
+            stubCode = _codeGenerator->generatePolymorphicPropertyStub(cache);
+            break;
+            
+        case CacheEntry::State::Megamorphic:
+            // メガモーフィックスタブの生成（汎用ハンドラ呼び出し）
+            stubCode = _codeGenerator->generateMegamorphicPropertyStub(siteId);
+            break;
+            
+        default:
+            // 未初期化状態では何もしない
+            return;
+    }
+    
+    // スタブコードが生成できなかった場合は終了
+    if (!stubCode) {
+        return;
+    }
+    
+    // スタブコードを実行可能状態にする
+    stubCode->makeExecutable();
+    
+    // スタブコードをキャッシュに登録
+    _propertyStubs[siteId] = std::move(stubCode);
 }
 
 void InlineCacheManager::generateMethodStub(MethodCache* cache, uint64_t siteId) {
-    // 実際の実装ではアーキテクチャ固有のスタブコードを生成
+    // アーキテクチャ固有のスタブコードを生成
     if (!_codeGenerator || !cache) {
         return;
     }
-
-    // キャッシュの状態に応じて異なるスタブを生成
-    NativeCode* stubCode = new NativeCode();
-    stubCode->buffer.reserve(256); // 十分なサイズを確保
-
-#ifdef __x86_64__
-    // x86_64アーキテクチャ用の実装
-    switch (cache->getState()) {
-        case CacheEntry::State::Monomorphic: {
-            // モノモーフィックスタブの生成
-            // - 単一形状に対する高速パス
-            // - シェイプIDの比較
-            // - メソッド呼び出しの直接ジャンプ
-            
-            // シェイプIDをロード
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x8B); // mov
-            stubCode->buffer.emit8(0x47); // rdi+offset
-            stubCode->buffer.emit8(0x08); // シェイプIDのオフセット (仮)
-
-            // キャッシュのシェイプIDと比較
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x3D); // cmp rax, imm32
-            
-            // モノモーフィックキャッシュから最初のエントリのシェイプIDを取得
-            uint64_t expectedShapeId = 0;
-            uint64_t functionId = 0;
-            void* codeAddress = nullptr;
-            
-            if (!cache->_entries.empty()) {
-                expectedShapeId = cache->_entries[0].shapeId;
-                functionId = cache->_entries[0].functionId;
-                codeAddress = cache->_entries[0].codeAddress;
-            }
-            
-            // 期待するシェイプIDを埋め込み
-            stubCode->buffer.emit32(static_cast<uint32_t>(expectedShapeId & 0xFFFFFFFF));
-            stubCode->buffer.emit32(static_cast<uint32_t>(expectedShapeId >> 32));
-            
-            // 不一致の場合はミスハンドラにジャンプ
-            stubCode->buffer.emit8(0x75); // jne
-            stubCode->buffer.emit8(0x0A); // 相対オフセット
-
-            // メソッドにジャンプ
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(codeAddress);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            
-            // ミスハンドラへのジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handleMethodMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-        
-        case CacheEntry::State::Polymorphic: {
-            // ポリモーフィックスタブの生成
-            // - 複数の形状に対するチェック連鎖
-            // - 各形状IDの比較と対応するメソッドへのジャンプ
-            
-            // シェイプIDをロード
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0x8B); // mov
-            stubCode->buffer.emit8(0x47); // rdi+offset
-            stubCode->buffer.emit8(0x08); // シェイプIDのオフセット (仮)
-            
-            // 各エントリに対するチェック
-            size_t entryCount = std::min(cache->_entries.size(), static_cast<size_t>(CacheEntry::MEGAMORPHIC_THRESHOLD));
-            
-            for (size_t i = 0; i < entryCount; i++) {
-                uint64_t shapeId = cache->_entries[i].shapeId;
-                void* codeAddress = cache->_entries[i].codeAddress;
-                
-                // シェイプIDの比較
-                stubCode->buffer.emit8(0x48); // REX.W
-                stubCode->buffer.emit8(0x3D); // cmp rax, imm32
-                stubCode->buffer.emit32(static_cast<uint32_t>(shapeId & 0xFFFFFFFF));
-                stubCode->buffer.emit32(static_cast<uint32_t>(shapeId >> 32));
-                
-                // 次のチェックにジャンプ（不一致の場合）
-                stubCode->buffer.emit8(0x75); // jne
-                stubCode->buffer.emit8(0x0C); // 相対オフセット (ジャンプコードサイズ)
-                
-                // メソッドにジャンプ
-                stubCode->buffer.emit8(0x48); // REX.W
-                stubCode->buffer.emit8(0xB8); // mov rax, imm64
-                stubCode->buffer.emitPtr(codeAddress);
-                stubCode->buffer.emit8(0xFF); // jmp
-                stubCode->buffer.emit8(0xE0); // rax
-            }
-            
-            // すべてのチェックが失敗した場合、ミスハンドラにジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handleMethodMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-        
-        case CacheEntry::State::Megamorphic:
-        default: {
-            // メガモーフィックスタブの生成
-            // - 直接ハッシュテーブルを使用
-            // - または単純にミスハンドラにジャンプ
-            
-            // ミスハンドラへのジャンプ
-            void* missHandler = reinterpret_cast<void*>(&InlineCacheManager::handleMethodMiss);
-            stubCode->buffer.emit8(0x48); // REX.W
-            stubCode->buffer.emit8(0xB8); // mov rax, imm64
-            stubCode->buffer.emitPtr(missHandler);
-            stubCode->buffer.emit8(0xFF); // jmp
-            stubCode->buffer.emit8(0xE0); // rax
-            break;
-        }
-    }
-#elif defined(__aarch64__)
-    // ARM64アーキテクチャ用の実装（省略）
-#elif defined(__riscv)
-    // RISC-Vアーキテクチャ用の実装（省略）
-#else
-    // 未サポートのアーキテクチャ
-    delete stubCode;
-    return;
-#endif
-
-    // スタブコードを実行可能にする
-    stubCode->buffer.makeExecutable();
     
-    // スタブコードを保存
-    _methodStubs[siteId] = std::unique_ptr<NativeCode>(stubCode);
+    // キャッシュの状態に応じてスタブコードを生成
+    std::unique_ptr<NativeCode> stubCode;
+    
+    switch (cache->getState()) {
+        case CacheEntry::State::Monomorphic:
+            // モノモーフィックスタブの生成
+            stubCode = _codeGenerator->generateMonomorphicMethodStub(cache);
+            break;
+            
+        case CacheEntry::State::Polymorphic:
+            // ポリモーフィックスタブの生成（2～8エントリ）
+            stubCode = _codeGenerator->generatePolymorphicMethodStub(cache);
+            break;
+            
+        case CacheEntry::State::Megamorphic:
+            // メガモーフィックスタブの生成（汎用ハンドラ呼び出し）
+            stubCode = _codeGenerator->generateMegamorphicMethodStub(siteId);
+            break;
+            
+        default:
+            // 未初期化状態では何もしない
+            return;
+    }
+    
+    // スタブコードが生成できなかった場合は終了
+    if (!stubCode) {
+        return;
+    }
+    
+    // スタブコードを実行可能状態にする
+    stubCode->makeExecutable();
+    
+    // スタブコードをキャッシュに登録
+    _methodStubs[siteId] = std::move(stubCode);
 }
 
 // キャッシュミスハンドラ（スタブが呼び出す関数）

@@ -94,6 +94,30 @@ enum class IROpcode {
     InstanceOf,     ///< インスタンス確認
     TypeGuard,      ///< 型ガード
     
+    // ベクトル操作
+    VectorLoad,     ///< ベクトルロード
+    VectorStore,    ///< ベクトルストア
+    VectorAdd,      ///< ベクトル加算
+    VectorSub,      ///< ベクトル減算
+    VectorMul,      ///< ベクトル乗算
+    VectorDiv,      ///< ベクトル除算
+    VectorMulAdd,   ///< ベクトル積和演算
+    VectorCompare,  ///< ベクトル比較
+    VectorAnd,      ///< ベクトル論理AND
+    VectorOr,       ///< ベクトル論理OR
+    VectorXor,      ///< ベクトル論理XOR
+    VectorNot,      ///< ベクトル論理NOT
+    VectorSqrt,     ///< ベクトル平方根
+    VectorAbs,      ///< ベクトル絶対値
+    VectorRedSum,   ///< ベクトル要素の総和
+    VectorRedMax,   ///< ベクトル要素の最大値
+    VectorRedMin,   ///< ベクトル要素の最小値
+    MatrixMultiply, ///< 行列乗算
+    JSArrayMap,     ///< JavaScript配列のmap操作
+    JSArrayFilter,  ///< JavaScript配列のfilter操作
+    JSArrayReduce,  ///< JavaScript配列のreduce操作
+    JSArrayForEach, ///< JavaScript配列のforEach操作
+    
     // メタ
     Phi,            ///< PHIノード
     DebugPrint,     ///< デバッグ出力

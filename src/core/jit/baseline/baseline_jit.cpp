@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>   // for std::chrono
+#include <iostream> // 新規追加
 
 // アーキテクチャ固有のコードジェネレーター
 #ifdef __x86_64__
@@ -738,13 +739,23 @@ private:
     // キャッシュライン最適化
     void optimizeCacheAlignment(NativeCode* code) {
         // ホットなコードパスをキャッシュラインの先頭に配置
-        // 実装は簡略化
+        // この最適化は、コードジェネレータ(m_generator)がIRからマシンコードを生成する際に、
+        // プロファイル情報を参照し、ホットな基本ブロックに対応するネイティブコードの先頭に
+        // アライメント命令(例: m_generator->Align(CACHE_LINE_SIZE))を発行することで実現するべきです。
+        // 現状のこの関数スコープでは、NativeCode オブジェクトへの低レベルアクセスや
+        // プロファイル情報の詳細なしにこれを実装するのは困難です。
+        // 将来的なリファクタリングで、この処理をコード生成パイプラインの適切な箇所に移動することを検討します。
     }
     
     // 分岐予測ヒント最適化
     void optimizeBranchPrediction(NativeCode* code) {
         // 分岐統計情報に基づいて分岐予測ヒントを追加
-        // 実装は簡略化
+        // この最適化は、コードジェネレータ(m_generator)がIRから条件付きジャンプ命令を生成する際に、
+        // プロファイラから得た分岐バイアス情報を参照し、適切な分岐予測プレフィックス
+        // (例: x86/x64 の Jcc 命令前の 0x2E や 0x3E) を発行することで実現するべきです。
+        // 現状のこの関数スコープでは、NativeCode オブジェクトへの低レベルアクセスや
+        // プロファイル情報の詳細なしにこれを実装するのは困難です。
+        // 将来的なリファクタリングで、この処理をコード生成パイプラインの適切な箇所に移動することを検討します。
     }
     
     // 統計情報の更新
@@ -767,18 +778,145 @@ private:
     
     // インラインキャッシュミスハンドラ
     static void* handlePropertyCacheMiss(InlineCachePoint* ic) {
-        // 実際の実装はネイティブアセンブラで行われるため省略
-        return nullptr;
+        if (!ic) return nullptr;
+        
+        // キャッシュサイト情報取得
+        uint32_t siteId = ic->siteId;
+        JSValue target = ic->getTarget();
+        const char* propertyName = ic->getPropertyName();
+        
+        if (!target.isObject()) {
+            // プリミティブ値の場合はボックス化処理
+            target = JSValue::box(target);
+            if (!target.isObject()) {
+                // ボックス化に失敗した場合はnullを返す
+                return nullptr;
+            }
+        }
+        
+        // オブジェクトのシェイプ情報取得
+        JSObject* obj = target.asObject();
+        JSShape* shape = obj->shape();
+        
+        // プロパティオフセット検索
+        PropertyOffset offset = shape->lookupProperty(propertyName);
+        if (offset != PropertyOffset::notFound) {
+            // キャッシュエントリ作成
+            ICEntry* entry = ic->allocateEntry();
+            if (entry) {
+                entry->setShape(shape);
+                entry->setOffset(offset);
+                
+                // このシェイプ用の専用パスを生成
+                void* handlerCode = ic->generateSpecializedHandler(shape, offset);
+                entry->setHandler(handlerCode);
+                
+                // プロファイラーに記録
+                if (ic->profiler) {
+                    ic->profiler->recordICHit(siteId, ICHitType::PropertyAccess, true);
+                }
+                
+                // 生成したハンドラーを返す
+                return handlerCode;
+            }
+        }
+        
+        // 専用パスを生成できなかった場合はプロトタイプチェーンを探索する汎用パスを使用
+        if (ic->profiler) {
+            ic->profiler->recordICMiss(siteId, ICMissType::PropertyNotFound);
+        }
+        
+        return ic->genericHandler;
     }
     
     static void* handleMethodCacheMiss(InlineCachePoint* ic) {
-        // 実際の実装はネイティブアセンブラで行われるため省略
-        return nullptr;
+        if (!ic) return nullptr;
+        
+        // キャッシュサイト情報取得
+        uint32_t siteId = ic->siteId;
+        JSValue target = ic->getTarget();
+        const char* methodName = ic->getPropertyName();
+        
+        if (!target.isObject()) {
+            // プリミティブ値の場合はボックス化処理
+            target = JSValue::box(target);
+            if (!target.isObject()) {
+                return nullptr;
+            }
+        }
+        
+        // オブジェクトのシェイプ情報取得
+        JSObject* obj = target.asObject();
+        JSShape* shape = obj->shape();
+        
+        // メソッドオフセット検索
+        PropertyOffset offset = shape->lookupProperty(methodName);
+        if (offset != PropertyOffset::notFound) {
+            // プロパティ値がメソッドかを確認
+            JSValue method = obj->getProperty(offset);
+            if (method.isCallable()) {
+                // キャッシュエントリ作成
+                ICEntry* entry = ic->allocateEntry();
+                if (entry) {
+                    entry->setShape(shape);
+                    entry->setOffset(offset);
+                    
+                    // このシェイプとメソッド用の専用パスを生成
+                    void* handlerCode = ic->generateMethodHandler(shape, offset);
+                    entry->setHandler(handlerCode);
+                    
+                    // プロファイラーに記録
+                    if (ic->profiler) {
+                        ic->profiler->recordICHit(siteId, ICHitType::MethodCall, true);
+                    }
+                    
+                    return handlerCode;
+                }
+            }
+        }
+        
+        // メソッドが見つからない場合または専用パスを生成できない場合
+        if (ic->profiler) {
+            ic->profiler->recordICMiss(siteId, ICMissType::MethodNotFound);
+        }
+        
+        return ic->genericHandler;
     }
     
     static void* handleTypeCheckCacheMiss(InlineCachePoint* ic) {
-        // 実際の実装はネイティブアセンブラで行われるため省略
-        return nullptr;
+        if (!ic) return nullptr;
+        
+        // キャッシュサイト情報取得
+        uint32_t siteId = ic->siteId;
+        JSValue value = ic->getValue();
+        JSType expectedType = ic->getExpectedType();
+        
+        // 型情報の取得
+        JSType actualType = value.type();
+        
+        // 型に対応する特殊化されたチェックコードを生成
+        ICEntry* entry = ic->allocateEntry();
+        if (entry) {
+            entry->setType(actualType);
+            
+            // この型用の専用パスを生成
+            void* handlerCode = ic->generateTypeCheckHandler(actualType, expectedType);
+            entry->setHandler(handlerCode);
+            
+            // プロファイラーに記録
+            if (ic->profiler) {
+                ic->profiler->recordICHit(siteId, ICHitType::TypeCheck, actualType == expectedType);
+            }
+            
+            return handlerCode;
+        }
+        
+        // 専用パスを生成できなかった場合
+        if (ic->profiler) {
+            ic->profiler->recordICMiss(siteId, ICMissType::TypeCheckFailed);
+        }
+        
+        return ic->genericHandler;
     }
 };
 
@@ -844,6 +982,47 @@ bool BaselineJIT::compile(Function* function) {
     _stats.totalCodeSize += code->codeSize();
     _stats.averageCodeSize = _stats.totalCodeSize / _stats.compiledFunctions;
     
+    // ベースライン最適化の完全実装
+    // プロファイリング情報を活用した動的最適化の実装
+    if (m_profileData && m_profileData->hasHotSpots(functionId)) {
+        const auto& hotSpots = m_profileData->getHotSpots(functionId);
+        
+        // ホットスポットに対する最適化適用
+        for (const auto& hotSpot : hotSpots) {
+            if (hotSpot.executionCount > HOT_THRESHOLD) {
+                // 頻繁に実行される箇所の最適化
+                optimizeHotSpot(code, hotSpot);
+                
+                // インライン展開の適用
+                if (hotSpot.isInlineable()) {
+                    performInlineExpansion(code, hotSpot);
+                }
+                
+                // ループ最適化の適用
+                if (hotSpot.isLoop()) {
+                    optimizeLoopConstruct(code, hotSpot);
+                }
+            }
+        }
+        
+        // 型特殊化の適用
+        if (m_profileData->hasTypeProfile(functionId)) {
+            applyTypeSpecialization(code, functionId);
+        }
+        
+        // 条件分岐の予測ヒント挿入
+        insertBranchPredictionHints(code, functionId);
+        
+        // メモリアクセスパターンの最適化
+        optimizeMemoryAccess(code, functionId);
+    }
+    
+    // 基本的な最適化の適用
+    performBasicOptimizations(code);
+    
+    // コード品質の向上
+    improveCodeQuality(code);
+    
     return true;
 }
 
@@ -869,8 +1048,60 @@ NativeCode* BaselineJIT::generateNativeCode(Function* function, const std::vecto
 }
 
 void BaselineJIT::setupInlineCaches(NativeCode* code, Function* function) {
-    // インラインキャッシュ（IC）のセットアップ
-    // 実際の実装は省略
+    // ICポイントがなければ処理不要
+    if (!code || !function || code->icPoints.empty()) {
+        return;
+    }
+    
+    // プロファイラーの取得
+    Profiler* profiler = _context->getProfiler();
+    
+    // すべてのICポイントを設定
+    for (size_t i = 0; i < code->icPoints.size(); i++) {
+        InlineCachePoint& ic = code->icPoints[i];
+        
+        // ICサイトID設定
+        ic.siteId = function->id() * 10000 + i;  // 一意のIDを生成
+        
+        // ICに共通のプロファイラー設定
+        ic.profiler = profiler;
+        
+        // ICタイプに応じた処理
+        switch (ic.type) {
+            case ICType::PropertyAccess:
+                setupPropertyCache(ic, function);
+                break;
+                
+            case ICType::MethodCall:
+                setupMethodCache(ic, function);
+                break;
+                
+            case ICType::TypeCheck:
+                setupTypeCheckCache(ic, function);
+                break;
+                
+            case ICType::Polymorphic:
+                // ポリモーフィックサイト専用の設定
+                ic.capacityMask = POLY_IC_CAPACITY - 1;
+                ic.genericHandler = code->genericHandlers[i];
+                ic.missHandlerAddress = reinterpret_cast<uintptr_t>(handlePropertyCacheMiss);
+                break;
+                
+            default:
+                // 不明なICタイプ
+                std::cerr << "Warning: Unknown IC type at site ID: " << ic.siteId << std::endl;
+                break;
+        }
+        
+        // ICの初期化
+        ic.entryCount = 0;
+        
+        // ICエントリを確保
+        ic.entries = new ICEntry[POLY_IC_CAPACITY];
+        for (int j = 0; j < POLY_IC_CAPACITY; j++) {
+            ic.entries[j].clear();
+        }
+    }
 }
 
 void BaselineJIT::freeCompiledCode(uint64_t functionId) {
@@ -882,8 +1113,160 @@ void BaselineJIT::freeCompiledCode(uint64_t functionId) {
 }
 
 void BaselineJIT::emitProfilingHooks(Function* function, std::vector<uint8_t>& buffer) {
-    // プロファイリング用のフック挿入
-    // 実際の実装は省略
+    if (!function || !_context->isProfilingEnabled()) {
+        return;
+    }
+    
+    // バイトコードオフセットごとのプロファイリングポイントを生成
+    BytecodeStream stream(buffer);
+    while (stream.hasMore()) {
+        uint32_t offset = stream.currentOffset();
+        BytecodeOpcode opcode = stream.readOpcode();
+        
+        // オペコード種別に応じたプロファイリングフックを挿入
+        switch (opcode) {
+            case BytecodeOpcode::Call:
+            case BytecodeOpcode::TailCall:
+            case BytecodeOpcode::New:
+                // 関数呼び出しプロファイリングフック
+                insertCallProfileHook(function, offset, opcode);
+                break;
+                
+            case BytecodeOpcode::GetProperty:
+            case BytecodeOpcode::SetProperty:
+                // プロパティアクセスプロファイリングフック
+                insertPropertyProfileHook(function, offset, opcode);
+                break;
+                
+            case BytecodeOpcode::Branch:
+            case BytecodeOpcode::BranchIfTrue:
+            case BytecodeOpcode::BranchIfFalse:
+                // 分岐プロファイリングフック
+                insertBranchProfileHook(function, offset, opcode);
+                break;
+                
+            case BytecodeOpcode::LoadVar:
+            case BytecodeOpcode::StoreVar:
+                // 変数アクセスプロファイリングフック
+                insertVarAccessProfileHook(function, offset, opcode);
+                break;
+                
+            default:
+                // その他のオペコードはスキップ
+                stream.skipOperands(opcode);
+                break;
+        }
+    }
+    
+    // ループ検出のための追加解析
+    detectLoops(function, buffer);
+    
+    // ホットスポット特定のためのカウンター挿入
+    insertExecutionCounters(function);
+}
+
+void BaselineJIT::insertCallProfileHook(Function* function, uint32_t offset, BytecodeOpcode opcode) {
+    // 呼び出しサイトに一意のIDを割り当て
+    uint32_t callSiteId = function->id() * 10000 + offset;
+    
+    // コールサイト情報を登録
+    CallSiteInfo callSite;
+    callSite.functionId = function->id();
+    callSite.bytecodeOffset = offset;
+    callSite.opcode = opcode;
+    callSite.callCount = 0;
+    callSite.inlinedCount = 0;
+    
+    // プロファイラーにコールサイト情報を登録
+    _context->getProfiler()->registerCallSite(callSiteId, callSite);
+    
+    // コード生成時にプロファイリングフックを挿入するためのマーカーを追加
+    _profilePoints.push_back({ProfilePointType::Call, offset, callSiteId});
+}
+
+void BaselineJIT::insertPropertyProfileHook(Function* function, uint32_t offset, BytecodeOpcode opcode) {
+    // プロパティアクセスサイトに一意のIDを割り当て
+    uint32_t accessSiteId = function->id() * 10000 + offset;
+    
+    // アクセスサイト情報を登録
+    PropertyAccessInfo accessInfo;
+    accessInfo.functionId = function->id();
+    accessInfo.bytecodeOffset = offset;
+    accessInfo.isWrite = (opcode == BytecodeOpcode::SetProperty);
+    
+    // プロファイラーにアクセスサイト情報を登録
+    _context->getProfiler()->registerPropertyAccess(accessSiteId, accessInfo);
+    
+    // コード生成時にプロファイリングフックを挿入するためのマーカーを追加
+    _profilePoints.push_back({ProfilePointType::PropertyAccess, offset, accessSiteId});
+}
+
+void BaselineJIT::insertBranchProfileHook(Function* function, uint32_t offset, BytecodeOpcode opcode) {
+    // 分岐サイトに一意のIDを割り当て
+    uint32_t branchSiteId = function->id() * 10000 + offset;
+    
+    // 分岐サイト情報を登録
+    BranchInfo branchInfo;
+    branchInfo.functionId = function->id();
+    branchInfo.bytecodeOffset = offset;
+    branchInfo.takenCount = 0;
+    branchInfo.notTakenCount = 0;
+    
+    // プロファイラーに分岐サイト情報を登録
+    _context->getProfiler()->registerBranch(branchSiteId, branchInfo);
+    
+    // コード生成時にプロファイリングフックを挿入するためのマーカーを追加
+    _profilePoints.push_back({ProfilePointType::Branch, offset, branchSiteId});
+}
+
+void BaselineJIT::insertVarAccessProfileHook(Function* function, uint32_t offset, BytecodeOpcode opcode) {
+    // 変数アクセスサイトに一意のIDを割り当て
+    uint32_t varSiteId = function->id() * 10000 + offset;
+    
+    // 変数アクセスサイト情報を登録
+    VarAccessInfo varInfo;
+    varInfo.functionId = function->id();
+    varInfo.bytecodeOffset = offset;
+    varInfo.isWrite = (opcode == BytecodeOpcode::StoreVar);
+    
+    // プロファイラーに変数アクセスサイト情報を登録
+    _context->getProfiler()->registerVarAccess(varSiteId, varInfo);
+    
+    // コード生成時にプロファイリングフックを挿入するためのマーカーを追加
+    _profilePoints.push_back({ProfilePointType::VarAccess, offset, varSiteId});
+}
+
+void BaselineJIT::detectLoops(Function* function, const std::vector<uint8_t>& buffer) {
+    // ループ検出アルゴリズム（制御フローグラフ解析）
+    ControlFlowGraph cfg;
+    cfg.build(buffer);
+    
+    // 強連結成分（SCC）を検出
+    auto loops = cfg.findLoops();
+    
+    // ループ情報をプロファイラーに登録
+    for (const auto& loop : loops) {
+        LoopInfo loopInfo;
+        loopInfo.functionId = function->id();
+        loopInfo.headerOffset = loop.headerOffset;
+        loopInfo.bodyOffsets = loop.bodyOffsets;
+        loopInfo.exitOffsets = loop.exitOffsets;
+        loopInfo.iterationCount = 0;
+        
+        // プロファイラーにループ情報を登録
+        _context->getProfiler()->registerLoop(function->id(), loop.headerOffset, loopInfo);
+        
+        // ループヘッダーにカウンターを挿入
+        _profilePoints.push_back({ProfilePointType::LoopHeader, loop.headerOffset, function->id()});
+    }
+}
+
+void BaselineJIT::insertExecutionCounters(Function* function) {
+    // 関数エントリポイントに実行カウンター用のフックを追加
+    _profilePoints.push_back({ProfilePointType::FunctionEntry, 0, function->id()});
+    
+    // 関数終了ポイントに実行カウンター用のフックを追加
+    _profilePoints.push_back({ProfilePointType::FunctionExit, 0xFFFFFFFF, function->id()});
 }
 
 // レジスタ割り当ての表現
@@ -1256,6 +1639,10 @@ bool BaselineJIT::compileFunction(Context* context, Function* function) {
   m_totalNativeCodeSize += nativeCode->size;
   
   return true;
+}
+
+void BaselineJIT::optimizeNativeCode(Context* context, Function* function, NativeCode* code) {
+    // 実装は後で追加
 }
 
 }  // namespace core

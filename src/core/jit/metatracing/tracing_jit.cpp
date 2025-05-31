@@ -600,6 +600,274 @@ std::string TracingJIT::getStatisticsSummary() const {
     return summary;
 }
 
+// 最適化キューからのトレース最適化処理
+bool TracingJIT::processOptimizationTask(const OptimizationTask& task) {
+    // 対象トレースを取得
+    auto it = m_traces.find(task.traceId);
+    if (it == m_traces.end()) {
+        return false; // トレースが見つからない
+    }
+    
+    Trace* trace = it->second.get();
+    if (!trace || trace->isAborted()) {
+        return false; // 無効なトレース
+    }
+    
+    // 既にコンパイル済みかチェック
+    if (m_compiledTraces.find(task.traceId) != m_compiledTraces.end()) {
+        return true; // 既にコンパイル済み
+    }
+    
+    auto startTime = std::chrono::steady_clock::now();
+    
+    try {
+        // トレースの検証
+        if (!m_optimizer->validateTrace(*trace)) {
+            m_stats.abortedTraces++;
+            trace->setAbortReason(AbortReason::ValidationFailed);
+            return false;
+        }
+        
+        // トレース最適化の実行
+        auto optimizedIR = m_optimizer->optimizeTrace(*trace);
+        if (!optimizedIR) {
+            m_stats.abortedTraces++;
+            trace->setAbortReason(AbortReason::OptimizationFailed);
+            return false;
+        }
+        
+        // レジスタ割り当て
+        auto registerAllocator = m_optimizingJIT->getRegisterAllocator();
+        auto allocatedIR = registerAllocator->allocateRegisters(optimizedIR.get());
+        if (!allocatedIR) {
+            m_stats.abortedTraces++;
+            trace->setAbortReason(AbortReason::RegisterAllocationFailed);
+            return false;
+        }
+        
+        // コード生成
+        auto codeGenerator = m_optimizingJIT->getCodeGenerator();
+        auto compiledTrace = std::make_unique<CompiledTrace>();
+        
+        compiledTrace->traceId = task.traceId;
+        compiledTrace->nativeCode = codeGenerator->generateCode(allocatedIR.get(), compiledTrace->codeSize);
+        
+        if (!compiledTrace->nativeCode || compiledTrace->codeSize == 0) {
+            m_stats.abortedTraces++;
+            trace->setAbortReason(AbortReason::CodeGenerationFailed);
+            return false;
+        }
+        
+        // サイド出口の設定
+        for (size_t i = 0; i < trace->getSideExits().size(); i++) {
+            const auto& sideExit = trace->getSideExits()[i];
+            size_t offset = codeGenerator->getOffsetForLabel(sideExit.label);
+            compiledTrace->sideExitOffsets.push_back(offset);
+            compiledTrace->guardToSideExitMap[sideExit.guardId] = offset;
+        }
+        
+        // 最適化解除ポイントの設定
+        for (const auto& deoptPoint : trace->getDeoptimizationPoints()) {
+            size_t offset = codeGenerator->getOffsetForLabel(deoptPoint.label);
+            compiledTrace->deoptPoints.push_back(offset);
+        }
+        
+        // 実行可能メモリに配置
+        compiledTrace->nativeCode = makeExecutable(compiledTrace->nativeCode, compiledTrace->codeSize);
+        if (!compiledTrace->nativeCode) {
+            m_stats.abortedTraces++;
+            trace->setAbortReason(AbortReason::MemoryAllocationFailed);
+            return false;
+        }
+        
+        // トレースを実行可能として登録
+        uint32_t traceId = compiledTrace->traceId;
+        m_compiledTraces[traceId] = std::move(compiledTrace);
+        trace->setCompiled(true);
+        
+        // 関数のエントリポイントマップに追加
+        auto functionId = trace->getFunction()->getId();
+        auto bytecodeOffset = trace->getStartOffset();
+        m_entryMap[functionId][bytecodeOffset] = traceId;
+        
+        auto endTime = std::chrono::steady_clock::now();
+        auto compilationTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        
+        // 統計情報を更新
+        m_stats.compiledTraces++;
+        m_stats.totalCompilationTimeMs += compilationTime.count();
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        // コンパイルエラー
+        m_stats.abortedTraces++;
+        trace->setAbortReason(AbortReason::CompilerException);
+        return false;
+    }
+}
+
+// コンパイルスレッドメイン関数
+void TracingJIT::compileThreadMain() {
+    while (m_compileThreadRunning.load()) {
+        std::unique_lock<std::mutex> lock(m_compileMutex);
+        
+        // 最適化タスクを待機
+        m_compileCondition.wait(lock, [this] {
+            return !m_optimizationQueue.empty() || !m_compileThreadRunning.load();
+        });
+        
+        if (!m_compileThreadRunning.load()) {
+            break;
+        }
+        
+        // 最高優先度のタスクを取得
+        if (!m_optimizationQueue.empty()) {
+            OptimizationTask task = m_optimizationQueue.top();
+            m_optimizationQueue.pop();
+            lock.unlock();
+            
+            // タスクを処理
+            processOptimizationTask(task);
+        }
+    }
+}
+
+// 実行可能メモリの確保
+uint8_t* TracingJIT::makeExecutable(uint8_t* code, size_t size) {
+    if (!code || size == 0) {
+        return nullptr;
+    }
+    
+#ifdef _WIN32
+    // Windows: VirtualAlloc
+    void* execMemory = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!execMemory) {
+        return nullptr;
+    }
+    
+    // コードをコピー
+    memcpy(execMemory, code, size);
+    
+    // 実行可能にする
+    DWORD oldProtect;
+    if (!VirtualProtect(execMemory, size, PAGE_EXECUTE_READ, &oldProtect)) {
+        VirtualFree(execMemory, 0, MEM_RELEASE);
+        return nullptr;
+    }
+    
+    return static_cast<uint8_t*>(execMemory);
+    
+#else
+    // Unix系: mmap
+    void* execMemory = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, 
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (execMemory == MAP_FAILED) {
+        return nullptr;
+    }
+    
+    // コードをコピー
+    memcpy(execMemory, code, size);
+    
+    return static_cast<uint8_t*>(execMemory);
+#endif
+}
+
+// サイド出口からのトレース継続処理
+bool TracingJIT::handleSideExit(uint32_t traceId, uint32_t sideExitId, 
+                                runtime::execution::ExecutionContext* context) {
+    auto compiledTrace = findCompiledTrace(traceId);
+    if (!compiledTrace) {
+        return false;
+    }
+    
+    // サイド出口のヒット数を増加
+    auto it = compiledTrace->guardToSideExitMap.find(sideExitId);
+    if (it == compiledTrace->guardToSideExitMap.end()) {
+        return false;
+    }
+    
+    // サイド出口が頻繁に実行される場合、サイドトレースを作成
+    auto sideExitOffset = it->second;
+    auto sideExitCount = ++m_sideExitCounts[{traceId, sideExitId}];
+    
+    if (sideExitCount >= m_config.sideExitThreshold) {
+        // サイドトレースの記録を開始
+        auto currentFunction = context->getCurrentFunction();
+        auto currentOffset = context->getCurrentBytecodeOffset();
+        
+        return startTracing(currentFunction, currentOffset, TraceReason::SideExit);
+    }
+    
+    // 統計情報を更新
+    m_stats.sideExitCount++;
+    
+    return false;
+}
+
+// 最適化解除処理
+void TracingJIT::handleDeoptimization(uint32_t traceId, uint32_t deoptId,
+                                     runtime::execution::ExecutionContext* context) {
+    auto compiledTrace = findCompiledTrace(traceId);
+    if (!compiledTrace) {
+        return;
+    }
+    
+    // 最適化解除の理由を分析
+    DeoptimizationReason reason = analyzeDeoptimizationReason(traceId, deoptId, context);
+    
+    // 統計情報を更新
+    m_stats.deoptimizationCount++;
+    compiledTrace->failCount++;
+    
+    // トレースの実行に失敗した回数が多い場合は無効化
+    float failureRate = static_cast<float>(compiledTrace->failCount) / 
+                       (compiledTrace->successCount + compiledTrace->failCount);
+    
+    if (failureRate > 0.5f && compiledTrace->executeCount > 10) {
+        invalidateTrace(traceId);
+    }
+    
+    // ベイルアウトハンドラを呼び出し
+    if (m_bailoutHandler) {
+        m_bailoutHandler(traceId, deoptId, context);
+    }
+}
+
+// 最適化解除理由の分析
+DeoptimizationReason TracingJIT::analyzeDeoptimizationReason(uint32_t traceId, uint32_t deoptId,
+                                                            runtime::execution::ExecutionContext* context) {
+    // 実際の実装では、デoptId、現在の実行状態、型情報などを分析して
+    // 最適化解除の理由を特定する
+    
+    // 簡易実装として一般的な理由を返す
+    return DeoptimizationReason::TypeMismatch;
+}
+
+// トレース無効化のパフォーマンス統計更新
+void TracingJIT::updateInvalidationStatistics(uint32_t traceId, InvalidationReason reason) {
+    m_stats.invalidatedTraces++;
+    
+    // 無効化理由に応じた詳細統計
+    switch (reason) {
+        case InvalidationReason::TooManyFailures:
+            m_invalidationStats.tooManyFailures++;
+            break;
+        case InvalidationReason::FunctionChanged:
+            m_invalidationStats.functionChanged++;
+            break;
+        case InvalidationReason::ShapeChanged:
+            m_invalidationStats.shapeChanged++;
+            break;
+        case InvalidationReason::MemoryPressure:
+            m_invalidationStats.memoryPressure++;
+            break;
+        default:
+            m_invalidationStats.other++;
+            break;
+    }
+}
+
 } // namespace metatracing
 } // namespace jit
 } // namespace core

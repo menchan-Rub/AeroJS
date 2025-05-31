@@ -1,5 +1,0 @@
-if(EXISTS "/home/menchan/Programming/Javascript-Engine/build/tests/symbol_tests[1]_tests.cmake")
-  include("/home/menchan/Programming/Javascript-Engine/build/tests/symbol_tests[1]_tests.cmake")
-else()
-  add_test(symbol_tests_NOT_BUILT symbol_tests_NOT_BUILT)
-endif()

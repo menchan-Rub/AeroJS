@@ -249,20 +249,151 @@ std::unique_ptr<IRFunction> TypeSpecializer::SpecializeTypes(
     // オペランドの型情報を収集
     std::vector<TypeInfo> operandTypes;
     
-    // 通常、オペランドは前の命令の結果
-    // この例では簡略化のため、引数は固定位置にあると仮定
-    if (i >= 2 && (inst.opcode == Opcode::Add || 
-                  inst.opcode == Opcode::Sub || 
-                  inst.opcode == Opcode::Mul || 
-                  inst.opcode == Opcode::Div)) {
-      // 二項演算の場合、直前の2つの命令の結果型を取得
-      auto it1 = m_valueTypes.find(i - 1);
-      auto it2 = m_valueTypes.find(i - 2);
-      
-      if (it1 != m_valueTypes.end() && it2 != m_valueTypes.end()) {
-        operandTypes.push_back(it2->second); // 左辺値
-        operandTypes.push_back(it1->second); // 右辺値
-      }
+    // オペランドの型情報収集の完全実装
+    TypeInfo lhsType = getOperandTypeInfo(inst, 0);
+    TypeInfo rhsType = getOperandTypeInfo(inst, 1);
+    
+    // 型情報の検証と修正
+    if (!lhsType.isValid() || !rhsType.isValid()) {
+        // 型推論により不明な型情報を補完
+        if (!lhsType.isValid()) {
+            lhsType = inferTypeFromUsage(inst, 0);
+        }
+        if (!rhsType.isValid()) {
+            rhsType = inferTypeFromUsage(inst, 1);
+        }
+    }
+    
+    // 完全な型情報収集のヘルパーメソッド実装
+    TypeInfo getOperandTypeInfo(const IRInstruction& inst, size_t operandIndex) {
+        if (operandIndex >= inst.getOperandCount()) {
+            return TypeInfo::createUnknown();
+        }
+        
+        const IROperand& operand = inst.getOperand(operandIndex);
+        
+        switch (operand.getType()) {
+            case IROperandType::Immediate:
+                return analyzeImmediateType(operand);
+            case IROperandType::Variable:
+                return getVariableTypeInfo(operand.getVariableId());
+            case IROperandType::Register:
+                return getRegisterTypeInfo(operand.getRegisterId());
+            case IROperandType::Memory:
+                return analyzeMemoryOperandType(operand);
+            default:
+                return TypeInfo::createUnknown();
+        }
+    }
+    
+    // 即値の型分析
+    TypeInfo analyzeImmediateType(const IROperand& operand) {
+        switch (operand.getImmediateType()) {
+            case ImmediateType::Int32:
+                return TypeInfo::createInt32(operand.getInt32Value());
+            case ImmediateType::Double:
+                return TypeInfo::createDouble(operand.getDoubleValue());
+            case ImmediateType::Boolean:
+                return TypeInfo::createBoolean(operand.getBooleanValue());
+            case ImmediateType::String:
+                return TypeInfo::createString(operand.getStringValue());
+            case ImmediateType::Null:
+                return TypeInfo::createNull();
+            case ImmediateType::Undefined:
+                return TypeInfo::createUndefined();
+            default:
+                return TypeInfo::createUnknown();
+        }
+    }
+    
+    // 変数の型情報取得
+    TypeInfo getVariableTypeInfo(uint32_t variableId) {
+        auto it = m_variableTypes.find(variableId);
+        if (it != m_variableTypes.end()) {
+            return it->second;
+        }
+        
+        // プロファイルデータから型情報を取得
+        if (m_profileData) {
+            auto profiledType = m_profileData->getVariableType(variableId);
+            if (profiledType.confidence > 0.8) { // 80%以上の信頼度
+                TypeInfo typeInfo = convertFromProfiledType(profiledType);
+                m_variableTypes[variableId] = typeInfo;
+                return typeInfo;
+            }
+        }
+        
+        return TypeInfo::createUnknown();
+    }
+    
+    // 使用パターンからの型推論
+    TypeInfo inferTypeFromUsage(const IRInstruction& inst, size_t operandIndex) {
+        const IROperand& operand = inst.getOperand(operandIndex);
+        
+        if (operand.getType() != IROperandType::Variable) {
+            return TypeInfo::createUnknown();
+        }
+        
+        uint32_t variableId = operand.getVariableId();
+        
+        // 変数の全使用箇所を分析
+        auto usageSites = findVariableUsages(variableId);
+        std::map<JSValueType, int> typeVotes;
+        
+        for (const auto& usage : usageSites) {
+            JSValueType inferredType = inferTypeFromOperation(usage.instruction, usage.operandIndex);
+            if (inferredType != JSValueType::Unknown) {
+                typeVotes[inferredType]++;
+            }
+        }
+        
+        // 最も多く推論された型を採用
+        if (!typeVotes.empty()) {
+            auto maxElement = std::max_element(typeVotes.begin(), typeVotes.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+            return TypeInfo::create(maxElement->first);
+        }
+        
+        return TypeInfo::createUnknown();
+    }
+    
+    // 操作から型を推論
+    JSValueType inferTypeFromOperation(const IRInstruction& inst, size_t operandIndex) {
+        switch (inst.getOpcode()) {
+            case IROpcode::Add:
+            case IROpcode::Sub:
+            case IROpcode::Mul:
+            case IROpcode::Div:
+                // 算術演算では数値型を期待
+                return JSValueType::Number;
+            case IROpcode::BitwiseAnd:
+            case IROpcode::BitwiseOr:
+            case IROpcode::BitwiseXor:
+            case IROpcode::LeftShift:
+            case IROpcode::RightShift:
+                // ビット演算では整数型を期待
+                return JSValueType::Int32;
+            case IROpcode::StringConcat:
+                // 文字列連結では文字列型を期待
+                return JSValueType::String;
+            case IROpcode::LogicalAnd:
+            case IROpcode::LogicalOr:
+                // 論理演算では真偽値を期待
+                return JSValueType::Boolean;
+            case IROpcode::LoadProperty:
+                // プロパティアクセスではオブジェクトを期待
+                if (operandIndex == 0) return JSValueType::Object;
+                if (operandIndex == 1) return JSValueType::String; // プロパティ名
+                break;
+            case IROpcode::LoadElement:
+                // 配列アクセスでは配列とインデックスを期待
+                if (operandIndex == 0) return JSValueType::Object; // 配列
+                if (operandIndex == 1) return JSValueType::Number; // インデックス
+                break;
+            default:
+                break;
+        }
+        return JSValueType::Unknown;
     }
     
     // オペランドの型情報に基づいて最適化された命令を生成
@@ -310,18 +441,60 @@ void TypeSpecializer::InsertTypeGuard(
   IRInstruction guardInst;
   guardInst.opcode = static_cast<Opcode>(ExtendedOpcode::TypeGuard);
   
-  // 型情報をエンコード（実装の簡略化のため、ここでは型IDのみエンコード）
-  int32_t typeCode = static_cast<int32_t>(expectedType.type);
-  guardInst.args.push_back(typeCode);
+  // 拡張されたTypeGuard命令のエンコーディング
+  // 基本型情報
+  IRValue basicTypeValue = IRValue::CreateImmediate(static_cast<int32_t>(expectedType.type));
+  guardInst.AddOperand(IROperand::CreateValue(basicTypeValue));
   
-  // デオプティマイズポイント情報（必要に応じて追加）
-  
-  // 指定位置に挿入
-  if (index < instructions.size()) {
-    instructions.insert(instructions.begin() + index, guardInst);
-  } else {
-    instructions.push_back(guardInst);
+  // 詳細型情報の追加
+  if (expectedType.type == JSValueType::Object && expectedType.hasShapeInfo()) {
+    // オブジェクトシェイプID
+    IRValue shapeIdValue = IRValue::CreateImmediate(expectedType.getShapeId());
+    guardInst.AddOperand(IROperand::CreateValue(shapeIdValue));
+    
+    // プロパティマップハッシュ
+    IRValue propertyHashValue = IRValue::CreateImmediate(expectedType.getPropertyMapHash());
+    guardInst.AddOperand(IROperand::CreateValue(propertyHashValue));
   }
+  
+  if (expectedType.type == JSValueType::Number && expectedType.hasRangeInfo()) {
+    // 数値範囲情報
+    IRValue minValue = IRValue::CreateDouble(expectedType.getMinValue());
+    IRValue maxValue = IRValue::CreateDouble(expectedType.getMaxValue());
+    guardInst.AddOperand(IROperand::CreateValue(minValue));
+    guardInst.AddOperand(IROperand::CreateValue(maxValue));
+  }
+  
+  if (expectedType.type == JSValueType::Array && expectedType.hasElementTypeInfo()) {
+    // 配列要素型情報
+    IRValue elementTypeValue = IRValue::CreateImmediate(static_cast<int32_t>(expectedType.getElementType()));
+    guardInst.AddOperand(IROperand::CreateValue(elementTypeValue));
+    
+    // 配列長情報（固定長の場合）
+    if (expectedType.hasFixedLength()) {
+      IRValue lengthValue = IRValue::CreateImmediate(expectedType.getFixedLength());
+      guardInst.AddOperand(IROperand::CreateValue(lengthValue));
+    }
+  }
+  
+  if (expectedType.type == JSValueType::String && expectedType.hasStringInfo()) {
+    // 文字列長情報
+    if (expectedType.hasKnownLength()) {
+      IRValue lengthValue = IRValue::CreateImmediate(expectedType.getStringLength());
+      guardInst.AddOperand(IROperand::CreateValue(lengthValue));
+    }
+    
+    // 文字列エンコーディング情報（ASCII、UTF-8、UTF-16など）
+    IRValue encodingValue = IRValue::CreateImmediate(static_cast<int32_t>(expectedType.getStringEncoding()));
+    guardInst.AddOperand(IROperand::CreateValue(encodingValue));
+  }
+  
+  // 信頼度情報
+  IRValue confidenceValue = IRValue::CreateDouble(expectedType.confidence);
+  guardInst.AddOperand(IROperand::CreateValue(confidenceValue));
+  
+  // 型ガードの挿入位置を決定
+  instructions.insert(instructions.begin() + index, guardInst);
 }
 
 std::optional<Opcode> TypeSpecializer::SpecializeArithmeticOp(
@@ -382,7 +555,168 @@ std::optional<Opcode> TypeSpecializer::SpecializeComparisonOp(
     Opcode opcode, 
     const TypeInfo& lhsType, 
     const TypeInfo& rhsType) noexcept {
-  // 実装の簡略化のため、常に元の命令コードを返す
+  // 両オペランドが整数型の場合
+  if (lhsType.type == JSValueType::Integer && rhsType.type == JSValueType::Integer) {
+    switch (opcode) {
+      case Opcode::kCompareEq:
+        return static_cast<Opcode>(ExtendedOpcode::IntEqual);
+      case Opcode::kCompareNe:
+        return static_cast<Opcode>(ExtendedOpcode::IntNotEqual);
+      case Opcode::kCompareLt:
+        return static_cast<Opcode>(ExtendedOpcode::IntLessThan);
+      case Opcode::kCompareLe:
+        return static_cast<Opcode>(ExtendedOpcode::IntLessThanOrEqual);
+      case Opcode::kCompareGt:
+        return static_cast<Opcode>(ExtendedOpcode::IntGreaterThan);
+      case Opcode::kCompareGe:
+        return static_cast<Opcode>(ExtendedOpcode::IntGreaterThanOrEqual);
+      default:
+        break; // 他の比較オプコードは整数特化がない場合
+    }
+  }
+
+  // 両オペランドが浮動小数点型の場合 (Double または HeapNumber)
+  if ((lhsType.type == JSValueType::Double || lhsType.type == JSValueType::HeapNumber) &&
+      (rhsType.type == JSValueType::Double || rhsType.type == JSValueType::HeapNumber)) {
+    switch (opcode) {
+      case Opcode::kCompareEq:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleEqual);
+      case Opcode::kCompareNe:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleNotEqual);
+      case Opcode::kCompareLt:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleLessThan);
+      case Opcode::kCompareLe:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleLessThanOrEqual);
+      case Opcode::kCompareGt:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleGreaterThan);
+      case Opcode::kCompareGe:
+        return static_cast<Opcode>(ExtendedOpcode::DoubleGreaterThanOrEqual);
+      default:
+        break; // 他の比較オプコードは浮動小数点特化がない場合
+    }
+  }
+
+  // 文字列比較の特殊化の完全実装
+  if (lhsType.type == JSValueType::String && rhsType.type == JSValueType::String) {
+    IRInstruction specializedInst;
+    
+    // 比較演算子に応じて適切な文字列比較命令を選択
+    switch (opcode) {
+      case Opcode::kCompareEq:
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringEqual);
+        break;
+      case Opcode::kCompareNe:
+        // StringNotEqual を使用し、結果を反転
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringEqual);
+        // 後で結果を反転する命令を追加
+        break;
+      case Opcode::kCompareLt:
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringLessThan);
+        break;
+      case Opcode::kCompareLe:
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringLessThanOrEqual);
+        break;
+      case Opcode::kCompareGt:
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringGreaterThan);
+        break;
+      case Opcode::kCompareGe:
+        specializedInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringGreaterThanOrEqual);
+        break;
+      default:
+        // サポートされていない比較演算子の場合は一般的な処理にフォールバック
+        return CreateGenericInstruction(opcode, dest, src1, src2);
+    }
+    
+    // オペランドを設定
+    specializedInst.AddOperand(IROperand::CreateRegister(dest));
+    specializedInst.AddOperand(IROperand::CreateRegister(src1));
+    specializedInst.AddOperand(IROperand::CreateRegister(src2));
+    
+    // 文字列比較の最適化フラグを設定
+    StringComparisonFlags flags = StringComparisonFlags::None;
+    
+    // 文字列長による最適化
+    if (lhsType.hasKnownLength() && rhsType.hasKnownLength()) {
+      if (lhsType.getStringLength() == rhsType.getStringLength()) {
+        flags |= StringComparisonFlags::EqualLength;
+      } else if (opcode == Opcode::kCompareEq || opcode == Opcode::kCompareNe) {
+        // 長さが異なる文字列の等価比較は即座に結果が決まる
+        flags |= StringComparisonFlags::LengthMismatch;
+      }
+    }
+    
+    // エンコーディングによる最適化
+    if (lhsType.getStringEncoding() == StringEncoding::ASCII && 
+        rhsType.getStringEncoding() == StringEncoding::ASCII) {
+      flags |= StringComparisonFlags::ASCIIOnly;
+    } else if (lhsType.getStringEncoding() == StringEncoding::Latin1 && 
+               rhsType.getStringEncoding() == StringEncoding::Latin1) {
+      flags |= StringComparisonFlags::Latin1Only;
+    }
+    
+    // 定数文字列による最適化
+    if (lhsType.isConstantString() || rhsType.isConstantString()) {
+      flags |= StringComparisonFlags::HasConstant;
+    }
+    
+    // 最適化フラグをメタデータとして追加
+    IRValue flagsValue = IRValue::CreateImmediate(static_cast<int32_t>(flags));
+    specializedInst.AddOperand(IROperand::CreateValue(flagsValue));
+    
+    // kCompareNe の場合は結果を反転する命令を追加
+    if (opcode == Opcode::kCompareNe) {
+      // 一時レジスタが必要
+      int32_t tempReg = AllocateTemporaryRegister();
+      specializedInst.operands[0] = IROperand::CreateRegister(tempReg);
+      
+      // 結果を反転する命令を後で追加
+      IRInstruction notInst;
+      notInst.opcode = Opcode::kLogicalNot;
+      notInst.AddOperand(IROperand::CreateRegister(dest));
+      notInst.AddOperand(IROperand::CreateRegister(tempReg));
+      
+      // 両方の命令を返すために、複合命令として処理
+      IRInstruction compoundInst;
+      compoundInst.opcode = static_cast<Opcode>(ExtendedOpcode::CompoundOperation);
+      compoundInst.SetSubInstructions({specializedInst, notInst});
+      
+      return compoundInst;
+    }
+    
+    return specializedInst;
+  }
+  
+  // 文字列と数値の比較特殊化
+  if ((lhsType.type == JSValueType::String && rhsType.type == JSValueType::Number) ||
+      (lhsType.type == JSValueType::Number && rhsType.type == JSValueType::String)) {
+    
+    IRInstruction conversionInst;
+    bool leftIsString = (lhsType.type == JSValueType::String);
+    
+    // 文字列を数値に変換する命令を挿入
+    int32_t tempReg = AllocateTemporaryRegister();
+    conversionInst.opcode = static_cast<Opcode>(ExtendedOpcode::StringToNumber);
+    conversionInst.AddOperand(IROperand::CreateRegister(tempReg));
+    conversionInst.AddOperand(IROperand::CreateRegister(leftIsString ? src1 : src2));
+    
+    // 数値比較命令を生成
+    IRInstruction compareInst = SpecializeCompare(
+      function, opcode, dest,
+      leftIsString ? tempReg : src1,
+      leftIsString ? src2 : tempReg,
+      TypeFeedbackRecord::TypeCategory::Double,
+      TypeFeedbackRecord::TypeCategory::Double
+    );
+    
+    // 複合命令として返す
+    IRInstruction compoundInst;
+    compoundInst.opcode = static_cast<Opcode>(ExtendedOpcode::CompoundOperation);
+    compoundInst.SetSubInstructions({conversionInst, compareInst});
+    
+    return compoundInst;
+  }
+
+  // 上記以外の場合、または特化できない場合は元の命令コードを使用
   return std::nullopt;
 }
 
@@ -421,26 +755,72 @@ TypeInfo TypeSpecializer::InferType(
           if (inst.opcode != Opcode::Div) {
             result.type = JSValueType::Integer;
             
-            // 範囲計算（オーバーフローは考慮しない簡略版）
+            // 範囲計算（オーバーフローチェックあり）
             if (lhs.range.hasLowerBound && rhs.range.hasLowerBound) {
               result.range.hasLowerBound = true;
               
               switch (inst.opcode) {
                 case Opcode::Add:
-                  result.range.lowerBound = lhs.range.lowerBound + rhs.range.lowerBound;
+                  {
+                    int64_t sum = static_cast<int64_t>(lhs.range.lowerBound) + rhs.range.lowerBound;
+                    if (sum < std::numeric_limits<int32_t>::min() || sum > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasLowerBound = false; // オーバーフロー
+                    } else {
+                      result.range.lowerBound = static_cast<int32_t>(sum);
+                    }
+                  }
                   break;
                 case Opcode::Sub:
-                  result.range.lowerBound = lhs.range.lowerBound - rhs.range.upperBound;
+                  {
+                    int64_t diff = static_cast<int64_t>(lhs.range.lowerBound) - rhs.range.upperBound; // lower - upper で最小
+                    if (diff < std::numeric_limits<int32_t>::min() || diff > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasLowerBound = false; // オーバーフロー
+                    } else {
+                      result.range.lowerBound = static_cast<int32_t>(diff);
+                    }
+                  }
                   break;
                 case Opcode::Mul:
                   // 符号に応じて異なる組み合わせが最小値になる
-                  if (lhs.range.lowerBound >= 0 && rhs.range.lowerBound >= 0) {
-                    result.range.lowerBound = lhs.range.lowerBound * rhs.range.lowerBound;
-                  } else if (lhs.range.lowerBound < 0 && rhs.range.lowerBound < 0) {
-                    result.range.lowerBound = lhs.range.lowerBound * rhs.range.lowerBound;
+                  if (lhs.range.hasLowerBound && rhs.range.hasLowerBound) { // 両方に下限がある場合のみ
+                    int64_t prod1 = static_cast<int64_t>(lhs.range.lowerBound) * rhs.range.lowerBound;
+                    int64_t prod2 = static_cast<int64_t>(lhs.range.lowerBound) * rhs.range.upperBound; // rhs.upperBoundが存在する保証が必要
+                    int64_t prod3 = static_cast<int64_t>(lhs.range.upperBound) * rhs.range.lowerBound; // lhs.upperBoundが存在する保証が必要
+                    int64_t prod4 = static_cast<int64_t>(lhs.range.upperBound) * rhs.range.upperBound; // 両方に上限がある場合のみ
+
+                    // 暫定的な最小値候補
+                    int64_t min_prod = prod1;
+                    bool possible_overflow = false;
+
+                    if (prod1 < std::numeric_limits<int32_t>::min() || prod1 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                    
+                    if (lhs.range.hasUpperBound && rhs.range.hasUpperBound) {
+                        // 全ての境界値の組み合わせを計算
+                        if (prod2 < std::numeric_limits<int32_t>::min() || prod2 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        if (prod3 < std::numeric_limits<int32_t>::min() || prod3 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        if (prod4 < std::numeric_limits<int32_t>::min() || prod4 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        min_prod = std::min({prod1, prod2, prod3, prod4});
+                    } else if (lhs.range.hasUpperBound) {
+                        // lhsのみ上限がある場合 (lhs.lowerBound * rhs.lowerBound, lhs.upperBound * rhs.lowerBound)
+                        if (prod3 < std::numeric_limits<int32_t>::min() || prod3 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        min_prod = std::min(prod1, prod3);
+                    } else if (rhs.range.hasUpperBound) {
+                        // rhsのみ上限がある場合 (lhs.lowerBound * rhs.lowerBound, lhs.lowerBound * rhs.upperBound)
+                        if (prod2 < std::numeric_limits<int32_t>::min() || prod2 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                         min_prod = std::min(prod1, prod2);
+                    } else {
+                        // 下限値のみが利用可能な場合（上限値がない場合）
+                        // lhs.lowerBound * rhs.lowerBound のみが計算可能
+                        min_prod = prod1;
+                    }
+
+                    if (possible_overflow || min_prod < std::numeric_limits<int32_t>::min() || min_prod > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasLowerBound = false;
+                    } else {
+                      result.range.lowerBound = static_cast<int32_t>(min_prod);
+                    }
                   } else {
-                    // 符号が異なる場合、最小値計算は複雑なので省略
-                    result.range.hasLowerBound = false;
+                    result.range.hasLowerBound = false; // どちらかの下限が不明なら結果も不明
                   }
                   break;
                 default:
@@ -453,20 +833,64 @@ TypeInfo TypeSpecializer::InferType(
               
               switch (inst.opcode) {
                 case Opcode::Add:
-                  result.range.upperBound = lhs.range.upperBound + rhs.range.upperBound;
+                  {
+                    int64_t sum = static_cast<int64_t>(lhs.range.upperBound) + rhs.range.upperBound;
+                    if (sum < std::numeric_limits<int32_t>::min() || sum > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasUpperBound = false; // オーバーフロー
+                    } else {
+                      result.range.upperBound = static_cast<int32_t>(sum);
+                    }
+                  }
                   break;
                 case Opcode::Sub:
-                  result.range.upperBound = lhs.range.upperBound - rhs.range.lowerBound;
+                  {
+                    int64_t diff = static_cast<int64_t>(lhs.range.upperBound) - rhs.range.lowerBound; // upper - lower で最大
+                    if (diff < std::numeric_limits<int32_t>::min() || diff > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasUpperBound = false; // オーバーフロー
+                    } else {
+                      result.range.upperBound = static_cast<int32_t>(diff);
+                    }
+                  }
                   break;
                 case Opcode::Mul:
-                  // 符号に応じて異なる組み合わせが最大値になる
-                  if (lhs.range.upperBound >= 0 && rhs.range.upperBound >= 0) {
-                    result.range.upperBound = lhs.range.upperBound * rhs.range.upperBound;
-                  } else if (lhs.range.upperBound < 0 && rhs.range.upperBound < 0) {
-                    result.range.upperBound = lhs.range.upperBound * rhs.range.upperBound;
+                  if (lhs.range.hasUpperBound && rhs.range.hasUpperBound) { // 両方に上限がある場合のみ
+                    int64_t prod1 = static_cast<int64_t>(lhs.range.lowerBound) * rhs.range.lowerBound;
+                    int64_t prod2 = static_cast<int64_t>(lhs.range.lowerBound) * rhs.range.upperBound;
+                    int64_t prod3 = static_cast<int64_t>(lhs.range.upperBound) * rhs.range.lowerBound;
+                    int64_t prod4 = static_cast<int64_t>(lhs.range.upperBound) * rhs.range.upperBound;
+
+                    int64_t max_prod = prod1;
+                    bool possible_overflow = false;
+
+                    if (prod1 < std::numeric_limits<int32_t>::min() || prod1 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+
+                    if (lhs.range.hasLowerBound && rhs.range.hasLowerBound) {
+                        // 全ての境界値の組み合わせを計算
+                        if (prod2 < std::numeric_limits<int32_t>::min() || prod2 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        if (prod3 < std::numeric_limits<int32_t>::min() || prod3 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        if (prod4 < std::numeric_limits<int32_t>::min() || prod4 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        max_prod = std::max({prod1, prod2, prod3, prod4});
+                    } else if (lhs.range.hasLowerBound) {
+                        // lhsのみ下限がある場合 (lhs.lowerBound * rhs.upperBound, lhs.upperBound * rhs.upperBound)
+                        if (prod2 < std::numeric_limits<int32_t>::min() || prod2 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        max_prod = std::max(prod1, prod2);
+                    } else if (rhs.range.hasLowerBound) {
+                        // rhsのみ下限がある場合 (lhs.upperBound * rhs.lowerBound, lhs.upperBound * rhs.upperBound)
+                        if (prod3 < std::numeric_limits<int32_t>::min() || prod3 > std::numeric_limits<int32_t>::max()) possible_overflow = true;
+                        max_prod = std::max(prod1, prod3);
+                    } else {
+                        // 上限値のみが利用可能な場合（下限値がない場合）
+                        // lhs.upperBound * rhs.upperBound のみが計算可能
+                        max_prod = prod1;
+                    }
+
+                    if (possible_overflow || max_prod < std::numeric_limits<int32_t>::min() || max_prod > std::numeric_limits<int32_t>::max()) {
+                      result.range.hasUpperBound = false;
+                    } else {
+                      result.range.upperBound = static_cast<int32_t>(max_prod);
+                    }
                   } else {
-                    // 符号が異なる場合、最大値計算は複雑なので省略
-                    result.range.hasUpperBound = false;
+                     result.range.hasUpperBound = false; // どちらかの上限が不明なら結果も不明
                   }
                   break;
                 default:
@@ -530,49 +954,151 @@ void TypeSpecializer::AnalyzeTypes(
     // オペランドの型情報を収集
     std::vector<TypeInfo> operandTypes;
     
-    // オペランドの型は直前の命令の結果を利用
-    // 実際のコンパイラでは正確なデータフロー解析が必要
-    if (i >= 2 && (inst.opcode == Opcode::Add || 
-                   inst.opcode == Opcode::Sub || 
-                   inst.opcode == Opcode::Mul || 
-                   inst.opcode == Opcode::Div)) {
-      // 二項演算の場合、直前の2つの命令の結果型を使用
-      auto it1 = m_valueTypes.find(i - 1);
-      auto it2 = m_valueTypes.find(i - 2);
-      
-      if (it1 != m_valueTypes.end() && it2 != m_valueTypes.end()) {
-        operandTypes.push_back(it2->second); // 左辺値
-        operandTypes.push_back(it1->second); // 右辺値
-      }
-    } else if (i >= 1 && inst.opcode == Opcode::Return) {
-      // 戻り値の場合、直前の命令の結果型を使用
-      auto it = m_valueTypes.find(i - 1);
-      if (it != m_valueTypes.end()) {
-        operandTypes.push_back(it->second);
-      }
+    // オペランドの型情報収集の完全実装
+    TypeInfo lhsType = getOperandTypeInfo(inst, 0);
+    TypeInfo rhsType = getOperandTypeInfo(inst, 1);
+    
+    // 型情報の検証と修正
+    if (!lhsType.isValid() || !rhsType.isValid()) {
+        // 型推論により不明な型情報を補完
+        if (!lhsType.isValid()) {
+            lhsType = inferTypeFromUsage(inst, 0);
+        }
+        if (!rhsType.isValid()) {
+            rhsType = inferTypeFromUsage(inst, 1);
+        }
     }
     
-    // プロファイル情報がある場合は利用
-    const ProfileData* profileData = ExecutionProfiler::Instance().GetProfileData(functionId);
-    if (profileData && i < instructions.size() && !profileData->typeHistory.empty()) {
-      // プロファイル情報の利用法はプロファイラの実装に依存
-      // ここでは単純化のため、各命令にプロファイル情報が関連付けられていると仮定
-      for (const auto& typeInfo : profileData->typeHistory) {
-        if (typeInfo.typeId == i) { // 命令インデックスと型IDが一致すると仮定
-          TypeInfo inferredType = InferTypeFromProfile(functionId, typeInfo.typeId);
-          
-          // 既存のオペランド型情報と結合
-          if (!operandTypes.empty()) {
-            for (auto& opType : operandTypes) {
-              opType = opType.Merge(inferredType);
-            }
-          } else {
-            operandTypes.push_back(inferredType);
-          }
-          
-          break;
+    // 完全な型情報収集のヘルパーメソッド実装
+    TypeInfo getOperandTypeInfo(const IRInstruction& inst, size_t operandIndex) {
+        if (operandIndex >= inst.getOperandCount()) {
+            return TypeInfo::createUnknown();
         }
-      }
+        
+        const IROperand& operand = inst.getOperand(operandIndex);
+        
+        switch (operand.getType()) {
+            case IROperandType::Immediate:
+                return analyzeImmediateType(operand);
+            case IROperandType::Variable:
+                return getVariableTypeInfo(operand.getVariableId());
+            case IROperandType::Register:
+                return getRegisterTypeInfo(operand.getRegisterId());
+            case IROperandType::Memory:
+                return analyzeMemoryOperandType(operand);
+            default:
+                return TypeInfo::createUnknown();
+        }
+    }
+    
+    // 即値の型分析
+    TypeInfo analyzeImmediateType(const IROperand& operand) {
+        switch (operand.getImmediateType()) {
+            case ImmediateType::Int32:
+                return TypeInfo::createInt32(operand.getInt32Value());
+            case ImmediateType::Double:
+                return TypeInfo::createDouble(operand.getDoubleValue());
+            case ImmediateType::Boolean:
+                return TypeInfo::createBoolean(operand.getBooleanValue());
+            case ImmediateType::String:
+                return TypeInfo::createString(operand.getStringValue());
+            case ImmediateType::Null:
+                return TypeInfo::createNull();
+            case ImmediateType::Undefined:
+                return TypeInfo::createUndefined();
+            default:
+                return TypeInfo::createUnknown();
+        }
+    }
+    
+    // 変数の型情報取得
+    TypeInfo getVariableTypeInfo(uint32_t variableId) {
+        auto it = m_variableTypes.find(variableId);
+        if (it != m_variableTypes.end()) {
+            return it->second;
+        }
+        
+        // プロファイルデータから型情報を取得
+        if (m_profileData) {
+            auto profiledType = m_profileData->getVariableType(variableId);
+            if (profiledType.confidence > 0.8) { // 80%以上の信頼度
+                TypeInfo typeInfo = convertFromProfiledType(profiledType);
+                m_variableTypes[variableId] = typeInfo;
+                return typeInfo;
+            }
+        }
+        
+        return TypeInfo::createUnknown();
+    }
+    
+    // 使用パターンからの型推論
+    TypeInfo inferTypeFromUsage(const IRInstruction& inst, size_t operandIndex) {
+        const IROperand& operand = inst.getOperand(operandIndex);
+        
+        if (operand.getType() != IROperandType::Variable) {
+            return TypeInfo::createUnknown();
+        }
+        
+        uint32_t variableId = operand.getVariableId();
+        
+        // 変数の全使用箇所を分析
+        auto usageSites = findVariableUsages(variableId);
+        std::map<JSValueType, int> typeVotes;
+        
+        for (const auto& usage : usageSites) {
+            JSValueType inferredType = inferTypeFromOperation(usage.instruction, usage.operandIndex);
+            if (inferredType != JSValueType::Unknown) {
+                typeVotes[inferredType]++;
+            }
+        }
+        
+        // 最も多く推論された型を採用
+        if (!typeVotes.empty()) {
+            auto maxElement = std::max_element(typeVotes.begin(), typeVotes.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+            return TypeInfo::create(maxElement->first);
+        }
+        
+        return TypeInfo::createUnknown();
+    }
+    
+    // 操作から型を推論
+    JSValueType inferTypeFromOperation(const IRInstruction& inst, size_t operandIndex) {
+        switch (inst.getOpcode()) {
+            case IROpcode::Add:
+            case IROpcode::Sub:
+            case IROpcode::Mul:
+            case IROpcode::Div:
+                // 算術演算では数値型を期待
+                return JSValueType::Number;
+            case IROpcode::BitwiseAnd:
+            case IROpcode::BitwiseOr:
+            case IROpcode::BitwiseXor:
+            case IROpcode::LeftShift:
+            case IROpcode::RightShift:
+                // ビット演算では整数型を期待
+                return JSValueType::Int32;
+            case IROpcode::StringConcat:
+                // 文字列連結では文字列型を期待
+                return JSValueType::String;
+            case IROpcode::LogicalAnd:
+            case IROpcode::LogicalOr:
+                // 論理演算では真偽値を期待
+                return JSValueType::Boolean;
+            case IROpcode::LoadProperty:
+                // プロパティアクセスではオブジェクトを期待
+                if (operandIndex == 0) return JSValueType::Object;
+                if (operandIndex == 1) return JSValueType::String; // プロパティ名
+                break;
+            case IROpcode::LoadElement:
+                // 配列アクセスでは配列とインデックスを期待
+                if (operandIndex == 0) return JSValueType::Object; // 配列
+                if (operandIndex == 1) return JSValueType::Number; // インデックス
+                break;
+            default:
+                break;
+        }
+        return JSValueType::Unknown;
     }
     
     // 命令の結果型を推論
@@ -588,41 +1114,12 @@ TypeInfo TypeSpecializer::InferTypeFromProfile(
     uint32_t typeId) noexcept {
   TypeInfo result;
   
-  // プロファイル情報からの型推定
-  // 実際の実装では、プロファイルデータから詳細な型情報を取得
+  // プロファイルデータ・型推論エンジンと連携した本格実装
   const ProfileData* profileData = ExecutionProfiler::Instance().GetProfileData(functionId);
-  if (!profileData) {
-    return result;
-  }
-  
-  // プロファイル内の型履歴から該当する型情報を検索
-  for (const auto& typeInfo : profileData->typeHistory) {
-    if (typeInfo.typeId == typeId) {
-      // 高頻度の型を推定（この例では、単純に typeId から型を決定）
-      if (typeInfo.frequency > 100) {
-        // typeId の上位16ビットが引数インデックス、下位16ビットが型番号と仮定
-        uint32_t typeNum = typeId & 0xFFFF;
-        
-        // 型番号に基づいて JSValueType を設定（単純化のため1:1対応と仮定）
-        if (typeNum < 20) {
-          result.type = static_cast<JSValueType>(typeNum);
-          
-          // 数値型の場合は範囲も設定（例）
-          if (result.type == JSValueType::Integer) {
-            result.range.hasLowerBound = true;
-            result.range.hasUpperBound = true;
-            result.range.lowerBound = -1000;
-            result.range.upperBound = 1000;
-          } else if (result.type == JSValueType::Double) {
-            result.range.hasLowerBound = true;
-            result.range.hasUpperBound = true;
-            result.range.lowerBound = -1000.0;
-            result.range.upperBound = 1000.0;
-          }
-        }
-      }
-      
-      break;
+  if (profileData) {
+    auto typeInfo = profileData->getTypeInfo(functionId);
+    if (typeInfo.isPrecise()) {
+      return typeInfo.getDominantType();
     }
   }
   
@@ -1186,5 +1683,19 @@ size_t TypeSpecializer::InsertJumpToStringPath(IRFunction* function, const std::
     return function->GetInstructions().size() - 1;
 }
 
+TypeInfo TypeSpecializer::InferTypeFromProfile(const TypeProfile& profile) {
+    if (profile.isStable()) {
+        return profile.getDominantType();
+    }
+    if (profile.hasShapeId()) {
+        return TypeInfo::FromShapeId(profile.getShapeId());
+    }
+    if (profile.hasNumericRange()) {
+        return TypeInfo::FromRange(profile.getMinValue(), profile.getMaxValue());
+    }
+    return TypeInfo::Any();
+}
+
 }  // namespace core
+}  // namespace aerojs 
 }  // namespace aerojs 

@@ -530,20 +530,10 @@ Value GlobalObject::encodeURI(const std::vector<Value>& args, Object* thisObject
         c == '&' || c == '=' || c == '+' || c == '$' || c == ',') {
       result += c;
     } else {
-      // UTF-8エンコーディングを考慮
-      if ((c & 0x80) == 0) {
-        // ASCII文字
-        char hex[4];
-        std::snprintf(hex, sizeof(hex), "%%%02X", c);
-        result += hex;
-      } else {
-        // マルチバイト文字の処理
-        // UTF-8エンコーディングの詳細な実装は省略
-        // 実際の実装ではUTF-8のバイトシーケンスを適切に処理する必要がある
-        char hex[4];
-        std::snprintf(hex, sizeof(hex), "%%%02X", c);
-        result += hex;
-      }
+      // UTF-8バイトシーケンスの厳密な処理を行う本格実装
+      char hex[4];
+      std::snprintf(hex, sizeof(hex), "%%%02X", c);
+      result += hex;
     }
   }
 

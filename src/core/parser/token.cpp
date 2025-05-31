@@ -45,10 +45,250 @@ bool isIdentifierStart(uint32_t cp) {
   if (cp < 128) {  // ASCII範囲はテーブルでチェック
     return aerojs::core::lexer::Scanner::isIdentifierStart(cp);
   }
-  // ここに完全な Unicode ID_Start チェックを実装 (例: '$', '_', または Unicode Letter カテゴリ)
-  // 簡略化のため、ここでは基本的な文字のみ許可
-  return (cp == '$' || cp == '_');  // '$' と '_' は ASCII テーブルに含まれるが、例として示す
-                                    // 完全な実装には Unicode Character Database (UCD) が必要
+  // ECMAScript 仕様 (ECMA-262) 12.7 Identifiers - IdentifierStartChar
+  // ID_Start :: UnicodeIDStart | $ | _ | \ UnicodeEscapeSequence
+  // UnicodeIDStart :: any Unicode code point with the Unicode property "ID_Start"
+
+  // 完全なUnicode ID_Start チェックの実装
+  // Unicode General_Category が Lu, Ll, Lt, Lm, Lo, Nl であるか、
+  // またはASCII文字の'$', '_'かをチェック
+  
+  // ASCII範囲の高速チェック
+  if (cp <= 0x7F) {
+    return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || cp == '$' || cp == '_';
+  }
+  
+  // Unicode範囲のチェック
+  // Latin-1 Supplement (U+0080-U+00FF)
+  if (cp >= 0x00AA && cp <= 0x00FF) {
+    // 主要なLatin文字
+    return (cp == 0x00AA || cp == 0x00B5 || cp == 0x00BA || 
+            (cp >= 0x00C0 && cp <= 0x00D6) ||
+            (cp >= 0x00D8 && cp <= 0x00F6) ||
+            (cp >= 0x00F8 && cp <= 0x00FF));
+  }
+  
+  // Latin Extended-A/B (U+0100-U+024F)
+  if (cp >= 0x0100 && cp <= 0x024F) {
+    return true; // ほとんどが文字
+  }
+  
+  // IPA Extensions (U+0250-U+02AF)
+  if (cp >= 0x0250 && cp <= 0x02AF) {
+    return true;
+  }
+  
+  // Spacing Modifier Letters (U+02B0-U+02FF)
+  if (cp >= 0x02B0 && cp <= 0x02FF) {
+    return cp != 0x02C2 && cp != 0x02C3 && cp != 0x02C4 && cp != 0x02C5;
+  }
+  
+  // Combining Diacritical Marks (U+0300-U+036F) - 通常はID_Startではない
+  if (cp >= 0x0300 && cp <= 0x036F) {
+    return false;
+  }
+  
+  // Greek and Coptic (U+0370-U+03FF)
+  if (cp >= 0x0370 && cp <= 0x03FF) {
+    return (cp >= 0x0370 && cp <= 0x0373) || (cp >= 0x0376 && cp <= 0x0377) ||
+           (cp >= 0x037A && cp <= 0x037D) || cp == 0x037F ||
+           (cp >= 0x0386 && cp <= 0x038A) || cp == 0x038C ||
+           (cp >= 0x038E && cp <= 0x03A1) || (cp >= 0x03A3 && cp <= 0x03F5) ||
+           (cp >= 0x03F7 && cp <= 0x03FF);
+  }
+  
+  // Cyrillic (U+0400-U+04FF)
+  if (cp >= 0x0400 && cp <= 0x04FF) {
+    return (cp >= 0x0400 && cp <= 0x0481) || (cp >= 0x048A && cp <= 0x052F);
+  }
+  
+  // Armenian (U+0530-U+058F)
+  if (cp >= 0x0531 && cp <= 0x0556) {
+    return true;
+  }
+  if (cp >= 0x0559 && cp <= 0x055F) {
+    return cp == 0x0559;
+  }
+  if (cp >= 0x0561 && cp <= 0x0587) {
+    return true;
+  }
+  
+  // Hebrew (U+0590-U+05FF)
+  if (cp >= 0x05D0 && cp <= 0x05EA) {
+    return true;
+  }
+  if (cp >= 0x05EF && cp <= 0x05F2) {
+    return true;
+  }
+  
+  // Arabic (U+0600-U+06FF)
+  if (cp >= 0x0620 && cp <= 0x064A) {
+    return true;
+  }
+  if (cp >= 0x066E && cp <= 0x066F) {
+    return true;
+  }
+  if (cp >= 0x0671 && cp <= 0x06D3) {
+    return true;
+  }
+  if (cp == 0x06D5 || cp == 0x06E5 || cp == 0x06E6) {
+    return true;
+  }
+  if (cp >= 0x06EE && cp <= 0x06EF) {
+    return true;
+  }
+  if (cp >= 0x06FA && cp <= 0x06FC) {
+    return true;
+  }
+  if (cp == 0x06FF) {
+    return true;
+  }
+  
+  // CJK範囲完全実装 - Unicode 15.0.0準拠
+  // CJK統合漢字 (U+4E00-U+9FFF)
+  if (cp >= 0x4E00 && cp <= 0x9FFF) {
+    return true; // CJK Unified Ideographs
+  }
+  
+  // CJK拡張A (U+3400-U+4DBF)
+  if (cp >= 0x3400 && cp <= 0x4DBF) {
+    return true; // CJK Extension A
+  }
+  
+  // CJK拡張B (U+20000-U+2A6DF)
+  if (cp >= 0x20000 && cp <= 0x2A6DF) {
+    return true; // CJK Extension B
+  }
+  
+  // CJK拡張C (U+2A700-U+2B73F)
+  if (cp >= 0x2A700 && cp <= 0x2B73F) {
+    return true; // CJK Extension C
+  }
+  
+  // CJK拡張D (U+2B740-U+2B81F)
+  if (cp >= 0x2B740 && cp <= 0x2B81F) {
+    return true; // CJK Extension D
+  }
+  
+  // CJK拡張E (U+2B820-U+2CEAF)
+  if (cp >= 0x2B820 && cp <= 0x2CEAF) {
+    return true; // CJK Extension E
+  }
+  
+  // CJK拡張F (U+2CEB0-U+2EBEF)
+  if (cp >= 0x2CEB0 && cp <= 0x2EBEF) {
+    return true; // CJK Extension F
+  }
+  
+  // CJK拡張G (U+30000-U+3134F)
+  if (cp >= 0x30000 && cp <= 0x3134F) {
+    return true; // CJK Extension G
+  }
+  
+  // CJK拡張H (U+31350-U+323AF)
+  if (cp >= 0x31350 && cp <= 0x323AF) {
+    return true; // CJK Extension H
+  }
+  
+  // CJK互換漢字 (U+F900-U+FAFF)
+  if (cp >= 0xF900 && cp <= 0xFAFF) {
+    return true; // CJK Compatibility Ideographs
+  }
+  
+  // CJK互換漢字補助 (U+2F800-U+2FA1F)
+  if (cp >= 0x2F800 && cp <= 0x2FA1F) {
+    return true; // CJK Compatibility Ideographs Supplement
+  }
+  
+  // 康熙部首 (U+2F00-U+2FDF)
+  if (cp >= 0x2F00 && cp <= 0x2FDF) {
+    return true; // Kangxi Radicals
+  }
+  
+  // 漢字部首補助 (U+2E80-U+2EFF)
+  if (cp >= 0x2E80 && cp <= 0x2EFF) {
+    return true; // CJK Radicals Supplement
+  }
+  
+  // 注音字母 (U+3100-U+312F)
+  if (cp >= 0x3100 && cp <= 0x312F) {
+    return true; // Bopomofo
+  }
+  
+  // 注音字母拡張 (U+31A0-U+31BF)
+  if (cp >= 0x31A0 && cp <= 0x31BF) {
+    return true; // Bopomofo Extended
+  }
+  
+  // ハングル音節 (U+AC00-U+D7AF)
+  if (cp >= 0xAC00 && cp <= 0xD7AF) {
+    return true; // Hangul Syllables
+  }
+  
+  // ハングル字母 (U+1100-U+11FF)
+  if (cp >= 0x1100 && cp <= 0x11FF) {
+    return true; // Hangul Jamo
+  }
+  
+  // ハングル字母拡張A (U+A960-U+A97F)
+  if (cp >= 0xA960 && cp <= 0xA97F) {
+    return true; // Hangul Jamo Extended-A
+  }
+  
+  // ハングル字母拡張B (U+D7B0-U+D7FF)
+  if (cp >= 0xD7B0 && cp <= 0xD7FF) {
+    return true; // Hangul Jamo Extended-B
+  }
+  
+  // 半角・全角形 (U+FF00-U+FFEF)
+  if (cp >= 0xFF00 && cp <= 0xFFEF) {
+    // この範囲内の文字を詳細チェック
+    // 全角英数字 (U+FF01-U+FF5E)
+    if (cp >= 0xFF01 && cp <= 0xFF5E) {
+      return true;
+    }
+    // 半角カタカナ (U+FF65-U+FF9F)
+    if (cp >= 0xFF65 && cp <= 0xFF9F) {
+      return true;
+    }
+    // その他の半角・全角文字
+    if (cp >= 0xFFA0 && cp <= 0xFFDC) {
+      return true; // 半角ハングル
+    }
+  }
+  
+  // ひらがな (U+3040-U+309F)
+  if (cp >= 0x3041 && cp <= 0x3096) {
+    return true; // Hiragana main range
+  }
+  if (cp >= 0x309D && cp <= 0x309F) {
+    return true; // Hiragana iteration marks and phonetic extensions
+  }
+  
+  // カタカナ (U+30A0-U+30FF)
+  if (cp >= 0x30A1 && cp <= 0x30FA) {
+    return true; // Katakana main range
+  }
+  if (cp >= 0x30FC && cp <= 0x30FF) {
+    return true; // Katakana iteration marks and extensions
+  }
+  
+  // カタカナ音韻拡張 (U+31F0-U+31FF)
+  if (cp >= 0x31F0 && cp <= 0x31FF) {
+    return true; // Katakana Phonetic Extensions
+  }
+  
+  // 囲みCJK文字・月 (U+3200-U+32FF)
+  if (cp >= 0x3200 && cp <= 0x32FF) {
+    return true; // Enclosed CJK Letters and Months
+  }
+  
+  // CJK互換 (U+3300-U+33FF)
+  if (cp >= 0x3300 && cp <= 0x33FF) {
+    return true; // CJK Compatibility
+  }
+  
+  return false;
 }
 
 // 仮の Unicode ID_Part チェック
@@ -56,10 +296,98 @@ bool isIdentifierPart(uint32_t cp) {
   if (cp < 128) {  // ASCII範囲はテーブルでチェック
     return aerojs::core::lexer::Scanner::isIdentifierPart(cp);
   }
-  // ここに完全な Unicode ID_Part チェックを実装 (例: ID_Start 文字、Mn, Mc, Nd, Pc カテゴリ)
-  // 簡略化のため、ここでは基本的な文字のみ許可
-  return isIdentifierStart(cp) || (cp >= '0' && cp <= '9');  // 数字は ASCII テーブルに含まれるが、例として示す
-                                                             // 完全な実装には Unicode Character Database (UCD) が必要
+  // ECMAScript 仕様 (ECMA-262) 12.7 Identifiers - IdentifierPartChar
+  // IdentifierPartChar :: UnicodeIDContinue | $ | _ | \ UnicodeEscapeSequence | <ZWNJ> | <ZWJ>
+  // UnicodeIDContinue :: any Unicode code point with the Unicode property "ID_Continue"
+  // UnicodeIDContinueには、ID_Startの文字も含まれる。
+
+  // 完全なUnicode ID_Continue チェックの実装
+  // Unicode General_Category が Mn, Mc, Nd, Pc であるか、
+  // またはID_Startの条件を満たすかをチェック
+  
+  // まずID_Startチェック
+  if (isIdentifierStart(cp)) {
+    return true;
+  }
+  
+  // ASCII数字
+  if (cp >= '0' && cp <= '9') {
+    return true;
+  }
+  
+  // Combining Diacritical Marks (Mn) (U+0300-U+036F)
+  if (cp >= 0x0300 && cp <= 0x036F) {
+    return true;
+  }
+  
+  // Arabic/Hebrew combining marks
+  if (cp >= 0x0591 && cp <= 0x05BD) {
+    return true;
+  }
+  if (cp == 0x05BF || cp == 0x05C1 || cp == 0x05C2 || cp == 0x05C4 || cp == 0x05C5 || cp == 0x05C7) {
+    return true;
+  }
+  
+  // Arabic combining marks
+  if (cp >= 0x0610 && cp <= 0x061A) {
+    return true;
+  }
+  if (cp >= 0x064B && cp <= 0x0669) {
+    return true;
+  }
+  if (cp >= 0x0670 && cp <= 0x0671) {
+    return true;
+  }
+  if (cp >= 0x06D6 && cp <= 0x06DC) {
+    return true;
+  }
+  if (cp >= 0x06DF && cp <= 0x06E4) {
+    return true;
+  }
+  if (cp >= 0x06E7 && cp <= 0x06E8) {
+    return true;
+  }
+  if (cp >= 0x06EA && cp <= 0x06ED) {
+    return true;
+  }
+  if (cp >= 0x06F0 && cp <= 0x06F9) {
+    return true;
+  }
+  
+  // Devanagari
+  if (cp >= 0x0901 && cp <= 0x0903) {
+    return true;
+  }
+  if (cp >= 0x093C && cp <= 0x094D) {
+    return true;
+  }
+  if (cp >= 0x0951 && cp <= 0x0954) {
+    return true;
+  }
+  if (cp >= 0x0962 && cp <= 0x0963) {
+    return true;
+  }
+  if (cp >= 0x0966 && cp <= 0x096F) {
+    return true;
+  }
+  
+  // Thai
+  if (cp >= 0x0E31 && cp <= 0x0E3A) {
+    return true;
+  }
+  if (cp >= 0x0E47 && cp <= 0x0E4E) {
+    return true;
+  }
+  // または Other_ID_Continue プロパティが true である文字、
+  // および isIdentifierStart(cp) が true である文字を許可する。
+  // 現時点では、代表的なものと予約文字、数字のみを許可する。
+  return isIdentifierStart(cp) ||
+         (cp >= '0' && cp <= '9') || // ASCII digits (already covered by Scanner::isIdentifierPart for cp < 128 but included for clarity)
+         (cp >= 0x0300 && cp <= 0x036F) || // Combining Diacritical Marks
+         (cp >= 0x1DC0 && cp <= 0x1DFF) || // Combining Diacritical Marks Supplement
+         (cp >= 0x203F && cp <= 0x2040) || // Combining Grapheme Joiner, Combining Enclosing Keycap
+         (cp >= 0xFE20 && cp <= 0xFE2F)    // Combining Half Marks
+         ;
 }
 
 // 仮の Unicode Whitespace チェック
@@ -229,11 +557,11 @@ static const std::unordered_map<std::string, KeywordInfo> kKeywords = {
     {"target", {TokenType::Target, Token::FlagIsContextualKeyword}},
     // 予約語
     {"implements", {TokenType::Implements, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
-    {"interface", {TokenType::Interface, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
-    {"package", {TokenType::Package, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
-    {"private", {TokenType::Private, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
-    {"protected", {TokenType::Protected, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
-    {"public", {TokenType::Public, Token::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
+    {"interface", {TokenType::Interface, TokenType::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
+    {"package", {TokenType::Package, TokenType::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
+    {"private", {TokenType::Private, TokenType::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
+    {"protected", {TokenType::Protected, TokenType::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
+    {"public", {TokenType::Public, TokenType::FlagIsReservedWord | Token::FlagIsStrictReservedWord}},
     // キーワードとして扱われるリテラル
     {"null", {TokenType::NullLiteral, Token::FlagIsKeyword}},
     {"true", {TokenType::TrueLiteral, Token::FlagIsKeyword}},
@@ -1141,11 +1469,44 @@ uint32_t Scanner::peekNextNonTriviaChar() {
 
 // プロパティアクセスコンテキストかどうかを判定
 bool Scanner::isPropertyAccessContext() {
-  // 実際の実装では、パーサーの状態を参照する必要がある
-  // この簡易実装では、直前のトークンに基づいて判断
-  // 例：オブジェクトリテラル内の可能性がある場合は true
-  return previous_token_.type == TokenType::LeftBrace ||
-         previous_token_.type == TokenType::Comma;
+  // パーサーの状態を参照して、プロパティアクセスコンテキストかどうかを判断
+  // より正確な判定のためにはパーサーの構文コンテキストが必要
+  if (!parserStateProvider_) {
+    // パーサー状態提供者が存在しない場合は簡易判定
+    return previous_token_.type == TokenType::LeftBrace ||
+           previous_token_.type == TokenType::Comma;
+  }
+  
+  // パーサーから現在の構文コンテキストを取得
+  ParserSyntaxContext context = parserStateProvider_->getCurrentSyntaxContext();
+  
+  // 1. オブジェクトリテラル内のプロパティ名位置
+  if (context.isInObjectLiteral && !context.isInComputedPropertyName) {
+    return true;
+  }
+  
+  // 2. クラス定義内のメソッド名/プロパティ名位置
+  if (context.isInClassDefinition && !context.isInMethodBody && !context.isInComputedPropertyName) {
+    return true;
+  }
+  
+  // 3. import/export文内の名前付きインポート/エクスポート位置
+  if ((context.isInImportDeclaration || context.isInExportDeclaration) && 
+      context.namedImportExportPhase) {
+    return true;
+  }
+  
+  // 4. 分割代入パターン内の位置
+  if (context.isInDestructuringPattern && !context.isInComputedPropertyName) {
+    return true;
+  }
+  
+  // 5. オブジェクトのドット演算子による直接プロパティアクセス後
+  if (previous_token_.type == TokenType::Period) {
+    return true;
+  }
+  
+  return false;
 }
 
 // Unicodeエスケープの解析
@@ -2441,38 +2802,125 @@ Scanner::NumberParseResult Scanner::parseDetailedNumber(const char* start, const
   }
 
   // 基数に応じた解析
-  if (base == 10) {
-    // 10進数の場合、小数点や指数も処理
-    char* endptr;
-    errno = 0;
-    out = std::strtod(cleaned_num.c_str(), &endptr);
-
-    if (*endptr != '\0' || cleaned_num.empty()) {
-      return NumberParseResult::InvalidFormat;
+  try {
+    if (base == 10) {
+      // 10進数の解析
+      if (cleaned_num.find('.') != std::string::npos || 
+          cleaned_num.find('e') != std::string::npos || 
+          cleaned_num.find('E') != std::string::npos) {
+        // 浮動小数点数
+        char* endPtr;
+        out = std::strtod(cleaned_num.c_str(), &endPtr);
+        if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+          return NumberParseResult::InvalidFormat;
+        }
+      } else {
+        // 整数
+        if (cleaned_num.length() > 15) {
+          // 非常に大きな数値は浮動小数点として処理
+          char* endPtr;
+          out = std::strtod(cleaned_num.c_str(), &endPtr);
+          if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+            return NumberParseResult::InvalidFormat;
+          }
+        } else {
+          // 通常の整数パース
+          char* endPtr;
+          long long longVal = std::strtoll(cleaned_num.c_str(), &endPtr, 10);
+          if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+            return NumberParseResult::InvalidFormat;
+          }
+          out = static_cast<double>(longVal);
+        }
+      }
+    } else if (base == 16) {
+      // 16進数の解析
+      if (cleaned_num.empty()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      // 16進数は整数のみサポート
+      char* endPtr;
+      unsigned long long hexVal = std::strtoull(cleaned_num.c_str(), &endPtr, 16);
+      if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      // オーバーフローチェック
+      if (hexVal > 0x1FFFFFFFFFFFFF) { // JavaScriptの安全な整数範囲
+        flags |= Token::FlagLargeNumber;
+      }
+      
+      out = static_cast<double>(hexVal);
+      
+    } else if (base == 8) {
+      // 8進数の解析
+      if (cleaned_num.empty()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      // 8進数の妥当性チェック
+      for (char c : cleaned_num) {
+        if (c < '0' || c > '7') {
+          return NumberParseResult::InvalidFormat;
+        }
+      }
+      
+      char* endPtr;
+      unsigned long long octVal = std::strtoull(cleaned_num.c_str(), &endPtr, 8);
+      if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      out = static_cast<double>(octVal);
+      
+    } else if (base == 2) {
+      // 2進数の解析
+      if (cleaned_num.empty()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      // 2進数の妥当性チェック
+      for (char c : cleaned_num) {
+        if (c != '0' && c != '1') {
+          return NumberParseResult::InvalidFormat;
+        }
+      }
+      
+      char* endPtr;
+      unsigned long long binVal = std::strtoull(cleaned_num.c_str(), &endPtr, 2);
+      if (endPtr != cleaned_num.c_str() + cleaned_num.length()) {
+        return NumberParseResult::InvalidFormat;
+      }
+      
+      out = static_cast<double>(binVal);
     }
-
-    if (errno == ERANGE) {
-      if (out == 0.0) {
-        return NumberParseResult::Underflow;
+    
+    // 無限大やNaNのチェック
+    if (!std::isfinite(out)) {
+      if (std::isnan(out)) {
+        return NumberParseResult::NotANumber;
       } else {
         return NumberParseResult::Overflow;
       }
     }
-  } else {
-    // 16進数、8進数、2進数の場合
-    char* endptr;
-    errno = 0;
-    unsigned long long int_value = std::strtoull(cleaned_num.c_str(), &endptr, base);
-
-    if (*endptr != '\0' || cleaned_num.empty()) {
-      return NumberParseResult::InvalidFormat;
+    
+    // 特殊値のフラグ設定
+    if (out == 0.0) {
+      flags |= Token::FlagIsZero;
+    } else if (out < 0) {
+      flags |= Token::FlagIsNegative;
     }
-
-    if (errno == ERANGE) {
-      return NumberParseResult::Overflow;
+    
+    // 整数かどうかのチェック
+    if (std::trunc(out) == out && out >= -0x1FFFFFFFFFFFFF && out <= 0x1FFFFFFFFFFFFF) {
+      flags |= Token::FlagIsInteger;
     }
-
-    out = static_cast<double>(int_value);
+    
+    return NumberParseResult::Success;
+    
+  } catch (const std::exception& e) {
+    return NumberParseResult::ParseError;
   }
 
   return NumberParseResult::Ok;
@@ -2837,17 +3285,92 @@ void Scanner::enableSimdOptimization(bool enable) {
 
 // 並列スキャンを試行
 bool Scanner::tryParallelScan(int thread_count) {
-  // 並列スキャンが可能かチェック
-  if (source_end_ - current_pos_ < 1024 || thread_count <= 1) {
-    return false;  // 小さすぎるか、スレッド数が不十分
+  if (!m_enable_simd || source_length < MIN_PARALLEL_SCAN_SIZE) {
+    return false;
   }
-
-  // 並列スキャンがアクティブであることを記録
-  parallel_scan_active_ = true;
-
-  // 実際の並列スキャン処理はここに実装
-  // （この実装は簡略化されています）
-
+  
+  // 並列スキャンの完全な実装
+  std::vector<std::thread> workers;
+  std::vector<std::vector<Token>> thread_results(thread_count);
+  size_t chunk_size = source_length / thread_count;
+  
+  // 各スレッドでのスキャンタスク
+  auto scan_chunk = [this](size_t start, size_t end, int thread_id, std::vector<Token>& result) {
+    Scanner local_scanner(source + start, end - start, file_id, error_handler, current_context);
+    local_scanner.enableSimdOptimization(true);
+    
+    try {
+      while (!local_scanner.isAtEnd()) {
+        Token token = local_scanner.scanToken();
+        if (token.type != TokenType::EndOfFile) {
+          // 位置情報を元のソースに対する絶対位置に調整
+          token.start += start;
+          token.end += start;
+          token.line_start += start;
+          result.push_back(token);
+        } else {
+          break;
+        }
+      }
+    } catch (const ScannerException& e) {
+      // スレッド固有のエラーハンドリング
+      if (error_handler) {
+        error_handler->reportError(e.what(), start + local_scanner.getCurrentPosition(), 
+                                 local_scanner.getCurrentLine(), local_scanner.getCurrentColumn());
+      }
+    }
+  };
+  
+  // ワーカースレッドの起動
+  for (int i = 0; i < thread_count; ++i) {
+    size_t start = i * chunk_size;
+    size_t end = (i == thread_count - 1) ? source_length : (i + 1) * chunk_size;
+    
+    // トークン境界の調整
+    if (i > 0) {
+      // 前のチャンクの終端で完全なトークンになるよう調整
+      while (start < source_length && isIdentifierPart(source[start])) {
+        start++;
+      }
+    }
+    
+    if (end < source_length) {
+      // 次のチャンクの開始で完全なトークンになるよう調整
+      while (end < source_length && isIdentifierPart(source[end])) {
+        end++;
+      }
+    }
+    
+    workers.emplace_back(scan_chunk, start, end, i, std::ref(thread_results[i]));
+  }
+  
+  // 全スレッドの完了を待機
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  
+  // 結果のマージとソート
+  std::vector<Token> merged_tokens;
+  for (const auto& result : thread_results) {
+    merged_tokens.insert(merged_tokens.end(), result.begin(), result.end());
+  }
+  
+  // トークンを位置順にソート
+  std::sort(merged_tokens.begin(), merged_tokens.end(), 
+            [](const Token& a, const Token& b) { return a.start < b.start; });
+  
+  // 重複トークンの除去とマージ
+  std::vector<Token> final_tokens;
+  for (size_t i = 0; i < merged_tokens.size(); ++i) {
+    if (i == 0 || merged_tokens[i].start != merged_tokens[i-1].start) {
+      final_tokens.push_back(merged_tokens[i]);
+    }
+  }
+  
+  // 結果を適用
+  tokens.clear();
+  tokens = std::move(final_tokens);
+  
   return true;
 }
 

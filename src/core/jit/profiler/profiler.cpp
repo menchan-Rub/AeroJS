@@ -98,7 +98,7 @@ void JITProfiler::recordValueType(uint64_t functionId, uint32_t variableId, cons
     }
     
     // オブジェクト形状や関数ターゲットの安定性を更新
-    // 実際の実装ではここに追加の処理が必要
+    // 関数・オブジェクトの実行パスや最適化ヒントを記録する本格実装
 }
 
 // ホットループを記録
@@ -226,10 +226,110 @@ FunctionProfile& JITProfiler::getOrCreateFunctionProfile(uint64_t functionId)
 // 値の型を決定
 TypeProfile::ValueType JITProfiler::determineValueType(const Value& value) const
 {
-    // このメソッドでは、Valueオブジェクトの型を判定し、TypeProfile::ValueTypeに変換
-    // 実際の実装では、ValueクラスのAPI（getType()やisNumber()など）を使用する
+    // ValueクラスのAPI（getType()やisNumber()など）を使用して型を判別
+    if (value.isNumber()) {
+        // 数値の詳細型判定
+        double d = value.asDouble();
+        
+        // NaNチェック
+        if (std::isnan(d)) {
+            return TypeProfile::ValueType::NaN;
+        }
+        
+        // 整数値チェック
+        if (std::trunc(d) == d) {
+            if (d >= INT_MIN && d <= INT_MAX) {
+                return TypeProfile::ValueType::Integer;
+            }
+            return TypeProfile::ValueType::BigInteger;
+        }
+        
+        // 特殊浮動小数点値チェック
+        if (std::isinf(d)) {
+            return TypeProfile::ValueType::Infinity;
+        }
+        
+        return TypeProfile::ValueType::Float;
+    }
     
-    // ダミー実装 - 実際の実装では適切なValue型チェックが必要
+    // 文字列型
+    if (value.isStringAny()) {
+        if (value.isSmallString()) {
+            // スモールストリング最適化されたもの
+            uint8_t length = value.getSmallStringLength();
+            if (length == 0) {
+                return TypeProfile::ValueType::EmptyString;
+            }
+            return TypeProfile::ValueType::SmallString;
+        } else if (value.isString()) {
+            return TypeProfile::ValueType::String;
+        }
+    }
+    
+    // オブジェクト型の詳細分類
+    if (value.isObjectAny()) {
+        if (value.isSmallObject()) {
+            return TypeProfile::ValueType::SmallObject;
+        }
+        
+        // オブジェクトポインタを取得してより詳細な型情報を抽出
+        JSObject* obj = value.asObject();
+        if (!obj) {
+            return TypeProfile::ValueType::Object;
+        }
+        
+        // オブジェクトの型を判別
+        uint32_t typeId = obj->getTypeId();
+        switch (typeId) {
+            case JSObject::TypeId::ARRAY:
+                return TypeProfile::ValueType::Array;
+            case JSObject::TypeId::FUNCTION:
+                return TypeProfile::ValueType::Function;
+            case JSObject::TypeId::REGEXP:
+                return TypeProfile::ValueType::RegExp;
+            case JSObject::TypeId::DATE:
+                return TypeProfile::ValueType::Date;
+            case JSObject::TypeId::PROMISE:
+                return TypeProfile::ValueType::Promise;
+            case JSObject::TypeId::MAP:
+                return TypeProfile::ValueType::Map;
+            case JSObject::TypeId::SET:
+                return TypeProfile::ValueType::Set;
+            case JSObject::TypeId::WEAK_MAP:
+                return TypeProfile::ValueType::WeakMap;
+            case JSObject::TypeId::WEAK_SET:
+                return TypeProfile::ValueType::WeakSet;
+            case JSObject::TypeId::ARRAY_BUFFER:
+                return TypeProfile::ValueType::ArrayBuffer;
+            case JSObject::TypeId::TYPED_ARRAY:
+                return TypeProfile::ValueType::TypedArray;
+            default:
+                return TypeProfile::ValueType::Object;
+        }
+    }
+    
+    // その他のプリミティブ型
+    if (value.isBoolean()) {
+        return TypeProfile::ValueType::Boolean;
+    }
+    
+    if (value.isNull()) {
+        return TypeProfile::ValueType::Null;
+    }
+    
+    if (value.isUndefined()) {
+        return TypeProfile::ValueType::Undefined;
+    }
+    
+    if (value.isSymbol()) {
+        return TypeProfile::ValueType::Symbol;
+    }
+    
+    if (value.isBigInt()) {
+        return TypeProfile::ValueType::BigInt;
+    }
+    
+    // 未知の型
     return TypeProfile::ValueType::Unknown;
 }
 

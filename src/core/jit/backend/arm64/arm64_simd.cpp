@@ -509,5 +509,405 @@ void ARM64SIMD::emitPostloopCode(const std::vector<IRInstruction>& loopInsts, st
     // end:
 }
 
+void ARM64SIMDProcessor::OptimizeVectorLoop(IRNode* loopNode) {
+    // ベクトルループの最適化処理
+    if (!loopNode || loopNode->GetType() != IRNodeType::Loop) {
+        m_logger.Error("無効なループノードが最適化に渡されました");
+        return;
+    }
+    
+    // ループボディを取得
+    auto* loopBody = static_cast<LoopNode*>(loopNode)->GetBody();
+    if (!loopBody) {
+        m_logger.Error("ループノードのボディがnullです");
+        return;
+    }
+    
+    // ループの特性を分析
+    LoopAnalysisResult analysis = AnalyzeLoop(loopNode);
+    
+    // ベクトル化可能なループかどうかを確認
+    if (!analysis.IsVectorizable()) {
+        m_logger.Info("ループはベクトル化できません: " + analysis.GetReason());
+        return;
+    }
+    
+    // SIMDレジスタの数を決定
+    int numRegisters = DetermineOptimalRegisterCount(analysis);
+    
+    // ベクトル化の種類を選択
+    VectorizationStrategy strategy = SelectVectorizationStrategy(analysis, numRegisters);
+    
+    // 選択された戦略に基づいてループを変換
+    switch (strategy) {
+        case VectorizationStrategy::FullUnroll:
+            EmitFullyUnrolledLoop(loopNode, analysis, numRegisters);
+            break;
+            
+        case VectorizationStrategy::PartialUnroll:
+            EmitPartiallyUnrolledLoop(loopNode, analysis, numRegisters);
+            break;
+            
+        case VectorizationStrategy::Pipelined:
+            EmitPipelinedLoop(loopNode, analysis, numRegisters);
+            break;
+            
+        case VectorizationStrategy::SVE:
+            if (m_features.HasSVE()) {
+                EmitSVELoop(loopNode, analysis);
+            } else {
+                EmitNeonLoop(loopNode, analysis, numRegisters);
+            }
+            break;
+            
+        case VectorizationStrategy::Neon:
+        default:
+            EmitNeonLoop(loopNode, analysis, numRegisters);
+            break;
+    }
+    
+    // 最適化統計を更新
+    m_stats.numVectorizedLoops++;
+    m_stats.totalInstructionsSaved += analysis.EstimatedInstructionsSaved();
+}
+
+// Neon SIMDを使用したループ最適化の実装
+void ARM64SIMDProcessor::EmitNeonLoop(IRNode* loopNode, const LoopAnalysisResult& analysis, int numRegisters) {
+    // ループのコンポーネントを取得
+    auto* loop = static_cast<LoopNode*>(loopNode);
+    IRNode* init = loop->GetInit();
+    IRNode* condition = loop->GetCondition();
+    IRNode* update = loop->GetUpdate();
+    IRNode* body = loop->GetBody();
+    
+    // ループの境界を取得
+    int64_t lowerBound = analysis.GetLowerBound();
+    int64_t upperBound = analysis.GetUpperBound();
+    int64_t stride = analysis.GetStride();
+    
+    // 要素タイプとSIMDレーンサイズに基づいてベクトル長を決定
+    int vectorLength = GetVectorLengthForType(analysis.GetElementType());
+    
+    // プリアンブルの発行（ベクトル処理の前のループ反復）
+    EmitLoopPreamble(loopNode, analysis, lowerBound, vectorLength);
+    
+    // メインベクトルループの発行
+    int64_t mainLoopStart = RoundUpToMultiple(lowerBound, vectorLength);
+    int64_t mainLoopEnd = upperBound - (upperBound - mainLoopStart) % (vectorLength * numRegisters);
+    
+    EmitVectorMainLoop(loopNode, analysis, mainLoopStart, mainLoopEnd, vectorLength, numRegisters);
+    
+    // ループエピローグの発行（残りの反復）
+    EmitLoopEpilogue(loopNode, analysis, mainLoopEnd, upperBound);
+}
+
+// SVE SIMDを使用したループ最適化の実装
+void ARM64SIMDProcessor::EmitSVELoop(IRNode* loopNode, const LoopAnalysisResult& analysis) {
+    // SVEのベクトル長は実行時に決定されるため、動的なコード生成が必要
+    auto* loop = static_cast<LoopNode*>(loopNode);
+    IRNode* body = loop->GetBody();
+    
+    // ループの境界を取得
+    int64_t lowerBound = analysis.GetLowerBound();
+    int64_t upperBound = analysis.GetUpperBound();
+    int64_t stride = analysis.GetStride();
+    
+    // 挿入点を作成
+    m_assembler.MakeInsertionPointAfter(loopNode);
+    
+    // SVEレジスタを割り当て
+    SVEPRegister pReg = m_assembler.AllocatePRegister();
+    SVEZRegister zAccumReg = m_assembler.AllocateZRegister();
+    SVEZRegister zIndexReg = m_assembler.AllocateZRegister();
+    
+    // カウンターレジスタを取得
+    Register counterReg = analysis.GetInductionRegister();
+    
+    // ループの初期設定
+    m_assembler.EmitMovImm(counterReg, lowerBound);
+    
+    // SVEプレディケートレジスタの設定
+    // (インデックス + 0,1,2,...) < 上限 を満たす要素をマーク
+    m_assembler.EmitSVEWhileLoCondition(pReg, counterReg, upperBound);
+    
+    // インデックスの初期化（0, 1, 2, ...）
+    m_assembler.EmitSVEIndex(zIndexReg, counterReg, stride);
+    
+    // アキュムレータを初期化（操作によって異なる）
+    if (analysis.GetOperationType() == LoopOperationType::Summation) {
+        m_assembler.EmitSVEDup(zAccumReg, 0);
+    } else if (analysis.GetOperationType() == LoopOperationType::Product) {
+        m_assembler.EmitSVEDup(zAccumReg, 1);
+    }
+    
+    // SVEループラベルを生成
+    Label sveLoopLabel = m_assembler.CreateLabel("sve_loop");
+    m_assembler.EmitBindLabel(sveLoopLabel);
+    
+    // SVEベクトル操作の生成
+    GenerateSVEVectorOperation(body, analysis, pReg, zAccumReg, zIndexReg);
+    
+    // インデックスを更新
+    m_assembler.EmitSVEAddVectorLength(zIndexReg, zIndexReg);
+    m_assembler.EmitAddImm(counterReg, counterReg, m_assembler.GetSVEVectorLength());
+    
+    // ループ条件の更新
+    m_assembler.EmitSVEWhileLoCondition(pReg, counterReg, upperBound);
+    
+    // プレディケートがまだアクティブかチェック
+    m_assembler.EmitSVEPTest(pReg);
+    m_assembler.EmitBranchNonZero(m_assembler.CreateLabelRef(sveLoopLabel));
+    
+    // 結果の縮約処理（水平加算など）
+    if (analysis.NeedsReduction()) {
+        EmitSVEReduction(zAccumReg, analysis.GetOperationType(), analysis.GetResultRegister());
+    }
+}
+
+// 部分的にアンロールされたループの生成
+void ARM64SIMDProcessor::EmitPartiallyUnrolledLoop(IRNode* loopNode, const LoopAnalysisResult& analysis, int unrollFactor) {
+    // ループのコンポーネントを取得
+    auto* loop = static_cast<LoopNode*>(loopNode);
+    IRNode* init = loop->GetInit();
+    IRNode* condition = loop->GetCondition();
+    IRNode* update = loop->GetUpdate();
+    IRNode* body = loop->GetBody();
+    
+    // ループの境界を取得
+    int64_t lowerBound = analysis.GetLowerBound();
+    int64_t upperBound = analysis.GetUpperBound();
+    int64_t stride = analysis.GetStride();
+    
+    // ベクトル長を決定
+    int vectorLength = GetVectorLengthForType(analysis.GetElementType());
+    
+    // アンロールされたループの残りの部分を処理するためのループが必要かチェック
+    bool needsRemainder = (upperBound - lowerBound) % (unrollFactor * stride) != 0;
+    
+    // メインループの境界を計算
+    int64_t mainLoopEnd = upperBound;
+    if (needsRemainder) {
+        mainLoopEnd = upperBound - ((upperBound - lowerBound) % (unrollFactor * stride));
+    }
+    
+    // カウンターレジスタを取得
+    Register counterReg = analysis.GetInductionRegister();
+    
+    // カウンターの初期化
+    m_assembler.EmitMovImm(counterReg, lowerBound);
+    
+    // アンロールされたメインループのラベル
+    Label mainLoopLabel = m_assembler.CreateLabel("unrolled_main_loop");
+    Label mainLoopEnd_label = m_assembler.CreateLabel("unrolled_main_loop_end");
+    
+    // メインループの開始
+    m_assembler.EmitBindLabel(mainLoopLabel);
+    
+    // ループ条件をチェック
+    m_assembler.EmitCompareImm(counterReg, mainLoopEnd);
+    m_assembler.EmitBranchGreaterEqual(m_assembler.CreateLabelRef(mainLoopEnd_label));
+    
+    // アンロールされたループボディを生成
+    for (int i = 0; i < unrollFactor; i++) {
+        // オリジナルのループボディをクローン
+        IRNode* bodyClone = CloneIRNode(body);
+        
+        // インダクション変数の参照を置き換える
+        ReplaceInductionVariableReferences(bodyClone, counterReg, i * stride);
+        
+        // ボディーを発行
+        EmitIRNode(bodyClone);
+        
+        // 次の反復のためにカウンターを更新（最後の反復以外）
+        if (i < unrollFactor - 1) {
+            m_assembler.EmitAddImm(counterReg, counterReg, stride);
+        }
+    }
+    
+    // カウンターを更新（次のアンロールブロックへ）
+    m_assembler.EmitAddImm(counterReg, counterReg, stride);
+    
+    // ループバック
+    m_assembler.EmitBranch(m_assembler.CreateLabelRef(mainLoopLabel));
+    
+    // メインループの終了
+    m_assembler.EmitBindLabel(mainLoopEnd_label);
+    
+    // 残りの要素を処理（必要な場合）
+    if (needsRemainder) {
+        EmitLoopRemainder(loopNode, analysis, mainLoopEnd, upperBound);
+    }
+}
+
+// スカラループの残りの部分を処理
+void ARM64SIMDProcessor::EmitLoopRemainder(IRNode* loopNode, const LoopAnalysisResult& analysis, int64_t startBound, int64_t endBound) {
+    // ループのコンポーネントを取得
+    auto* loop = static_cast<LoopNode*>(loopNode);
+    IRNode* body = loop->GetBody();
+    
+    // カウンターレジスタを取得
+    Register counterReg = analysis.GetInductionRegister();
+    int64_t stride = analysis.GetStride();
+    
+    // 残りのループラベル
+    Label remainderLoopLabel = m_assembler.CreateLabel("remainder_loop");
+    Label remainderLoopEnd = m_assembler.CreateLabel("remainder_loop_end");
+    
+    // 残りのループを開始
+    m_assembler.EmitBindLabel(remainderLoopLabel);
+    
+    // ループ条件をチェック
+    m_assembler.EmitCompareImm(counterReg, endBound);
+    m_assembler.EmitBranchGreaterEqual(m_assembler.CreateLabelRef(remainderLoopEnd));
+    
+    // ボディを発行
+    EmitIRNode(body);
+    
+    // カウンターを更新
+    m_assembler.EmitAddImm(counterReg, counterReg, stride);
+    
+    // ループバック
+    m_assembler.EmitBranch(m_assembler.CreateLabelRef(remainderLoopLabel));
+    
+    // 残りのループの終了
+    m_assembler.EmitBindLabel(remainderLoopEnd);
+}
+
+// データ型に基づいてベクトル長を決定
+int ARM64SIMDProcessor::GetVectorLengthForType(DataType type) {
+    switch (type) {
+        case DataType::Int8:
+        case DataType::UInt8:
+            return 16;  // 128ビット / 8ビット = 16レーン
+            
+        case DataType::Int16:
+        case DataType::UInt16:
+            return 8;   // 128ビット / 16ビット = 8レーン
+            
+        case DataType::Int32:
+        case DataType::UInt32:
+        case DataType::Float32:
+            return 4;   // 128ビット / 32ビット = 4レーン
+            
+        case DataType::Int64:
+        case DataType::UInt64:
+        case DataType::Float64:
+            return 2;   // 128ビット / 64ビット = 2レーン
+            
+        default:
+            return 1;   // 不明な型の場合、安全のためにスカラとして扱う
+    }
+}
+
+// 整数を指定された値の倍数に切り上げる
+int64_t ARM64SIMDProcessor::RoundUpToMultiple(int64_t value, int64_t multiple) {
+    return ((value + multiple - 1) / multiple) * multiple;
+}
+
+// SVEベクトル操作を生成
+void ARM64SIMDProcessor::GenerateSVEVectorOperation(IRNode* bodyNode, const LoopAnalysisResult& analysis,
+                                                  SVEPRegister predReg, SVEZRegister accumReg, SVEZRegister indexReg) {
+    // ボディのノードタイプに基づいて異なる操作を生成
+    switch (bodyNode->GetType()) {
+        case IRNodeType::BinaryOp: {
+            auto* binOp = static_cast<BinaryOpNode*>(bodyNode);
+            BinaryOpType opType = binOp->GetOpType();
+            
+            // メモリ操作のソースアドレスを取得
+            IRNode* lhs = binOp->GetLHS();
+            IRNode* rhs = binOp->GetRHS();
+            
+            // 配列アクセスの場合
+            if (IsArrayAccess(lhs) && IsInductionVariableDependent(rhs, analysis)) {
+                Register arrayReg = GetAddressRegisterForNode(lhs);
+                SVEZRegister dataReg = m_assembler.AllocateZRegister();
+                
+                // 配列からデータをロード
+                m_assembler.EmitSVELoad(dataReg, predReg, arrayReg, indexReg);
+                
+                // 操作の種類に基づいて計算を実行
+                switch (opType) {
+                    case BinaryOpType::Add:
+                        m_assembler.EmitSVEAdd(accumReg, predReg, accumReg, dataReg);
+                        break;
+                        
+                    case BinaryOpType::Multiply:
+                        m_assembler.EmitSVEMul(accumReg, predReg, accumReg, dataReg);
+                        break;
+                        
+                    case BinaryOpType::Maximum:
+                        m_assembler.EmitSVEMax(accumReg, predReg, accumReg, dataReg);
+                        break;
+                        
+                    case BinaryOpType::Minimum:
+                        m_assembler.EmitSVEMin(accumReg, predReg, accumReg, dataReg);
+                        break;
+                        
+                    // 他の操作も同様に実装
+                    default:
+                        m_logger.Error("サポートされていないベクトル操作タイプ: " + std::to_string(static_cast<int>(opType)));
+                        break;
+                }
+            }
+            // 他のパターンも同様に処理
+            break;
+        }
+        
+        // 他のノードタイプも同様に処理
+        case IRNodeType::StoreOp: {
+            auto* storeOp = static_cast<StoreOpNode*>(bodyNode);
+            IRNode* addr = storeOp->GetAddress();
+            IRNode* value = storeOp->GetValue();
+            
+            if (IsArrayAccess(addr) && IsVectorizableValue(value, analysis)) {
+                Register arrayReg = GetAddressRegisterForNode(addr);
+                SVEZRegister valueReg = LoadValueToSVERegister(value, predReg);
+                
+                // 配列にデータを保存
+                m_assembler.EmitSVEStore(valueReg, predReg, arrayReg, indexReg);
+            }
+            break;
+        }
+        
+        // 複合ノードの場合は再帰的に処理
+        case IRNodeType::Block: {
+            auto* block = static_cast<BlockNode*>(bodyNode);
+            for (auto& stmt : block->GetStatements()) {
+                GenerateSVEVectorOperation(stmt, analysis, predReg, accumReg, indexReg);
+            }
+            break;
+        }
+        
+        default:
+            m_logger.Error("サポートされていないノードタイプ: " + std::to_string(static_cast<int>(bodyNode->GetType())));
+            break;
+    }
+}
+
+// SVE縮約操作を生成（水平加算など）
+void ARM64SIMDProcessor::EmitSVEReduction(SVEZRegister dataReg, LoopOperationType opType, Register destReg) {
+    switch (opType) {
+        case LoopOperationType::Summation:
+            m_assembler.EmitSVEAddv(destReg, dataReg);
+            break;
+            
+        case LoopOperationType::Product:
+            m_assembler.EmitSVEMulv(destReg, dataReg);
+            break;
+            
+        case LoopOperationType::Maximum:
+            m_assembler.EmitSVEMaxv(destReg, dataReg);
+            break;
+            
+        case LoopOperationType::Minimum:
+            m_assembler.EmitSVEMinv(destReg, dataReg);
+            break;
+            
+        default:
+            m_logger.Error("サポートされていない縮約操作タイプ: " + std::to_string(static_cast<int>(opType)));
+            break;
+    }
+}
+
 } // namespace core
 } // namespace aerojs 

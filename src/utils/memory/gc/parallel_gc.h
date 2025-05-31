@@ -131,6 +131,15 @@ struct ParallelGCStats : public GCStats {
   size_t cardTableUpdates = 0;                 // カードテーブル更新数
   size_t rememberSetEntries = 0;               // 記憶セットエントリ数
   
+  // GCカウント統計
+  size_t minorGCCount = 0;                     // マイナーGC実行回数
+  size_t mediumGCCount = 0;                    // ミディアムGC実行回数
+  size_t majorGCCount = 0;                     // メジャーGC実行回数
+  uint64_t totalMinorGCTimeMs = 0;             // マイナーGC合計時間
+  uint64_t totalMediumGCTimeMs = 0;            // ミディアムGC合計時間
+  uint64_t totalMajorGCTimeMs = 0;             // メジャーGC合計時間
+  size_t promotionCount = 0;                   // オブジェクト昇格回数
+  
   // 世代別統計
   std::array<size_t, 5> generationObjectCount = {0}; // 世代別オブジェクト数
   std::array<size_t, 5> generationByteSize = {0};    // 世代別バイトサイズ
@@ -233,7 +242,7 @@ public:
   T* allocateLarge(Args&&... args);
   
   // 値の記録（書き込みバリア）
-  void writeBarrier(GCCell* object, const core::runtime::Value& value);
+  void writeBarrier(GCCell* object, const aerojs::core::runtime::Value& value);
   void writeBarrier(GCCell* parent, GCCell* child);
   
   // GC実行
@@ -288,6 +297,7 @@ private:
   void mark(GCCell* root);
   void updateReferences(GCCell* oldPtr, GCCell* newPtr);
   void processMarkingWorkQueue(int threadId);
+  bool stealWork(int threadId, GCCell*& cell);
   
   // メモリ管理
   void* allocateRaw(size_t size, ExtendedGeneration gen);

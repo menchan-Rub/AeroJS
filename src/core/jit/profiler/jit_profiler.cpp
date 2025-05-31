@@ -43,7 +43,7 @@ void JITProfiler::recordCall(uint64_t functionId) {
     profile.callCount++;
 }
 
-void JITProfiler::recordType(uint64_t functionId, uint64_t nodeId, uint32_t type) {
+void JITProfiler::recordType(uint64_t functionId, uint64_t nodeId, uint32_t type, Value* value) {
     std::lock_guard<std::mutex> lock(_profileMutex);
     auto& profile = getOrCreateProfile(functionId);
     
@@ -71,13 +71,26 @@ void JITProfiler::recordType(uint64_t functionId, uint64_t nodeId, uint32_t type
     }
     
     // 特殊な値の処理
-    bool isNaN = (type == static_cast<uint32_t>(ValueTypeId::Double)) && 
-                 // NaN検出ロジック（実際の実装に依存）
-                 false; // 仮の値
-                 
-    bool isNegativeZero = (type == static_cast<uint32_t>(ValueTypeId::Double)) && 
-                          // -0検出ロジック（実際の実装に依存）
-                          false; // 仮の値
+    bool isNaN = false;
+    bool isNegativeZero = false;
+    
+    if (value && type == static_cast<uint32_t>(ValueTypeId::Double)) {
+        // Double型の場合、ビット表現を使用してNaNと-0を検出
+        double doubleValue = value->asDouble();
+        
+        // NaNのチェック
+        if (std::isnan(doubleValue)) {
+            return ValueProfile::NaN;
+        }
+        
+        // -0のチェック（IEEE 754準拠）
+        if (doubleValue == 0.0 && std::signbit(doubleValue)) {
+            return ValueProfile::NegativeZero;
+        }
+        
+        // 通常のDouble値
+        return ValueProfile::Double;
+    }
     
     if (isNaN) {
         observation.hasNaN = true;
@@ -107,7 +120,33 @@ void JITProfiler::recordShape(uint64_t functionId, uint64_t nodeId, uint64_t sha
         observation.uniqueShapes++;
         observation.isMonomorphic = false;
         
-        // より頻繁な形状に更新（単純化のため、このロジックは省略）
+        // より頻繁な形状に更新（完全実装）
+        // 形状の使用頻度を追跡し、最も頻繁に使用される形状を特定
+        auto& shapeFrequency = observation.shapeFrequencies;
+        shapeFrequency[shapeId]++;
+        
+        // 最も頻繁な形状を更新
+        uint64_t maxCount = 0;
+        uint64_t mostFrequentShape = observation.mostFrequentShape;
+        
+        for (const auto& [shape, count] : shapeFrequency) {
+            if (count > maxCount) {
+                maxCount = count;
+                mostFrequentShape = shape;
+            }
+        }
+        
+        observation.mostFrequentShape = mostFrequentShape;
+        
+        // 信頼度を再計算（最も頻繁な形状の割合）
+        uint64_t totalObservations = observation.observationCount;
+        if (totalObservations > 0) {
+            observation.confidence = static_cast<float>(maxCount) / totalObservations;
+        }
+        
+        // モノモーフィック性の判定を更新
+        observation.isMonomorphic = (observation.uniqueShapes == 1) || 
+                                   (observation.confidence >= 0.95f);
     }
 }
 
@@ -279,8 +318,8 @@ void JITProfiler::resetProfileData(uint64_t functionId) {
     // 関連する呼び出しサイト情報もクリア
     _callSites.erase(functionId);
     
-    // ホットノードからもクリア
-    // （実際には全ノードを走査する必要があるかもしれないが、簡略化のため省略）
+    // _profiles.erase(functionId) により、次回の analyzeProfiles() 時に
+    // この関数のノードは _hotNodes に含まれなくなります。
 }
 
 void JITProfiler::resetAllProfiles() {

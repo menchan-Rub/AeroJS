@@ -18,6 +18,7 @@
 #include <openssl/sha.h>
 #include <random>
 #include <sstream>
+#include <nlohmann/json-schema.hpp>
 
 namespace aero {
 namespace mcp {
@@ -41,77 +42,15 @@ SchemaValidationResult SchemaValidator::validate(const std::string& data) const 
 }
 
 SchemaValidationResult SchemaValidator::validate(const nlohmann::json& data) const {
-  // 簡易的なスキーマ検証の実装
-  // 注: 実際の実装では、完全なJSON Schemaバリデーションライブラリを使用することを推奨
-
-  // ここでは基本的な型チェックのみを行う
-  if (m_schema.contains("type")) {
-    std::string schemaType = m_schema["type"];
-    bool valid = false;
-
-    if (schemaType == "object" && data.is_object()) {
-      valid = true;
-
-      // requiredフィールドのチェック
-      if (m_schema.contains("required") && m_schema["required"].is_array()) {
-        for (const auto& requiredField : m_schema["required"]) {
-          if (!data.contains(requiredField)) {
-            return {false, "Missing required field", requiredField};
-          }
-        }
-      }
-
-      // propertiesのチェック
-      if (m_schema.contains("properties") && m_schema["properties"].is_object()) {
-        for (const auto& [propName, propSchema] : m_schema["properties"].items()) {
-          if (data.contains(propName)) {
-            // プロパティの存在を確認、型チェックなど
-            if (propSchema.contains("type")) {
-              std::string propType = propSchema["type"];
-              if (propType == "string" && !data[propName].is_string()) {
-                return {false, "Property type mismatch", propName};
-              } else if (propType == "number" && !data[propName].is_number()) {
-                return {false, "Property type mismatch", propName};
-              } else if (propType == "boolean" && !data[propName].is_boolean()) {
-                return {false, "Property type mismatch", propName};
-              } else if (propType == "array" && !data[propName].is_array()) {
-                return {false, "Property type mismatch", propName};
-              } else if (propType == "object" && !data[propName].is_object()) {
-                return {false, "Property type mismatch", propName};
-              }
-            }
-          }
-        }
-      }
-    } else if (schemaType == "array" && data.is_array()) {
-      valid = true;
-
-      // items チェック
-      if (m_schema.contains("items") && m_schema["items"].is_object() && !data.empty()) {
-        for (size_t i = 0; i < data.size(); ++i) {
-          auto subValidator = SchemaValidator(m_schema["items"].dump());
-          auto subResult = subValidator.validate(data[i]);
-          if (!subResult.valid) {
-            return {false, "Item validation failed: " + subResult.errorMessage, "items[" + std::to_string(i) + "]." + subResult.errorPath};
-          }
-        }
-      }
-    } else if (schemaType == "string" && data.is_string()) {
-      valid = true;
-    } else if (schemaType == "number" && data.is_number()) {
-      valid = true;
-    } else if (schemaType == "boolean" && data.is_boolean()) {
-      valid = true;
-    } else if (schemaType == "null" && data.is_null()) {
-      valid = true;
-    }
-
-    if (!valid) {
-      return {false, "Type mismatch: expected " + schemaType, ""};
-    }
+  // JSON Schemaバリデーションは外部ライブラリと連携した本格実装
+  nlohmann::json_schema::json_validator validator;
+  validator.set_root_schema(m_schema);
+  try {
+    validator.validate(data);
+    return {true, "", ""};
+  } catch (const std::exception& e) {
+    return {false, "Validation failed: " + std::string(e.what()), ""};
   }
-
-  return {true, "", ""};
 }
 
 // ツール登録ヘルパー

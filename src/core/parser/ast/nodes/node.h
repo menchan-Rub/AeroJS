@@ -22,8 +22,7 @@
  * - パフォーマンス: 仮想関数の使用は最小限に、メモリ効率を考慮
  */
 
-#ifndef AEROJS_PARSER_AST_NODES_NODE_H
-#define AEROJS_PARSER_AST_NODES_NODE_H
+#pragma once
 
 #include <cstdint>
 #include <memory>                 // std::unique_ptr, std::shared_ptr (将来的に必要であれば) のため
@@ -460,5 +459,3 @@ inline bool isPattern(NodeType type) {
 }  // namespace parser
 }  // namespace core
 }  // namespace aerojs
-
-#endif  // AEROJS_PARSER_AST_NODES_NODE_H

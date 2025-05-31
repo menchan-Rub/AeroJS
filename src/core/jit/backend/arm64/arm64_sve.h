@@ -274,6 +274,22 @@ public:
      * @param elementSize 要素サイズ
      */
     static void emitGetVectorLength(std::vector<uint8_t>& out, int xd, ElementSize elementSize);
+    
+    /**
+     * @brief ARM64 8ビット浮動小数点即値エンコーディング
+     * 
+     * @param bits IEEE 754倍精度浮動小数点のビット表現
+     * @return 8ビットエンコードされた即値
+     */
+    static uint8_t encodeFloatingPointImmediate(uint64_t bits);
+    
+    /**
+     * @brief ARM64 8ビット即値から倍精度浮動小数点への逆変換
+     * 
+     * @param imm8 8ビットエンコードされた即値
+     * @return IEEE 754倍精度浮動小数点のビット表現
+     */
+    static uint64_t decodeFloatingPointImmediate(uint8_t imm8);
 };
 
 } // namespace core

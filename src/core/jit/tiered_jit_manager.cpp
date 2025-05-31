@@ -1,30 +1,49 @@
 #include "tiered_jit_manager.h"
 #include <chrono>
 #include <sstream>
-#include "backend/x86_64/jit_x86_64.h"
-#include "optimizing/constant_folding.h"
 
-// アーキテクチャ検出マクロ
+// このファイルに必要なヘッダーをグループ化
+#include "jit_context.h"
+#include "jit_optimizer.h"
+#include "baseline/baseline_jit.h"
+#include "optimizing/optimizing_jit.h"
+#include "ir/ir_function.h" // IRFunction の定義
+#include "ir/ir_optimizer.h"
+#include "ir/constant_folding.h"
+#include "bytecode/bytecode_parser.h" // BytecodeParser のヘッダー
+#include "profiler/profiler.h"
+#include "jit_compile_options.h"
+#include "code_cache.h" // CodeCache のヘッダーをインクルード
+
+// アーキテクチャ固有ヘッダー
 #if defined(__x86_64__) || defined(_M_X64)
 #define AEROJS_ARCH_X86_64 1
+#include "backend/x86_64/jit_x86_64.h"
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #define AEROJS_ARCH_ARM64 1
+// #include "backend/arm64/jit_arm64.h" // 対応する場合にコメント解除
 #elif defined(__riscv)
 #define AEROJS_ARCH_RISCV 1
+// #include "backend/riscv/jit_riscv.h" // 対応する場合にコメント解除
 #else
 #define AEROJS_ARCH_UNKNOWN 1
 #endif
 
 namespace aerojs::core {
 
+// Context の前方宣言 (ヘッダで行うのが望ましいが、cpp内で行う場合)
+class Context; 
+
 TieredJITManager::TieredJITManager()
     : m_baselineJIT(nullptr)
     , m_optimizedJIT(nullptr)
     , m_superOptimizedJIT(nullptr)
     , m_profiler(nullptr)
+    , m_codeCache(nullptr) // m_codeCache を初期化
     , m_tieredCompilationEnabled(true)
     , m_tierUpThreshold(1000)
     , m_tierDownThreshold(5)
+    // m_bytecodeStore はデフォルトコンストラクタで初期化される
 {
 }
 
@@ -32,7 +51,11 @@ TieredJITManager::~TieredJITManager() {
     Shutdown();
 }
 
-bool TieredJITManager::Initialize() {
+bool TieredJITManager::Initialize(Context* ctx) {
+    // CodeCache を初期化
+    // CodeCacheConfig はデフォルトコンストラクタで良いか、別途設定が必要か確認
+    m_codeCache = std::make_unique<CodeCache>(ctx, CodeCacheConfig());
+
     // 各JITコンパイラの初期化
     m_baselineJIT = std::make_unique<BaselineJIT>();
     m_baselineJIT->EnableProfiling(true);
@@ -178,7 +201,7 @@ bool TieredJITManager::Initialize() {
     
     // プロファイラを初期化
     m_profiler = std::make_unique<JITProfiler>();
-    return m_profiler->Initialize();
+    return m_profiler->Initialize() && m_codeCache != nullptr; // m_codeCache の初期化成功も確認
 }
 
 void TieredJITManager::Shutdown() {
@@ -186,6 +209,11 @@ void TieredJITManager::Shutdown() {
         m_profiler->Shutdown();
     }
     
+    // m_codeCache の解放処理 (unique_ptr により自動でデストラクタが呼ばれるが明示的にresetも可能)
+    if (m_codeCache) {
+        m_codeCache.reset(); 
+    }
+
     // 関数状態のクリーンアップ
     std::lock_guard<std::mutex> lock(m_stateMutex);
     m_functionStates.clear();
@@ -193,6 +221,12 @@ void TieredJITManager::Shutdown() {
 
 uint32_t TieredJITManager::CompileFunction(uint32_t functionId, const std::vector<uint8_t>& bytecodes, JITTier tier) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
+    
+    // バイトコードを保存 (TriggerTierUpCompilation で使用するため)
+    // 本来はBytecodeModuleなどを管理する専用のマネージャがあるべき
+    if (m_bytecodeStore.find(functionId) == m_bytecodeStore.end()) {
+        m_bytecodeStore[functionId] = bytecodes;
+    }
     
     // 関数の実行状態を取得または作成
     auto* state = GetOrCreateFunctionState(functionId);
@@ -217,28 +251,17 @@ uint32_t TieredJITManager::CompileFunction(uint32_t functionId, const std::vecto
     }
     
     // IRFunctionを生成（バイトコードパーサーから）
-    std::unique_ptr<IRFunction> irFunction = std::make_unique<IRFunction>();
+    std::unique_ptr<IRFunction> irFunction; // ここで宣言のみ
     
     // バイトコードをIRに変換する処理
-    // この部分はバイトコードフォーマットに依存するため、実際の実装では
-    // BytecodeParserクラスなどを使用することになる
-    
-    // 今回は仮の実装として簡単なIR関数を作成
-    IRInstruction loadConst1;
-    loadConst1.opcode = Opcode::kLoadConst;
-    loadConst1.args = {0, 42}; // レジスタ0に値42をロード
-    
-    IRInstruction loadConst2;
-    loadConst2.opcode = Opcode::kLoadConst;
-    loadConst2.args = {1, 58}; // レジスタ1に値58をロード
-    
-    IRInstruction add;
-    add.opcode = Opcode::kAdd;
-    add.args = {2, 0, 1}; // レジスタ2 = レジスタ0 + レジスタ1
-    
-    irFunction->AddInstruction(loadConst1);
-    irFunction->AddInstruction(loadConst2);
-    irFunction->AddInstruction(add);
+    BytecodeParser parser(bytecodes.data(), bytecodes.size());
+    irFunction = parser.Parse(functionId); // parser.Parse が std::unique_ptr<IRFunction> を返すと仮定
+    if (!irFunction) {
+        // パース失敗
+        // エラーログなどを追加すると良い
+        state->isCompiling = false;
+        return 0;
+    }
     
     // 定数畳み込み最適化パスを実行
     if (tier >= JITTier::Optimized) {
@@ -273,15 +296,37 @@ uint32_t TieredJITManager::CompileFunction(uint32_t functionId, const std::vecto
         
         // バイトコードから直接コンパイルする
         size_t codeSize = 0;
-        auto code = m_baselineJIT->Compile(bytecodes, codeSize);
+        auto generated_code = m_baselineJIT->Compile(bytecodes, codeSize);
         
-        // 実際の実装では、生成したコードをメモリマネージャに登録する
-        // ここでは単純に仮想的なエントリポイントとして関数IDを使用
-        if (code) {
-            uint32_t entryPoint = functionId * 1000 + static_cast<uint32_t>(tier);
-            UpdateFunctionState(functionId, tier, entryPoint, static_cast<uint32_t>(codeSize));
-            state->isCompiling = false;
-            return entryPoint;
+        // 生成コードをメモリマネージャへ登録する本格実装
+        if (generated_code && codeSize > 0 && m_codeCache) {
+            void* executableMemory = m_memoryManager->allocateExecutableMemory(codeSize);
+            if (!executableMemory) {
+                std::cerr << "Error: Failed to allocate executable memory for functionId: " << functionId << std::endl;
+                state->isCompiling = false;
+                return 0;
+            }
+            std::memcpy(executableMemory, generated_code.get(), codeSize);
+            if (!m_memoryManager->protectMemory(executableMemory, codeSize, MemoryProtection::ReadExecute)) {
+                std::cerr << "Error: Failed to set memory protection for functionId: " << functionId << std::endl;
+                m_memoryManager->freeMemory(executableMemory);
+                state->isCompiling = false;
+                return 0;
+            }
+            m_memoryManager->flushInstructionCache(executableMemory, codeSize);
+            if (!m_codeCache->registerCode(functionId, executableMemory, codeSize, tier)) {
+                std::cerr << "Error: Failed to register code in cache for functionId: " << functionId << std::endl;
+                m_memoryManager->freeMemory(executableMemory);
+                state->isCompiling = false;
+                return 0;
+            }
+            m_profiler->RecordCompilation(functionId, tier, codeSize);
+#ifdef AEROJS_DEBUG
+            if (m_debugInfoRegistry && m_baselineJIT->HasDebugInfo()) {
+                m_debugInfoRegistry->registerDebugInfo(functionId, tier, m_baselineJIT->GetDebugInfo());
+            }
+#endif
+            return executableMemory;
         }
     } else {
         // 最適化JITの場合、IRからコンパイルする
@@ -326,15 +371,7 @@ uint32_t TieredJITManager::CompileFunction(uint32_t functionId, const std::vecto
             
             codePtr = compiler->Compile(*irFunction, functionId);
             
-            if (codePtr) {
-                // 実際の実装では、生成したコードをメモリマネージャに登録する
-                // ここでは単純にポインタ値からエントリポイントを生成
-                uint32_t entryPoint = reinterpret_cast<uintptr_t>(codePtr) & 0xFFFFFFFF;
-                uint32_t codeSize = 0; // 実際のサイズは不明
-                
-                UpdateFunctionState(functionId, tier, entryPoint, codeSize);
-                state->isCompiling = false;
-                return entryPoint;
+            if (codePtr && m_codeCache) {                // コードサイズの取得                size_t compiledCodeSize = compiler->GetCompiledCodeSize(functionId);                                if (compiledCodeSize == 0) {                    std::cerr << "Error: Could not determine compiled code size for functionId: " << functionId << std::endl;                    return 0;                }                                // メタデータを取得                JITCodeMetadata metadata;                compiler->GetCodeMetadata(functionId, &metadata);                                // 最適化されたコンパイル結果をメモリマネージャに登録                void* executableMemory = m_memoryManager->allocateExecutableMemory(compiledCodeSize);                if (!executableMemory) {                    std::cerr << "Error: Failed to allocate executable memory for optimized code, functionId: " << functionId << std::endl;                    return 0;                }                                // コンパイラから生成されたコードをコピー                std::memcpy(executableMemory, codePtr, compiledCodeSize);                                // メモリプロテクションを設定（読み取り可能・実行可能）                if (!m_memoryManager->protectMemory(executableMemory, compiledCodeSize, MemoryProtection::ReadExecute)) {                    std::cerr << "Error: Failed to set memory protection for optimized code, functionId: " << functionId << std::endl;                    m_memoryManager->freeMemory(executableMemory);                    return 0;                }                                // 命令キャッシュをフラッシュして最適化                m_memoryManager->flushInstructionCache(executableMemory, compiledCodeSize);                                // コードキャッシュに登録                CodeCacheEntry entry;                entry.codePtr = executableMemory;                entry.codeSize = compiledCodeSize;                entry.functionId = functionId;                entry.timestamp = std::chrono::steady_clock::now();                entry.tier = tier;                entry.metadata = metadata;                                if (m_codeCache->registerCode(entry)) {                    // エントリーポイントを取得                    uint32_t entryPoint = reinterpret_cast<uintptr_t>(executableMemory);                                        // 関数状態を更新                    UpdateFunctionState(functionId, tier, entryPoint, static_cast<uint32_t>(compiledCodeSize));                                        // プロファイリング情報を更新                    m_profiler->RecordCompilation(functionId, tier, compiledCodeSize);                                        // デバッグ情報の登録（開発モードのみ）                    #ifdef AEROJS_DEBUG                    if (metadata.debugInfo) {                        m_debugInfoRegistry->registerDebugInfo(functionId, tier, metadata.debugInfo);                    }                    #endif                                        // コンパイル完了                    state->isCompiling = false;                    return entryPoint;                } else {                    // CodeCache への登録失敗                    std::cerr << "Error: Failed to register optimized code to cache for functionId: " << functionId << std::endl;                    m_memoryManager->freeMemory(executableMemory);                    return 0;                }
             }
         }
     }
@@ -353,26 +390,72 @@ void TieredJITManager::TriggerTierUpCompilation(uint32_t functionId, JITTier tar
     }
     
     // バイトコードを取得
-    // 実際の実装では、バイトコードマネージャなどから取得する
     std::vector<uint8_t> bytecodes;
-    
-    // 現在の実装では、バイトコード取得ロジックが実装されていないため、
-    // ダミーバイトコードを作成
-    bytecodes.resize(64, 0);
-    
-    // 非同期コンパイルを開始（実際の実装ではスレッドプールを使用）
-    state->isCompiling = true;
-    
-    // ここでは簡略化のため、同期的にコンパイルを実行
-    uint32_t newEntryPoint = CompileFunction(functionId, bytecodes, targetTier);
-    
-    if (newEntryPoint) {
-        // コンパイル成功
-        state->currentTier = targetTier;
-        state->entryPoint = newEntryPoint;
+    // バイトコードマネージャからバイトコードを取得
+    if (m_bytecodeManager) {
+        // バイトコードマネージャAPIを使用
+        BytecodeHandle handle = m_bytecodeManager->getBytecodeForFunction(functionId);
+        if (handle.isValid()) {
+            // バイトコードを取得
+            if (!m_bytecodeManager->getBytecodeData(handle, bytecodes)) {
+                std::cerr << "Error: Failed to get bytecode data for functionId: " << functionId << std::endl;
+                state->isCompiling = false;
+                return;
+            }
+        } else {
+            // ソースコードからバイトコードを生成する必要がある場合
+            if (m_functionRegistry) {
+                FunctionInfo* funcInfo = m_functionRegistry->getFunctionInfo(functionId);
+                if (funcInfo && funcInfo->sourceCode.length() > 0) {
+                    // ソースからバイトコードをコンパイル
+                    if (!m_bytecodeCompiler->compile(funcInfo->sourceCode, bytecodes)) {
+                        std::cerr << "Error: Failed to compile bytecode for functionId: " << functionId << std::endl;
+                        state->isCompiling = false;
+                        return;
+                    }
+                    
+                    // バイトコードをマネージャに登録
+                    BytecodeHandle newHandle = m_bytecodeManager->registerBytecode(bytecodes, functionId);
+                    if (!newHandle.isValid()) {
+                        std::cerr << "Warning: Failed to register new bytecode for functionId: " << functionId << std::endl;
+                    }
+                } else {
+                    std::cerr << "Error: No source code available for functionId: " << functionId << std::endl;
+                    state->isCompiling = false;
+                    return;
+                }
+            } else {
+                std::cerr << "Error: Function registry not available" << std::endl;
+                state->isCompiling = false;
+                return;
+            }
+        }
+    } else {
+        // フォールバック: ローカルストレージから取得
+        auto it = m_bytecodeStore.find(functionId);
+        if (it != m_bytecodeStore.end()) {
+            bytecodes = it->second;
+        } else {
+            // バイトコードが見つからない場合のエラー処理
+            std::cerr << "Error: Bytecode not found for functionId: " << functionId << std::endl;
+            state->isCompiling = false;
+            return;
+        }
     }
     
-    state->isCompiling = false;
+    // 非同期コンパイルを開始
+    state->isCompiling = true;
+    // スレッドプールでコンパイルを実行
+    if (m_compilerThreadPool) {
+        // タスクをスレッドプールに投入
+        std::function<void()> compileTask = [this, functionId, bytecodes, targetTier]() {
+            this->compileInBackground(functionId, bytecodes, targetTier);
+        };
+        m_compilerThreadPool->enqueue(compileTask);
+    } else {
+        // スレッドプールが利用できない場合は同期実行
+        compileInBackground(functionId, bytecodes, targetTier);
+    }
 }
 
 void TieredJITManager::TriggerTierDownCompilation(uint32_t functionId, JITTier targetTier, const std::string& reason) {
@@ -398,7 +481,16 @@ void TieredJITManager::TriggerTierDownCompilation(uint32_t functionId, JITTier t
         // 対象階層がコンパイル済みでない場合は再コンパイルが必要
         // バイトコードを取得
         std::vector<uint8_t> bytecodes;
-        bytecodes.resize(64, 0); // ダミーバイトコード
+        auto it = m_bytecodeStore.find(functionId);
+        if (it != m_bytecodeStore.end()) {
+            bytecodes = it->second;
+        } else {
+            // バイトコードが見つからない場合のエラー処理 (ログ出力など)
+            // ここではTier Downを中止 (あるいはInterpreterに戻すなど)
+            // std::cerr << "Error: Bytecode not found for functionId during TierDown: " << functionId << std::endl;
+            state->isCompiling = false; // isCompiling フラグをリセット
+            return;
+        }
         
         // 再コンパイル
         uint32_t newEntryPoint = CompileFunction(functionId, bytecodes, targetTier);
@@ -502,13 +594,22 @@ void TieredJITManager::InvalidateFunction(uint32_t functionId) {
     auto it = m_functionStates.find(functionId);
     if (it != m_functionStates.end()) {
         // 各階層のコンパイル済みコードを解放
-        for (const auto& [tier, tierState] : it->second.tierStates) {
-            if (tierState.isCompiled) {
+        for (auto& pair : it->second.tierStates) { // auto& pair に変更
+            JITTier tier = pair.first;
+            FunctionTierState& tierState = pair.second; // auto& tierState に変更
+
+            if (tierState.isCompiled && m_codeCache) {
                 JITCompiler* compiler = GetCompilerForTier(tier);
                 if (compiler) {
-                    // エントリポイントからコードポイントを復元（実際の実装に合わせる必要あり）
-                    void* codePtr = reinterpret_cast<void*>(static_cast<uintptr_t>(tierState.entryPoint));
-                    compiler->ReleaseCode(codePtr);
+                    // entryPoint (CodeEntry* のキャスト値) から CodeEntry を取得し、そこから codePtr を得る
+                    CodeEntry* codeEntry = reinterpret_cast<CodeEntry*>(static_cast<uintptr_t>(tierState.entryPoint));
+                    if (codeEntry) {
+                        void* codePtr = codeEntry->getCode(); // CodeEntry に getCode() があると仮定
+                        compiler->ReleaseCode(codePtr); // JITCompiler が解放処理を持つと仮定
+                        m_codeCache->removeEntry(codeEntry->getId()); // CodeCache からも削除
+                    } else {
+                        // codeEntry が null の場合、不正な entryPoint の可能性 (ログ等)
+                    }
                 }
             }
         }
@@ -531,14 +632,24 @@ void TieredJITManager::ResetAllCompilations() {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     
     // すべての関数のコンパイル済みコードを解放
-    for (auto& [functionId, state] : m_functionStates) {
-        for (const auto& [tier, tierState] : state.tierStates) {
-            if (tierState.isCompiled) {
+    for (auto& state_pair : m_functionStates) { // auto& state_pair に変更
+        FunctionExecutionState& state = state_pair.second; // auto& state に変更
+        for (auto& tier_pair : state.tierStates) { // auto& tier_pair に変更
+            JITTier tier = tier_pair.first;
+            FunctionTierState& tierState = tier_pair.second; // auto& tierState に変更
+
+            if (tierState.isCompiled && m_codeCache) {
                 JITCompiler* compiler = GetCompilerForTier(tier);
                 if (compiler) {
-                    // エントリポイントからコードポイントを復元（実際の実装に合わせる必要あり）
-                    void* codePtr = reinterpret_cast<void*>(static_cast<uintptr_t>(tierState.entryPoint));
-                    compiler->ReleaseCode(codePtr);
+                    // entryPoint (CodeEntry* のキャスト値) から CodeEntry を取得し、そこから codePtr を得る
+                    CodeEntry* codeEntry = reinterpret_cast<CodeEntry*>(static_cast<uintptr_t>(tierState.entryPoint));
+                    if (codeEntry) {
+                        void* codePtr = codeEntry->getCode(); // CodeEntry に getCode() があると仮定
+                        compiler->ReleaseCode(codePtr); // JITCompiler が解放処理を持つと仮定
+                        m_codeCache->removeEntry(codeEntry->getId()); // CodeCache からも削除
+                    } else {
+                        // codeEntry が null の場合、不正な entryPoint の可能性 (ログ等)
+                    }
                 }
             }
         }
