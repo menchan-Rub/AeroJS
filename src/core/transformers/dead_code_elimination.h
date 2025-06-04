@@ -98,7 +98,7 @@ class DeadCodeEliminationTransformer : public Transformer {  // public 継承を
   struct Statistics {
     size_t m_removedStatements = 0;      ///< 削除されたステートメント数 (m_ プレフィックス追加)
     size_t m_removedVariables = 0;       ///< 削除された変数宣言数 (m_ プレフィックス追加)
-    size_t m_simplifiedExpressions = 0;  ///< 簡略化された式の数 (m_ プレフィックス追加)
+    size_t m_optimizedExpressions = 0;   ///< 最適化された式の数（定数畳み込み、冗長除去等）
     size_t m_removedFunctions = 0;       ///< 削除された関数数 (m_ プレフィックス追加)
     size_t m_unreachableCodeBlocks = 0;  ///< 削除された到達不能コードブロック数 (m_ プレフィックス追加)
     size_t m_optimizedConditions = 0;    ///< 最適化された条件式数 (m_ プレフィックス追加)

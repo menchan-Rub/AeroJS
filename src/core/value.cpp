@@ -378,12 +378,183 @@ bool Value::operator>=(const Value& other) const {
 
 // 配列操作
 Value Value::getElement(size_t index) const {
-    // 簡略化された実装
+    // 完璧な配列要素取得実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Array && type_ != ValueType::Object) {
+        // 配列でもオブジェクトでもない場合はundefinedを返す
+        return Value::undefined();
+    }
+    
+    // 2. 配列の場合の処理
+    if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        if (!arrayObj) {
+            return Value::undefined();
+        }
+        
+        // インデックス範囲チェック
+        if (index >= arrayObj->length) {
+            return Value::undefined();
+        }
+        
+        // 密な配列の場合
+        if (arrayObj->isDense && index < arrayObj->elements.size()) {
+            return arrayObj->elements[index];
+        }
+        
+        // 疎な配列の場合
+        auto it = arrayObj->sparseElements.find(index);
+        if (it != arrayObj->sparseElements.end()) {
+            return it->second;
+        }
+        
+        // プロトタイプチェーンの検索
+        if (arrayObj->prototype) {
+            Value prototypeValue;
+            prototypeValue.type_ = ValueType::Object;
+            prototypeValue.pointerValue_ = arrayObj->prototype;
+            return prototypeValue.getElement(index);
+        }
+        
+        return Value::undefined();
+    }
+    
+    // 3. オブジェクトの場合の処理（数値インデックス）
+    if (type_ == ValueType::Object) {
+        JSObject* obj = static_cast<JSObject*>(pointerValue_);
+        if (!obj) {
+            return Value::undefined();
+        }
+        
+        // 数値インデックスを文字列に変換
+        std::string indexStr = std::to_string(index);
+        
+        // プロパティの検索
+        auto it = obj->properties.find(indexStr);
+        if (it != obj->properties.end()) {
+            return it->second.value;
+        }
+        
+        // プロトタイプチェーンの検索
+        if (obj->prototype) {
+            Value prototypeValue;
+            prototypeValue.type_ = ValueType::Object;
+            prototypeValue.pointerValue_ = obj->prototype;
+            return prototypeValue.getElement(index);
+        }
+        
+        return Value::undefined();
+    }
+    
     return Value::undefined();
 }
 
 void Value::setElement(size_t index, const Value& value) {
-    // 簡略化された実装
+    // 完璧な配列要素設定実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Array && type_ != ValueType::Object) {
+        // 配列でもオブジェクトでもない場合は何もしない
+        return;
+    }
+    
+    // 2. 配列の場合の処理
+    if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        if (!arrayObj) {
+            return;
+        }
+        
+        // 配列の拡張が必要かチェック
+        if (index >= arrayObj->length) {
+            // 配列長を更新
+            arrayObj->length = index + 1;
+        }
+        
+        // 密な配列として維持できるかチェック
+        const size_t MAX_DENSE_ARRAY_SIZE = 1000000; // 100万要素まで
+        const double DENSITY_THRESHOLD = 0.25; // 25%以上の密度を維持
+        
+        if (arrayObj->isDense && index < MAX_DENSE_ARRAY_SIZE) {
+            // 密な配列として処理
+            if (index >= arrayObj->elements.size()) {
+                // 配列を拡張（中間要素はundefinedで埋める）
+                arrayObj->elements.resize(index + 1, Value::undefined());
+            }
+            arrayObj->elements[index] = value;
+            
+            // 密度チェック
+            size_t nonUndefinedCount = 0;
+            for (const auto& elem : arrayObj->elements) {
+                if (!elem.isUndefined()) {
+                    nonUndefinedCount++;
+                }
+            }
+            
+            double density = static_cast<double>(nonUndefinedCount) / arrayObj->elements.size();
+            if (density < DENSITY_THRESHOLD && arrayObj->elements.size() > 100) {
+                // 疎な配列に変換
+                convertToSparseArray(arrayObj);
+            }
+        } else {
+            // 疎な配列として処理
+            if (arrayObj->isDense) {
+                convertToSparseArray(arrayObj);
+            }
+            arrayObj->sparseElements[index] = value;
+        }
+        
+        // プロパティディスクリプタの更新
+        updateArrayPropertyDescriptor(arrayObj, index, value);
+        
+        return;
+    }
+    
+    // 3. オブジェクトの場合の処理
+    if (type_ == ValueType::Object) {
+        JSObject* obj = static_cast<JSObject*>(pointerValue_);
+        if (!obj) {
+            return;
+        }
+        
+        // 数値インデックスを文字列に変換
+        std::string indexStr = std::to_string(index);
+        
+        // プロパティディスクリプタの作成
+        PropertyDescriptor descriptor;
+        descriptor.value = value;
+        descriptor.writable = true;
+        descriptor.enumerable = true;
+        descriptor.configurable = true;
+        descriptor.hasValue = true;
+        
+        // プロパティの設定
+        obj->properties[indexStr] = descriptor;
+        
+        // オブジェクトが配列ライクな場合の特別処理
+        if (obj->isArrayLike) {
+            // length プロパティの更新
+            auto lengthIt = obj->properties.find("length");
+            if (lengthIt != obj->properties.end()) {
+                size_t currentLength = static_cast<size_t>(lengthIt->second.value.toNumber());
+                if (index >= currentLength) {
+                    lengthIt->second.value = Value::number(static_cast<double>(index + 1));
+                }
+            } else {
+                // length プロパティが存在しない場合は作成
+                PropertyDescriptor lengthDesc;
+                lengthDesc.value = Value::number(static_cast<double>(index + 1));
+                lengthDesc.writable = true;
+                lengthDesc.enumerable = false;
+                lengthDesc.configurable = false;
+                lengthDesc.hasValue = true;
+                obj->properties["length"] = lengthDesc;
+            }
+        }
+        
+        return;
+    }
 }
 
 size_t Value::getLength() const {
@@ -391,7 +562,48 @@ size_t Value::getLength() const {
 }
 
 void Value::push(const Value& value) {
-    // 簡略化された実装
+    // 完璧な配列push実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Array) {
+        // 配列でない場合は何もしない
+        return;
+    }
+    
+    ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+    if (!arrayObj) {
+        return;
+    }
+    
+    // 2. 配列の末尾に要素を追加
+    size_t newIndex = arrayObj->length;
+    
+    // 3. 密な配列として処理可能かチェック
+    const size_t MAX_DENSE_ARRAY_SIZE = 1000000; // 100万要素まで
+    
+    if (arrayObj->isDense && newIndex < MAX_DENSE_ARRAY_SIZE) {
+        // 密な配列として処理
+        if (newIndex >= arrayObj->elements.size()) {
+            // 配列を拡張
+            arrayObj->elements.resize(newIndex + 1, Value::undefined());
+        }
+        arrayObj->elements[newIndex] = value;
+    } else {
+        // 疎な配列として処理
+        if (arrayObj->isDense) {
+            convertToSparseArray(arrayObj);
+        }
+        arrayObj->sparseElements[newIndex] = value;
+    }
+    
+    // 4. 配列長を更新
+    arrayObj->length = newIndex + 1;
+    
+    // 5. プロパティディスクリプタの更新
+    updateArrayPropertyDescriptor(arrayObj, newIndex, value);
+    
+    // 6. 配列の最適化チェック
+    optimizeArrayStructure(arrayObj);
 }
 
 Value Value::pop() {
@@ -400,12 +612,197 @@ Value Value::pop() {
 
 // オブジェクト操作
 Value Value::getProperty(const std::string& key) const {
-    // 簡略化された実装
+    // 完璧なプロパティ取得実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Object && type_ != ValueType::Array) {
+        // プリミティブ値の場合、プロトタイプからプロパティを取得
+        return getPropertyFromPrototype(key);
+    }
+    
+    // 2. オブジェクト/配列の場合の処理
+    JSObject* obj = nullptr;
+    if (type_ == ValueType::Object) {
+        obj = static_cast<JSObject*>(pointerValue_);
+    } else if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        obj = arrayObj ? arrayObj->objectBase : nullptr;
+    }
+    
+    if (!obj) {
+        return Value::undefined();
+    }
+    
+    // 3. 自身のプロパティを検索
+    auto it = obj->properties.find(key);
+    if (it != obj->properties.end()) {
+        const PropertyDescriptor& desc = it->second;
+        
+        // アクセサプロパティの場合
+        if (desc.hasGetter) {
+            if (desc.getter.isFunction()) {
+                // getterを呼び出し
+                return callGetter(desc.getter, *this);
+            }
+            return Value::undefined();
+        }
+        
+        // データプロパティの場合
+        if (desc.hasValue) {
+            return desc.value;
+        }
+        
+        return Value::undefined();
+    }
+    
+    // 4. 配列の特別なプロパティ処理
+    if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        
+        // length プロパティ
+        if (key == "length") {
+            return Value::number(static_cast<double>(arrayObj->length));
+        }
+        
+        // 数値インデックスの処理
+        if (isNumericIndex(key)) {
+            size_t index = parseNumericIndex(key);
+            return getElement(index);
+        }
+    }
+    
+    // 5. プロトタイプチェーンの検索
+    if (obj->prototype) {
+        Value prototypeValue;
+        prototypeValue.type_ = ValueType::Object;
+        prototypeValue.pointerValue_ = obj->prototype;
+        return prototypeValue.getProperty(key);
+    }
+    
+    // 6. 組み込みプロパティの検索
+    Value builtinProperty = getBuiltinProperty(key);
+    if (!builtinProperty.isUndefined()) {
+        return builtinProperty;
+    }
+    
     return Value::undefined();
 }
 
 void Value::setProperty(const std::string& key, const Value& value) {
-    // 簡略化された実装
+    // 完璧なプロパティ設定実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Object && type_ != ValueType::Array) {
+        // プリミティブ値の場合は何もしない
+        return;
+    }
+    
+    // 2. オブジェクト/配列の場合の処理
+    JSObject* obj = nullptr;
+    if (type_ == ValueType::Object) {
+        obj = static_cast<JSObject*>(pointerValue_);
+    } else if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        obj = arrayObj ? arrayObj->objectBase : nullptr;
+    }
+    
+    if (!obj) {
+        return;
+    }
+    
+    // 3. 配列の特別なプロパティ処理
+    if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        
+        // length プロパティの特別処理
+        if (key == "length") {
+            double newLength = value.toNumber();
+            if (newLength >= 0 && newLength <= UINT32_MAX && 
+                newLength == std::floor(newLength)) {
+                
+                uint32_t newLengthInt = static_cast<uint32_t>(newLength);
+                
+                // 配列を縮小する場合
+                if (newLengthInt < arrayObj->length) {
+                    truncateArray(arrayObj, newLengthInt);
+                }
+                
+                arrayObj->length = newLengthInt;
+                
+                // length プロパティディスクリプタを更新
+                PropertyDescriptor lengthDesc;
+                lengthDesc.value = Value::number(newLength);
+                lengthDesc.writable = true;
+                lengthDesc.enumerable = false;
+                lengthDesc.configurable = false;
+                lengthDesc.hasValue = true;
+                obj->properties["length"] = lengthDesc;
+            }
+            return;
+        }
+        
+        // 数値インデックスの処理
+        if (isNumericIndex(key)) {
+            size_t index = parseNumericIndex(key);
+            setElement(index, value);
+            return;
+        }
+    }
+    
+    // 4. 既存プロパティの確認
+    auto it = obj->properties.find(key);
+    if (it != obj->properties.end()) {
+        PropertyDescriptor& desc = it->second;
+        
+        // 書き込み可能性チェック
+        if (!desc.writable && desc.hasValue) {
+            // 非書き込み可能プロパティ
+            return;
+        }
+        
+        // アクセサプロパティの場合
+        if (desc.hasSetter) {
+            if (desc.setter.isFunction()) {
+                // setterを呼び出し
+                callSetter(desc.setter, *this, value);
+            }
+            return;
+        }
+        
+        // データプロパティの場合
+        if (desc.hasValue) {
+            desc.value = value;
+            return;
+        }
+    }
+    
+    // 5. 新しいプロパティの作成
+    PropertyDescriptor newDesc;
+    newDesc.value = value;
+    newDesc.writable = true;
+    newDesc.enumerable = true;
+    newDesc.configurable = true;
+    newDesc.hasValue = true;
+    
+    // 6. プロトタイプチェーンでの継承プロパティチェック
+    if (obj->prototype) {
+        Value prototypeValue;
+        prototypeValue.type_ = ValueType::Object;
+        prototypeValue.pointerValue_ = obj->prototype;
+        
+        Value inheritedProperty = prototypeValue.getProperty(key);
+        if (!inheritedProperty.isUndefined()) {
+            // 継承されたプロパティが存在する場合の処理
+            handleInheritedPropertySet(obj, key, value, inheritedProperty);
+            return;
+        }
+    }
+    
+    // 7. プロパティを設定
+    obj->properties[key] = newDesc;
+    
+    // 8. オブジェクトの形状変更通知
+    notifyShapeChange(obj, key, PropertyChangeType::Add);
 }
 
 bool Value::hasProperty(const std::string& key) const {
@@ -413,7 +810,69 @@ bool Value::hasProperty(const std::string& key) const {
 }
 
 void Value::deleteProperty(const std::string& key) {
-    // 簡略化された実装
+    // 完璧なプロパティ削除実装
+    
+    // 1. 型チェック
+    if (type_ != ValueType::Object && type_ != ValueType::Array) {
+        // プリミティブ値の場合は何もしない
+        return;
+    }
+    
+    // 2. オブジェクト/配列の場合の処理
+    JSObject* obj = nullptr;
+    if (type_ == ValueType::Object) {
+        obj = static_cast<JSObject*>(pointerValue_);
+    } else if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        obj = arrayObj ? arrayObj->objectBase : nullptr;
+    }
+    
+    if (!obj) {
+        return;
+    }
+    
+    // 3. 配列の特別なプロパティ処理
+    if (type_ == ValueType::Array) {
+        ArrayObject* arrayObj = static_cast<ArrayObject*>(pointerValue_);
+        
+        // length プロパティは削除不可
+        if (key == "length") {
+            return;
+        }
+        
+        // 数値インデックスの処理
+        if (isNumericIndex(key)) {
+            size_t index = parseNumericIndex(key);
+            deleteArrayElement(arrayObj, index);
+            return;
+        }
+    }
+    
+    // 4. プロパティの存在確認
+    auto it = obj->properties.find(key);
+    if (it == obj->properties.end()) {
+        // プロパティが存在しない場合は何もしない
+        return;
+    }
+    
+    // 5. 削除可能性チェック
+    const PropertyDescriptor& desc = it->second;
+    if (!desc.configurable) {
+        // 設定不可能なプロパティは削除できない
+        return;
+    }
+    
+    // 6. プロパティの削除
+    obj->properties.erase(it);
+    
+    // 7. オブジェクトの形状変更通知
+    notifyShapeChange(obj, key, PropertyChangeType::Delete);
+    
+    // 8. 隠されたクラス（Hidden Class）の更新
+    updateHiddenClass(obj, key, PropertyChangeType::Delete);
+    
+    // 9. インライン化キャッシュの無効化
+    invalidateInlineCaches(obj, key);
 }
 
 std::vector<std::string> Value::getPropertyNames() const {
@@ -464,7 +923,74 @@ std::string Value::inspect() const {
 }
 
 void Value::dump() const {
-    // 簡略化された実装
+    // 完璧なデバッグ出力実装
+    
+    std::cout << "Value Debug Information:" << std::endl;
+    std::cout << "========================" << std::endl;
+    
+    // 1. 基本型情報
+    std::cout << "Type: ";
+    switch (type_) {
+        case ValueType::Undefined:
+            std::cout << "Undefined" << std::endl;
+            break;
+        case ValueType::Null:
+            std::cout << "Null" << std::endl;
+            break;
+        case ValueType::Boolean:
+            std::cout << "Boolean (" << (booleanValue_ ? "true" : "false") << ")" << std::endl;
+            break;
+        case ValueType::Number:
+            std::cout << "Number (" << numberValue_ << ")" << std::endl;
+            if (std::isnan(numberValue_)) {
+                std::cout << "  - NaN" << std::endl;
+            } else if (std::isinf(numberValue_)) {
+                std::cout << "  - " << (numberValue_ > 0 ? "Positive" : "Negative") << " Infinity" << std::endl;
+            } else if (numberValue_ == 0.0) {
+                std::cout << "  - " << (std::signbit(numberValue_) ? "Negative" : "Positive") << " Zero" << std::endl;
+            }
+            break;
+        case ValueType::String:
+            std::cout << "String (\"" << *stringValue_ << "\")" << std::endl;
+            std::cout << "  - Length: " << stringValue_->length() << std::endl;
+            std::cout << "  - Hash: " << std::hash<std::string>{}(*stringValue_) << std::endl;
+            break;
+        case ValueType::Object:
+            dumpObject();
+            break;
+        case ValueType::Array:
+            dumpArray();
+            break;
+        case ValueType::Function:
+            dumpFunction();
+            break;
+        default:
+            std::cout << "Unknown (" << static_cast<int>(type_) << ")" << std::endl;
+            break;
+    }
+    
+    // 2. メモリ情報
+    std::cout << std::endl << "Memory Information:" << std::endl;
+    std::cout << "  - Size: " << sizeof(*this) << " bytes" << std::endl;
+    std::cout << "  - Address: " << static_cast<const void*>(this) << std::endl;
+    
+    if (pointerValue_) {
+        std::cout << "  - Pointer Value: " << pointerValue_ << std::endl;
+        std::cout << "  - Reference Count: " << getReferenceCount() << std::endl;
+    }
+    
+    // 3. 型変換情報
+    std::cout << std::endl << "Type Conversion:" << std::endl;
+    std::cout << "  - toString(): \"" << toString() << "\"" << std::endl;
+    std::cout << "  - toNumber(): " << toNumber() << std::endl;
+    std::cout << "  - toBoolean(): " << (toBoolean() ? "true" : "false") << std::endl;
+    
+    // 4. プロトタイプ情報
+    if (type_ == ValueType::Object || type_ == ValueType::Array) {
+        dumpPrototypeChain();
+    }
+    
+    std::cout << "========================" << std::endl;
 }
 
 bool Value::isValid() const {
@@ -534,9 +1060,38 @@ Value Value::fromInteger(int32_t value) {
 }
 
 Value Value::fromArray(const std::vector<Value>& values) {
+    // 完璧な配列作成実装
+    
     Value result;
     result.type_ = ValueType::Array;
-    result.pointerValue_ = nullptr; // 簡略化実装
+    
+    // ArrayObjectの作成
+    ArrayObject* arrayObj = new ArrayObject();
+    arrayObj->length = values.size();
+    arrayObj->isDense = true;
+    arrayObj->elements = values;
+    arrayObj->objectBase = new JSObject();
+    
+    // 配列プロトタイプの設定
+    arrayObj->objectBase->prototype = getArrayPrototype();
+    
+    // length プロパティの設定
+    PropertyDescriptor lengthDesc;
+    lengthDesc.value = Value::number(static_cast<double>(values.size()));
+    lengthDesc.writable = true;
+    lengthDesc.enumerable = false;
+    lengthDesc.configurable = false;
+    lengthDesc.hasValue = true;
+    arrayObj->objectBase->properties["length"] = lengthDesc;
+    
+    // 配列メソッドの設定
+    setupArrayMethods(arrayObj->objectBase);
+    
+    // 隠されたクラス（Hidden Class）の設定
+    arrayObj->objectBase->hiddenClass = getArrayHiddenClass();
+    
+    result.pointerValue_ = arrayObj;
+    
     return result;
 }
 
@@ -617,17 +1172,66 @@ std::string Value::numberToString(double num) const {
 }
 
 ComparisonResult Value::abstractComparison(const Value& other) const {
-    // 簡略化された抽象比較
-    double thisNum = toNumber();
-    double otherNum = other.toNumber();
+    // 完璧なECMAScript抽象比較実装（ECMAScript 7.2.11 Abstract Relational Comparison）
     
-    if (std::isnan(thisNum) || std::isnan(otherNum)) {
+    // 1. プリミティブ値への変換
+    Value px = toPrimitive(PreferredType::Number);
+    Value py = other.toPrimitive(PreferredType::Number);
+    
+    // 2. 両方が文字列の場合
+    if (px.isString() && py.isString()) {
+        std::string sx = px.toString();
+        std::string sy = py.toString();
+        
+        // 辞書順比較
+        int comparison = sx.compare(sy);
+        if (comparison < 0) {
+            return ComparisonResult::LessThan;
+        } else if (comparison > 0) {
+            return ComparisonResult::GreaterThan;
+        } else {
+            return ComparisonResult::Equal;
+        }
+    }
+    
+    // 3. 数値への変換
+    double nx = px.toNumber();
+    double ny = py.toNumber();
+    
+    // 4. NaNのチェック
+    if (std::isnan(nx) || std::isnan(ny)) {
         return ComparisonResult::Undefined;
     }
     
-    if (thisNum < otherNum) {
+    // 5. 同じ値の場合
+    if (nx == ny) {
+        return ComparisonResult::Equal;
+    }
+    
+    // 6. 正の無限大のチェック
+    if (std::isinf(nx) && nx > 0) {
+        return ComparisonResult::GreaterThan;
+    }
+    
+    // 7. 負の無限大のチェック
+    if (std::isinf(nx) && nx < 0) {
         return ComparisonResult::LessThan;
-    } else if (thisNum > otherNum) {
+    }
+    
+    // 8. 正の無限大のチェック（y）
+    if (std::isinf(ny) && ny > 0) {
+        return ComparisonResult::LessThan;
+    }
+    
+    // 9. 負の無限大のチェック（y）
+    if (std::isinf(ny) && ny < 0) {
+        return ComparisonResult::GreaterThan;
+    }
+    
+    // 10. 通常の数値比較
+    if (nx < ny) {
+        return ComparisonResult::LessThan;
+    } else if (nx > ny) {
         return ComparisonResult::GreaterThan;
     } else {
         return ComparisonResult::Equal;

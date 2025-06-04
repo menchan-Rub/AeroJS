@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 namespace aerojs {
 namespace utils {
@@ -231,6 +232,12 @@ public:
      */
     void removeRoot(void* root);
 
+    /**
+     * @brief 統計情報を取得
+     * @return GCStats 統計情報
+     */
+    GCStats getStats() const;
+
 private:
     MemoryAllocator* allocator_;
     MemoryPool* pool_;
@@ -241,7 +248,7 @@ private:
     std::unordered_set<void*> markedObjects_;
     mutable std::mutex rootsMutex_;
     
-    bool isRunning_;
+    std::atomic<bool> running_;
     size_t totalCollections_;
     uint64_t totalCollectionTime_;
     uint64_t lastCollectionTime_;

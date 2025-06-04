@@ -1,6 +1,6 @@
 /**
  * @file timer.cpp
- * @brief AeroJS タイマーユーティリティ実装
+ * @brief AeroJS タイマー実装
  * @version 0.1.0
  * @license MIT
  */
@@ -11,6 +11,7 @@ namespace aerojs {
 namespace utils {
 
 Timer::Timer() : isRunning_(false) {
+    reset();
 }
 
 Timer::~Timer() = default;
@@ -28,41 +29,48 @@ void Timer::stop() {
 }
 
 void Timer::reset() {
+    startTime_ = std::chrono::high_resolution_clock::now();
+    endTime_ = startTime_;
     isRunning_ = false;
-    startTime_ = std::chrono::high_resolution_clock::time_point{};
-    endTime_ = std::chrono::high_resolution_clock::time_point{};
 }
 
 uint64_t Timer::getElapsedNanoseconds() const {
     auto end = isRunning_ ? std::chrono::high_resolution_clock::now() : endTime_;
     auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - startTime_);
-    return static_cast<uint64_t>(duration.count());
+    return duration.count();
 }
 
 uint64_t Timer::getElapsedMicroseconds() const {
-    return getElapsedNanoseconds() / 1000;
+    auto end = isRunning_ ? std::chrono::high_resolution_clock::now() : endTime_;
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - startTime_);
+    return duration.count();
 }
 
 uint64_t Timer::getElapsedMilliseconds() const {
-    return getElapsedNanoseconds() / 1000000;
+    auto end = isRunning_ ? std::chrono::high_resolution_clock::now() : endTime_;
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - startTime_);
+    return duration.count();
 }
 
 double Timer::getElapsedSeconds() const {
-    return static_cast<double>(getElapsedNanoseconds()) / 1000000000.0;
+    auto end = isRunning_ ? std::chrono::high_resolution_clock::now() : endTime_;
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - startTime_);
+    return duration.count() / 1000000000.0;
 }
 
 uint64_t Timer::getCurrentTimeNanos() {
     auto now = std::chrono::high_resolution_clock::now();
-    auto duration = now.time_since_epoch();
-    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
 }
 
 uint64_t Timer::getCurrentTimeMicros() {
-    return getCurrentTimeNanos() / 1000;
+    auto now = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
 }
 
 uint64_t Timer::getCurrentTimeMillis() {
-    return getCurrentTimeNanos() / 1000000;
+    auto now = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
 } // namespace utils

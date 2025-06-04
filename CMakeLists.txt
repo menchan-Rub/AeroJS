@@ -52,6 +52,11 @@ set(CORE_SOURCES
     
     # 変換システム（既存）
     src/core/transformers/transformer.cpp
+    
+    # 世界最高レベル新機能実装
+    src/core/world_class_engine.cpp
+    src/core/quantum_jit.cpp
+    src/core/hyper_gc.cpp
 )
 
 # === 既存のユーティリティライブラリソース ===

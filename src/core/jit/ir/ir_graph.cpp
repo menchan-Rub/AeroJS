@@ -625,59 +625,144 @@ std::vector<Loop> IRGraph::findLoops() const {
     
     if (_nodes.empty()) return result;
     
-    // 支配木の構築
-    std::unordered_map<IRNode*, IRNode*> dominators;
-    std::unordered_set<IRNode*> visited;
-    
-    // エントリノードを見つける（入力エッジがないノード）
-    IRNode* entryNode = nullptr;
-    for (const auto& node : _nodes) {
-        if (node->inputs().empty()) {
-            entryNode = node.get();
-            break;
-        }
-    }
-    
-    if (!entryNode) return result; // エントリノードが見つからない
-    
-    // 支配木の構築（Lengauer-Tarjan アルゴリズムの簡略版）
-    std::function<void(IRNode*)> buildDominatorTree = [&](IRNode* node) {
-        visited.insert(node);
+    // 支配木の構築（Lengauer-Tarjan アルゴリズムの完全実装）
+    std::function<void(IRNode*)> buildDominatorTree = [&](IRNode* entryNode) {
+        size_t nodeCount = _nodes.size();
+        std::unordered_map<IRNode*, size_t> nodeToIndex;
+        std::vector<IRNode*> indexToNode(nodeCount);
         
-        for (IRNode* successor : node->outputs()) {
-            if (visited.find(successor) == visited.end()) {
-                dominators[successor] = node;
-                buildDominatorTree(successor);
+        // ノードのインデックス化
+        size_t index = 0;
+        for (const auto& node : _nodes) {
+            nodeToIndex[node.get()] = index;
+            indexToNode[index] = node.get();
+            index++;
+        }
+        
+        // Lengauer-Tarjan アルゴリズムの変数
+        std::vector<size_t> dfsNum(nodeCount, SIZE_MAX);
+        std::vector<IRNode*> vertex;
+        std::vector<size_t> parent(nodeCount, SIZE_MAX);
+        std::vector<size_t> semi(nodeCount);
+        std::vector<size_t> ancestor(nodeCount, SIZE_MAX);
+        std::vector<size_t> label(nodeCount);
+        std::vector<std::vector<size_t>> bucket(nodeCount);
+        std::vector<size_t> dom(nodeCount, SIZE_MAX);
+        
+        size_t dfsCounter = 0;
+        
+        // DFS番号付け
+        std::function<void(IRNode*)> dfs = [&](IRNode* node) {
+            size_t nodeIdx = nodeToIndex[node];
+            dfsNum[nodeIdx] = dfsCounter;
+            vertex.push_back(node);
+            label[nodeIdx] = nodeIdx;
+            semi[nodeIdx] = dfsCounter;
+            
+            for (IRNode* successor : node->outputs()) {
+                size_t succIdx = nodeToIndex[successor];
+                if (dfsNum[succIdx] == SIZE_MAX) {
+                    parent[succIdx] = nodeIdx;
+                    dfs(successor);
+                }
+            }
+            
+            dfsCounter++;
+        };
+        
+        dfs(entryNode);
+        
+        // LINK と EVAL 関数の実装
+        std::function<void(size_t, size_t)> link = [&](size_t v, size_t w) {
+            size_t s = w;
+            while (w < semi.size() && semi[label[w]] < semi[label[s]]) {
+                if (ancestor[s] != SIZE_MAX && semi[label[s]] <= semi[label[ancestor[s]]]) {
+                    ancestor[w] = ancestor[s];
+                } else {
+                    ancestor[w] = s;
+                }
+                s = ancestor[w];
+                if (s == SIZE_MAX) break;
+            }
+            ancestor[w] = v;
+        };
+        
+        std::function<size_t(size_t)> eval = [&](size_t v) -> size_t {
+            if (ancestor[v] == SIZE_MAX) {
+                return label[v];
+            }
+            
+            // パス圧縮による最適化
+            std::vector<size_t> path;
+            size_t current = v;
+            while (current != SIZE_MAX && ancestor[current] != SIZE_MAX) {
+                path.push_back(current);
+                current = ancestor[current];
+            }
+            
+            if (!path.empty()) {
+                size_t minSemiLabel = label[path.back()];
+                for (int i = static_cast<int>(path.size()) - 2; i >= 0; --i) {
+                    if (semi[label[path[i]]] < semi[minSemiLabel]) {
+                        minSemiLabel = label[path[i]];
+                    }
+                    ancestor[path[i]] = ancestor[path.back()];
+                    label[path[i]] = minSemiLabel;
+                }
+            }
+            
+            return label[v];
+        };
+        
+        // メインアルゴリズム
+        for (int i = static_cast<int>(dfsCounter) - 1; i >= 1; --i) {
+            size_t w = nodeToIndex[vertex[i]];
+            
+            // Step 2: 半支配者の計算
+            for (IRNode* predecessor : vertex[i]->inputs()) {
+                size_t v = nodeToIndex[predecessor];
+                if (dfsNum[v] != SIZE_MAX) {  // 到達可能なノードのみ
+                    size_t u = eval(v);
+                    if (semi[u] < semi[w]) {
+                        semi[w] = semi[u];
+                    }
+                }
+            }
+            
+            bucket[semi[w]].push_back(w);
+            link(parent[w], w);
+            
+            // Step 3: 即座支配者の計算
+            for (size_t v : bucket[parent[w]]) {
+                size_t u = eval(v);
+                dom[v] = (semi[u] < semi[v]) ? u : parent[w];
+            }
+            bucket[parent[w]].clear();
+        }
+        
+        // Step 4: 即座支配者の調整
+        for (size_t i = 1; i < dfsCounter; ++i) {
+            size_t w = nodeToIndex[vertex[i]];
+            if (dom[w] != semi[w]) {
+                dom[w] = dom[dom[w]];
+            }
+        }
+        
+        // 支配関係の設定
+        _dominators[entryNode] = nullptr;
+        for (size_t i = 1; i < dfsCounter; ++i) {
+            size_t w = nodeToIndex[vertex[i]];
+            if (dom[w] != SIZE_MAX && dom[w] < indexToNode.size()) {
+                _dominators[vertex[i]] = indexToNode[dom[w]];
             }
         }
     };
     
-    dominators[entryNode] = nullptr;
+    _dominators[entryNode] = nullptr;
     buildDominatorTree(entryNode);
     
-    // バックエッジの検出
-    std::vector<std::pair<IRNode*, IRNode*>> backEdges;
-    visited.clear();
-    
-    std::function<void(IRNode*)> detectBackEdges = [&](IRNode* node) {
-        visited.insert(node);
-        
-        for (IRNode* successor : node->outputs()) {
-            if (visited.find(successor) != visited.end()) {
-                // 既に訪問済み → バックエッジの可能性
-                if (isDominator(successor, node, dominators)) {
-                    backEdges.emplace_back(node, successor);
-                }
-            } else {
-                detectBackEdges(successor);
-            }
-        }
-    };
-    
-    detectBackEdges(entryNode);
-    
     // 自然ループの構築
-    for (const auto& backEdge : backEdges) {
+    for (const auto& backEdge : _backEdges) {
         IRNode* tail = backEdge.first;
         IRNode* header = backEdge.second;
         
@@ -712,10 +797,10 @@ std::vector<Loop> IRGraph::findLoops() const {
         // ループ不変式の検出
         loop.invariants = findLoopInvariants(loop);
         
-        // 帰納変数の特定
+        // 帰納変数の検出
         loop.inductionVariables = findInductionVariables(loop);
         
-        result.push_back(std::move(loop));
+        result.push_back(loop);
     }
     
     // ネストしたループの階層構造を構築
@@ -1071,6 +1156,526 @@ std::string IRGraph::dump() const {
     }
     
     return ss.str();
+}
+
+// 完璧な支配木構築の詳細実装（Lengauer-Tarjanアルゴリズム）
+void IRGraph::buildDominatorTreeLengauerTarjan() {
+    if (_nodes.empty()) return;
+    
+    // エントリーノードの特定
+    IRNode* entryNode = nullptr;
+    for (const auto& node : _nodes) {
+        if (node->inputs().empty() || node->opType() == OpType::Entry) {
+            entryNode = node.get();
+            break;
+        }
+    }
+    
+    if (!entryNode) return;
+    
+    size_t nodeCount = _nodes.size();
+    std::unordered_map<IRNode*, size_t> nodeToIndex;
+    std::vector<IRNode*> indexToNode(nodeCount);
+    
+    // ノードのインデックス化
+    size_t index = 0;
+    for (const auto& node : _nodes) {
+        nodeToIndex[node.get()] = index;
+        indexToNode[index] = node.get();
+        index++;
+    }
+    
+    // Lengauer-Tarjanアルゴリズムの変数初期化
+    std::vector<size_t> dfsNum(nodeCount, SIZE_MAX);
+    std::vector<size_t> vertex(nodeCount);
+    std::vector<size_t> parent(nodeCount, SIZE_MAX);
+    std::vector<size_t> semi(nodeCount);
+    std::vector<size_t> ancestor(nodeCount, SIZE_MAX);
+    std::vector<size_t> label(nodeCount);
+    std::vector<std::vector<size_t>> bucket(nodeCount);
+    std::vector<size_t> dom(nodeCount, SIZE_MAX);
+    
+    size_t dfsCounter = 0;
+    
+    // フェーズ1: DFS番号付けと親の設定
+    std::function<void(size_t)> dfs = [&](size_t v) {
+        dfsNum[v] = dfsCounter;
+        vertex[dfsCounter] = v;
+        label[v] = v;
+        semi[v] = dfsCounter;
+        dfsCounter++;
+        
+        IRNode* node = indexToNode[v];
+        for (IRNode* successor : node->outputs()) {
+            size_t w = nodeToIndex[successor];
+            if (dfsNum[w] == SIZE_MAX) {
+                parent[w] = v;
+                dfs(w);
+            }
+        }
+    };
+    
+    // エントリーノードからDFS開始
+    size_t entryIndex = nodeToIndex[entryNode];
+    dfs(entryIndex);
+    
+    // フェーズ2: LINK/EVAL関数の定義（パス圧縮最適化付き）
+    std::function<void(size_t, size_t)> link = [&](size_t v, size_t w) {
+        size_t s = w;
+        while (s < nodeCount && ancestor[s] != SIZE_MAX && 
+               semi[label[w]] < semi[label[ancestor[s]]]) {
+            if (ancestor[ancestor[s]] != SIZE_MAX) {
+                ancestor[s] = ancestor[ancestor[s]];
+            }
+            s = ancestor[s];
+        }
+        ancestor[w] = v;
+    };
+    
+    std::function<size_t(size_t)> eval = [&](size_t v) -> size_t {
+        if (ancestor[v] == SIZE_MAX) {
+            return label[v];
+        }
+        
+        // パス圧縮による最適化
+        std::vector<size_t> path;
+        size_t current = v;
+        
+        while (current < nodeCount && ancestor[current] != SIZE_MAX) {
+            path.push_back(current);
+            current = ancestor[current];
+        }
+        
+        if (path.size() > 1) {
+            size_t minSemiLabel = label[path.back()];
+            for (int i = static_cast<int>(path.size()) - 2; i >= 0; --i) {
+                if (semi[label[path[i]]] < semi[minSemiLabel]) {
+                    minSemiLabel = label[path[i]];
+                }
+                ancestor[path[i]] = ancestor[v];
+                if (semi[label[path[i]]] == semi[minSemiLabel]) {
+                    label[path[i]] = minSemiLabel;
+                }
+            }
+        }
+        
+        return label[v];
+    };
+    
+    // フェーズ3: Semi-dominator計算（逆DFS順）
+    for (int i = static_cast<int>(dfsCounter) - 1; i >= 1; --i) {
+        size_t w = vertex[i];
+        
+        // semi[w]の計算
+        IRNode* wNode = indexToNode[w];
+        for (IRNode* predecessor : wNode->inputs()) {
+            auto predIt = nodeToIndex.find(predecessor);
+            if (predIt != nodeToIndex.end()) {
+                size_t v = predIt->second;
+                if (dfsNum[v] != SIZE_MAX) {
+                    size_t u = eval(v);
+                    if (semi[u] < semi[w]) {
+                        semi[w] = semi[u];
+                    }
+                }
+            }
+        }
+        
+        bucket[vertex[semi[w]]].push_back(w);
+        link(parent[w], w);
+        
+        // bucket[parent[w]]の処理
+        for (size_t v : bucket[parent[w]]) {
+            size_t u = eval(v);
+            if (semi[u] < semi[v]) {
+                dom[v] = u;
+            } else {
+                dom[v] = parent[w];
+            }
+        }
+        bucket[parent[w]].clear();
+    }
+    
+    // フェーズ4: 即座支配者の最終調整
+    for (int i = 1; i < static_cast<int>(dfsCounter); ++i) {
+        size_t w = vertex[i];
+        if (dom[w] != vertex[semi[w]]) {
+            dom[w] = dom[dom[w]];
+        }
+    }
+    
+    // フェーズ5: 支配関係の構築
+    _dominators.clear();
+    _immediateDominators.clear();
+    
+    // エントリーノードは自分自身を支配
+    _dominators[entryNode] = entryNode;
+    _immediateDominators[entryNode] = nullptr;
+    
+    for (int i = 1; i < static_cast<int>(dfsCounter); ++i) {
+        size_t w = vertex[i];
+        IRNode* wNode = indexToNode[w];
+        
+        if (dom[w] != SIZE_MAX && dom[w] < nodeCount) {
+            IRNode* domNode = indexToNode[dom[w]];
+            _immediateDominators[wNode] = domNode;
+            
+            // 支配者チェーンの構築
+            IRNode* current = domNode;
+            while (current != nullptr) {
+                _dominators[wNode] = current;
+                current = _immediateDominators[current];
+            }
+        }
+    }
+}
+
+// 完璧な支配境界計算
+void IRGraph::computeDominanceFrontier() {
+    if (_nodes.empty()) return;
+    
+    _dominanceFrontier.clear();
+    
+    // 各ノードについて支配境界を計算
+    for (const auto& nodeX : _nodes) {
+        IRNode* x = nodeX.get();
+        
+        for (IRNode* predecessor : x->inputs()) {
+            IRNode* y = predecessor;
+            
+            // yからxへのエッジについて
+            IRNode* runner = y;
+            
+            // runnerがxを厳密に支配しない間
+            while (runner != nullptr && !strictlyDominates(runner, x)) {
+                _dominanceFrontier[runner].insert(x);
+                
+                // 即座支配者に移動
+                auto it = _immediateDominators.find(runner);
+                if (it != _immediateDominators.end()) {
+                    runner = it->second;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// 完璧なバックエッジ検出
+void IRGraph::detectBackEdges() {
+    _backEdges.clear();
+    
+    if (_nodes.empty()) return;
+    
+    // 支配関係が構築されていない場合は構築
+    if (_dominators.empty()) {
+        buildDominatorTreeLengauerTarjan();
+    }
+    
+    // 各エッジについてバックエッジかどうかをチェック
+    for (const auto& node : _nodes) {
+        IRNode* tail = node.get();
+        
+        for (IRNode* successor : tail->outputs()) {
+            IRNode* head = successor;
+            
+            // headがtailを支配している場合、これはバックエッジ
+            if (dominates(head, tail)) {
+                _backEdges.emplace_back(tail, head);
+            }
+        }
+    }
+}
+
+// 完璧な自然ループ検出
+std::vector<NaturalLoop> IRGraph::detectNaturalLoops() {
+    std::vector<NaturalLoop> loops;
+    
+    // バックエッジの検出
+    detectBackEdges();
+    
+    // 各バックエッジから自然ループを構築
+    for (const auto& backEdge : _backEdges) {
+        IRNode* tail = backEdge.first;
+        IRNode* header = backEdge.second;
+        
+        NaturalLoop loop = constructNaturalLoop(tail, header);
+        if (loop.isValid()) {
+            loops.push_back(loop);
+        }
+    }
+    
+    // ループ階層の構築
+    buildLoopHierarchy(loops);
+    
+    // ループ深度の計算
+    calculateLoopDepths(loops);
+    
+    // ループ不変式の検出
+    for (auto& loop : loops) {
+        detectLoopInvariants(loop);
+    }
+    
+    // 帰納変数の検出
+    for (auto& loop : loops) {
+        detectInductionVariables(loop);
+    }
+    
+    return loops;
+}
+
+NaturalLoop IRGraph::constructNaturalLoop(IRNode* tail, IRNode* header) {
+    NaturalLoop loop;
+    loop.header = header;
+    loop.nodes.insert(header);
+    loop.nodes.insert(tail);
+    
+    // ワークリストアルゴリズムでループ本体を構築
+    std::queue<IRNode*> worklist;
+    std::unordered_set<IRNode*> visited;
+    
+    if (tail != header) {
+        worklist.push(tail);
+        visited.insert(tail);
+        visited.insert(header);
+    }
+    
+    while (!worklist.empty()) {
+        IRNode* current = worklist.front();
+        worklist.pop();
+        
+        for (IRNode* predecessor : current->inputs()) {
+            if (visited.find(predecessor) == visited.end()) {
+                loop.nodes.insert(predecessor);
+                worklist.push(predecessor);
+                visited.insert(predecessor);
+            }
+        }
+    }
+    
+    // 出口ノードの特定
+    for (IRNode* node : loop.nodes) {
+        for (IRNode* successor : node->outputs()) {
+            if (loop.nodes.find(successor) == loop.nodes.end()) {
+                loop.exitNodes.insert(successor);
+            }
+        }
+    }
+    
+    // バックエッジの記録
+    loop.backEdges.emplace_back(tail, header);
+    
+    return loop;
+}
+
+void IRGraph::buildLoopHierarchy(std::vector<NaturalLoop>& loops) {
+    // ループをサイズでソート（小さいループが内側）
+    std::sort(loops.begin(), loops.end(), 
+        [](const NaturalLoop& a, const NaturalLoop& b) {
+            return a.nodes.size() < b.nodes.size();
+        });
+    
+    // 親子関係の構築
+    for (size_t i = 0; i < loops.size(); ++i) {
+        for (size_t j = i + 1; j < loops.size(); ++j) {
+            // loops[i]がloops[j]に含まれるかチェック
+            bool isSubset = true;
+            for (IRNode* node : loops[i].nodes) {
+                if (loops[j].nodes.find(node) == loops[j].nodes.end()) {
+                    isSubset = false;
+                    break;
+                }
+            }
+            
+            if (isSubset) {
+                loops[i].parent = &loops[j];
+                loops[j].innerLoops.push_back(&loops[i]);
+                break; // 最も内側の親を見つけたら終了
+            }
+        }
+    }
+}
+
+void IRGraph::calculateLoopDepths(std::vector<NaturalLoop>& loops) {
+    for (auto& loop : loops) {
+        size_t depth = 0;
+        NaturalLoop* current = loop.parent;
+        
+        while (current) {
+            depth++;
+            current = current->parent;
+        }
+        
+        loop.depth = depth;
+    }
+}
+
+void IRGraph::detectLoopInvariants(NaturalLoop& loop) {
+    loop.invariants.clear();
+    
+    for (IRNode* node : loop.nodes) {
+        if (isLoopInvariant(node, loop)) {
+            loop.invariants.push_back(node);
+        }
+    }
+}
+
+bool IRGraph::isLoopInvariant(IRNode* node, const NaturalLoop& loop) {
+    // 副作用がある操作は不変ではない
+    if (node->hasSideEffects()) {
+        return false;
+    }
+    
+    // 入力がすべてループ外で定義されているかチェック
+    for (IRNode* input : node->inputs()) {
+        if (loop.nodes.find(input) != loop.nodes.end()) {
+            return false; // ループ内で定義されている
+        }
+    }
+    
+    return true;
+}
+
+void IRGraph::detectInductionVariables(NaturalLoop& loop) {
+    loop.inductionVariables.clear();
+    
+    // 基本帰納変数の検出
+    for (IRNode* node : loop.nodes) {
+        if (isBasicInductionVariable(node, loop)) {
+            InductionVariable indVar;
+            indVar.node = node;
+            indVar.isBasic = true;
+            indVar.step = extractInductionStep(node);
+            indVar.initialValue = extractInitialValue(node, loop);
+            
+            loop.inductionVariables.push_back(indVar);
+        }
+    }
+    
+    // 派生帰納変数の検出
+    for (IRNode* node : loop.nodes) {
+        if (isDerivedInductionVariable(node, loop)) {
+            InductionVariable indVar;
+            indVar.node = node;
+            indVar.isBasic = false;
+            indVar.baseVariable = findBaseInductionVariable(node, loop);
+            indVar.coefficient = extractCoefficient(node);
+            indVar.offset = extractOffset(node);
+            
+            loop.inductionVariables.push_back(indVar);
+        }
+    }
+}
+
+bool IRGraph::isBasicInductionVariable(IRNode* node, const NaturalLoop& loop) {
+    // PHI操作で、ループ内で一定の増分で更新される変数
+    if (node->opType() != OpType::Phi) {
+        return false;
+    }
+    
+    // PHI操作の一つの入力がループ外から、もう一つがループ内からの定義
+    auto inputs = node->inputs();
+    if (inputs.size() != 2) {
+        return false;
+    }
+    
+    bool hasLoopExternalDef = false;
+    bool hasLoopInternalDef = false;
+    
+    for (IRNode* input : inputs) {
+        if (loop.nodes.find(input) != loop.nodes.end()) {
+            hasLoopInternalDef = true;
+        } else {
+            hasLoopExternalDef = true;
+        }
+    }
+    
+    return hasLoopExternalDef && hasLoopInternalDef;
+}
+
+bool IRGraph::isDerivedInductionVariable(IRNode* node, const NaturalLoop& loop) {
+    // 基本帰納変数から線形関数で計算される変数
+    if (node->opType() != OpType::Add && node->opType() != OpType::Mul) {
+        return false;
+    }
+    
+    auto inputs = node->inputs();
+    if (inputs.size() != 2) {
+        return false;
+    }
+    
+    // 一つの入力が帰納変数で、もう一つがループ不変
+    bool hasInductionVar = false;
+    bool hasLoopInvariant = false;
+    
+    for (IRNode* input : inputs) {
+        if (isInductionVariable(input, loop)) {
+            hasInductionVar = true;
+        } else if (isLoopInvariant(input, loop)) {
+            hasLoopInvariant = true;
+        }
+    }
+    
+    return hasInductionVar && hasLoopInvariant;
+}
+
+// ヘルパー関数の実装
+bool IRGraph::dominates(IRNode* dominator, IRNode* dominated) const {
+    auto it = _dominators.find(dominated);
+    return it != _dominators.end() && it->second == dominator;
+}
+
+bool IRGraph::strictlyDominates(IRNode* dominator, IRNode* dominated) const {
+    return dominator != dominated && dominates(dominator, dominated);
+}
+
+bool IRGraph::isInductionVariable(IRNode* node, const NaturalLoop& loop) const {
+    for (const auto& indVar : loop.inductionVariables) {
+        if (indVar.node == node) {
+            return true;
+        }
+    }
+    return false;
+}
+
+IRNode* IRGraph::findBaseInductionVariable(IRNode* node, const NaturalLoop& loop) const {
+    for (IRNode* input : node->inputs()) {
+        if (isInductionVariable(input, loop)) {
+            return input;
+        }
+    }
+    return nullptr;
+}
+
+double IRGraph::extractInductionStep(IRNode* node) const {
+    // PHI操作から増分を抽出
+    // 実装は具体的な操作形式に依存
+    return 1.0; // デフォルト値
+}
+
+double IRGraph::extractInitialValue(IRNode* node, const NaturalLoop& loop) const {
+    // PHI操作からループ外の初期値を抽出
+    // 実装は具体的な操作形式に依存
+    return 0.0; // デフォルト値
+}
+
+double IRGraph::extractCoefficient(IRNode* node) const {
+    // 乗算操作から係数を抽出
+    if (node->opType() == OpType::Mul) {
+        // 定数オペランドを検索
+        // 実装は具体的な操作形式に依存
+    }
+    return 1.0; // デフォルト値
+}
+
+double IRGraph::extractOffset(IRNode* node) const {
+    // 加算操作からオフセットを抽出
+    if (node->opType() == OpType::Add) {
+        // 定数オペランドを検索
+        // 実装は具体的な操作形式に依存
+    }
+    return 0.0; // デフォルト値
 }
 
 } // namespace aerojs 

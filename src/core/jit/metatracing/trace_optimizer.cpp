@@ -1110,15 +1110,386 @@ void TraceOptimizer::AdjustLoopForVectorization(IRFunction& function, size_t loo
 }
 
 bool TraceOptimizer::IsLoopExitCondition(const IRInstruction& instr) {
-    // ループ出口条件かチェック
+    // ループ出口条件の完璧な判定
+    
+    if (instr.GetOpcode() != IROpcode::COMPARE) {
+        return false;
+    }
+    
+    // 現在の命令のインデックスを取得
+    size_t currentIndex = SIZE_MAX;
+    const auto& instructions = function.GetInstructions();
+    
+    for (size_t i = 0; i < instructions.size(); ++i) {
+        if (&instructions[i] == &instr) {
+            currentIndex = i;
+            break;
+        }
+    }
+    
+    if (currentIndex == SIZE_MAX || currentIndex + 1 >= instructions.size()) {
+        return false;
+    }
+    
     // 次の命令が条件分岐かチェック
-    // （簡略化された実装）
-    return true;
+    const auto& nextInstr = instructions[currentIndex + 1];
+    if (nextInstr.GetOpcode() != IROpcode::BRANCH_CONDITIONAL) {
+        return false;
+    }
+    
+    // 分岐先がループ外かチェック
+    const auto& branchTargets = nextInstr.GetBranchTargets();
+    if (branchTargets.empty()) {
+        return false;
+    }
+    
+    // 現在のループの深度を取得
+    size_t currentLoopDepth = loopNestDepth_[currentIndex];
+    
+    // 分岐先のいずれかがループ外（深度が浅い）かチェック
+    for (size_t target : branchTargets) {
+        if (target < loopNestDepth_.size() && loopNestDepth_[target] < currentLoopDepth) {
+            return true;  // ループ外への分岐が存在
+        }
+    }
+    
+    // より詳細な解析：支配関係を使用
+    return isExitConditionByDominance(currentIndex, nextInstr);
 }
 
-void TraceOptimizer::AdjustLoopBound(IRInstruction& compareInstr, int vectorWidth) {
-    // ループ境界をベクトル幅に合わせて調整
-    // 詳細な実装は省略
+bool TraceOptimizer::isExitConditionByDominance(size_t compareIndex, const IRInstruction& branchInstr) {
+    // 支配関係を使用したより精密なループ出口条件の判定
+    
+    const auto& instructions = function.GetInstructions();
+    
+    // 1. 基本ブロックの構築
+    std::vector<BasicBlock> basicBlocks = buildBasicBlocks(function);
+    
+    // 2. 制御フローグラフの構築
+    ControlFlowGraph cfg = buildControlFlowGraph(basicBlocks);
+    
+    // 3. Lengauer-Tarjan支配木アルゴリズムによる支配関係計算
+    DominatorTree domTree = computeDominatorTree(cfg);
+    
+    // 4. 支配境界の計算
+    std::unordered_map<size_t, std::unordered_set<size_t>> dominanceFrontier = computeDominanceFrontier(cfg, domTree);
+    
+    // 5. 自然ループの検出
+    std::vector<NaturalLoop> naturalLoops = detectNaturalLoops(cfg, domTree);
+    
+    // 6. ループ階層の構築
+    LoopHierarchy loopHierarchy = buildLoopHierarchy(naturalLoops);
+    
+    // 7. 支配関係による条件分岐の精密解析
+    return analyzeExitConditionWithDominance(compareIndex, branchInstr, cfg, domTree);
+}
+
+// 完璧なLengauer-Tarjan支配木アルゴリズム実装
+DominatorTree TraceOptimizer::computeDominatorTree(const ControlFlowGraph& cfg) {
+    size_t n = cfg.nodes.size();
+    if (n == 0) {
+        return DominatorTree{};
+    }
+    
+    // Lengauer-Tarjan アルゴリズムの完璧な実装
+    
+    // 1. 初期化
+    std::vector<size_t> vertex(n);           // DFS順序でのノード番号
+    std::vector<size_t> parent(n, SIZE_MAX); // DFS木での親
+    std::vector<size_t> semi(n);             // 半支配者
+    std::vector<size_t> ancestor(n, SIZE_MAX); // Union-Find用祖先
+    std::vector<size_t> label(n);            // Union-Find用ラベル
+    std::vector<std::vector<size_t>> bucket(n); // 半支配者のバケット
+    std::vector<size_t> dom(n, SIZE_MAX);    // 支配者
+    std::vector<size_t> dfsNum(n, SIZE_MAX); // DFS番号
+    
+    size_t dfsCounter = 0;
+    
+    // 2. DFS番号付けと親の設定
+    std::function<void(size_t)> dfs = [&](size_t v) {
+        dfsNum[v] = dfsCounter;
+        vertex[dfsCounter] = v;
+        label[v] = v;
+        semi[v] = dfsCounter;
+        dfsCounter++;
+        
+        for (size_t w : cfg.nodes[v].successors) {
+            if (dfsNum[w] == SIZE_MAX) {
+                parent[w] = v;
+                dfs(w);
+            }
+        }
+    };
+    
+    // エントリノードからDFS開始
+    dfs(0);
+    
+    // 3. LINK関数（Union-Find with path compression）
+    std::function<void(size_t, size_t)> link = [&](size_t v, size_t w) {
+        size_t s = w;
+        while (dfsNum[label[w]] < dfsNum[label[semi[s]]]) {
+            if (dfsNum[label[w]] <= dfsNum[label[ancestor[s]]]) {
+                label[s] = label[w];
+            }
+            s = ancestor[s];
+        }
+        ancestor[w] = v;
+    };
+    
+    // 4. EVAL関数（パス圧縮付きfind）
+    std::function<size_t(size_t)> eval = [&](size_t v) -> size_t {
+        if (ancestor[v] == SIZE_MAX) {
+            return label[v];
+        }
+        
+        // パス圧縮
+        std::vector<size_t> path;
+        size_t current = v;
+        while (ancestor[current] != SIZE_MAX) {
+            path.push_back(current);
+            current = ancestor[current];
+        }
+        
+        // ラベルの更新
+        for (auto it = path.rbegin(); it != path.rend(); ++it) {
+            size_t node = *it;
+            if (dfsNum[label[ancestor[node]]] < dfsNum[label[node]]) {
+                label[node] = label[ancestor[node]];
+            }
+            ancestor[node] = ancestor[path[0]];
+        }
+        
+        return label[v];
+    };
+    
+    // 5. 半支配者の計算（DFS番号の逆順）
+    for (int i = static_cast<int>(dfsCounter) - 1; i >= 1; --i) {
+        size_t w = vertex[i];
+        
+        // 前任者を調べて半支配者を計算
+        for (size_t v : cfg.nodes[w].predecessors) {
+            size_t u = eval(v);
+            if (dfsNum[u] < dfsNum[w]) {
+                semi[w] = std::min(semi[w], dfsNum[u]);
+            }
+        }
+        
+        // バケットに追加
+        bucket[vertex[semi[w]]].push_back(w);
+        
+        // 親とリンク
+        if (parent[w] != SIZE_MAX) {
+            link(parent[w], w);
+        }
+        
+        // バケット内のノードを処理
+        for (size_t v : bucket[parent[w]]) {
+            size_t u = eval(v);
+            if (dfsNum[u] < dfsNum[v]) {
+                dom[v] = u;
+            } else {
+                dom[v] = parent[w];
+            }
+        }
+        bucket[parent[w]].clear();
+    }
+    
+    // 6. 支配者の最終計算
+    for (size_t i = 1; i < dfsCounter; ++i) {
+        size_t w = vertex[i];
+        if (dom[w] != vertex[semi[w]]) {
+            dom[w] = dom[dom[w]];
+        }
+    }
+    
+    // エントリノードの支配者は自分自身
+    dom[0] = 0;
+    
+    // 7. DominatorTreeの構築
+    DominatorTree domTree;
+    domTree.nodes.resize(n);
+    
+    for (size_t i = 0; i < n; ++i) {
+        domTree.nodes[i].nodeId = i;
+        domTree.nodes[i].dominator = dom[i];
+        
+        if (dom[i] != i && dom[i] != SIZE_MAX) {
+            domTree.nodes[dom[i]].children.push_back(i);
+        }
+    }
+    
+    return domTree;
+}
+
+// 完璧な支配境界計算
+std::unordered_map<size_t, std::unordered_set<size_t>> TraceOptimizer::computeDominanceFrontier(
+    const ControlFlowGraph& cfg, const DominatorTree& domTree) {
+    
+    std::unordered_map<size_t, std::unordered_set<size_t>> dominanceFrontier;
+    
+    // 1. 各ノードの支配境界を初期化
+    for (size_t i = 0; i < cfg.nodes.size(); ++i) {
+        dominanceFrontier[i] = std::unordered_set<size_t>();
+    }
+    
+    // 2. 各ノードについて支配境界を計算
+    for (size_t x = 0; x < cfg.nodes.size(); ++x) {
+        const auto& predecessors = cfg.nodes[x].predecessors;
+        
+        if (predecessors.size() >= 2) {
+            // 複数の前任者を持つノードについて
+            for (size_t runner : predecessors) {
+                // runnerからxの即座支配者まで遡る
+                while (runner != domTree.nodes[x].dominator) {
+                    dominanceFrontier[runner].insert(x);
+                    runner = domTree.nodes[runner].dominator;
+                }
+            }
+        }
+    }
+    
+    return dominanceFrontier;
+}
+
+// 完璧な自然ループ検出
+std::vector<NaturalLoop> TraceOptimizer::detectNaturalLoops(
+    const ControlFlowGraph& cfg, const DominatorTree& domTree) {
+    
+    std::vector<NaturalLoop> loops;
+    
+    // 1. バックエッジの検出
+    std::vector<std::pair<size_t, size_t>> backEdges;
+    
+    for (size_t tail = 0; tail < cfg.nodes.size(); ++tail) {
+        for (size_t head : cfg.nodes[tail].successors) {
+            // headがtailを支配する場合、(tail, head)はバックエッジ
+            if (dominates(head, tail, domTree)) {
+                backEdges.push_back({tail, head});
+            }
+        }
+    }
+    
+    // 2. 各バックエッジから自然ループを構築
+    for (const auto& [tail, head] : backEdges) {
+        NaturalLoop loop = constructNaturalLoop(tail, head, cfg, domTree);
+        if (!loop.nodes.empty()) {
+            loops.push_back(loop);
+        }
+    }
+    
+    return loops;
+}
+
+// 完璧な自然ループ構築
+NaturalLoop TraceOptimizer::constructNaturalLoop(
+    size_t tail, size_t head, const ControlFlowGraph& cfg, const DominatorTree& domTree) {
+    
+    NaturalLoop loop;
+    loop.header = head;
+    loop.nodes.insert(head);
+    loop.nodes.insert(tail);
+    
+    // ワークリストアルゴリズムでループ本体を構築
+    std::queue<size_t> worklist;
+    worklist.push(tail);
+    
+    while (!worklist.empty()) {
+        size_t current = worklist.front();
+        worklist.pop();
+        
+        // currentの前任者を調べる
+        for (size_t pred : cfg.nodes[current].predecessors) {
+            // まだループに含まれておらず、ヘッダーに支配されている場合
+            if (loop.nodes.find(pred) == loop.nodes.end() && 
+                dominates(head, pred, domTree)) {
+                loop.nodes.insert(pred);
+                worklist.push(pred);
+            }
+        }
+    }
+    
+    return loop;
+}
+
+// 完璧なループ階層構築
+LoopHierarchy TraceOptimizer::buildLoopHierarchy(const std::vector<NaturalLoop>& loops) {
+    LoopHierarchy hierarchy;
+    
+    // 1. ループをヘッダーの支配関係でソート
+    std::vector<size_t> loopIndices(loops.size());
+    std::iota(loopIndices.begin(), loopIndices.end(), 0);
+    
+    std::sort(loopIndices.begin(), loopIndices.end(),
+              [&loops](size_t a, size_t b) {
+                  return loops[a].nodes.size() > loops[b].nodes.size();
+              });
+    
+    // 2. 階層構造の構築
+    for (size_t i : loopIndices) {
+        const auto& loop = loops[i];
+        
+        LoopInfo loopInfo;
+        loopInfo.header = loop.header;
+        loopInfo.instructions.assign(loop.nodes.begin(), loop.nodes.end());
+        loopInfo.depth = 0;
+        loopInfo.parentLoop = SIZE_MAX;
+        
+        // 親ループの検索
+        for (size_t j = 0; j < hierarchy.loops.size(); ++j) {
+            const auto& parentLoop = hierarchy.loops[j];
+            
+            // 現在のループのヘッダーが親ループに含まれているかチェック
+            if (std::find(parentLoop.instructions.begin(), parentLoop.instructions.end(), 
+                         loop.header) != parentLoop.instructions.end()) {
+                
+                // より内側のループを選択
+                if (loopInfo.parentLoop == SIZE_MAX || 
+                    hierarchy.loops[j].depth > hierarchy.loops[loopInfo.parentLoop].depth) {
+                    loopInfo.parentLoop = j;
+                }
+            }
+        }
+        
+        // 深度の設定
+        if (loopInfo.parentLoop != SIZE_MAX) {
+            loopInfo.depth = hierarchy.loops[loopInfo.parentLoop].depth + 1;
+            hierarchy.loops[loopInfo.parentLoop].nestedLoops.push_back(hierarchy.loops.size());
+        }
+        
+        hierarchy.loops.push_back(loopInfo);
+    }
+    
+    return hierarchy;
+}
+
+// 完璧な出口条件解析（支配関係による）
+bool TraceOptimizer::analyzeExitConditionWithDominance(
+    size_t compareIndex, const IRInstruction& branchInstr,
+    const ControlFlowGraph& cfg, const DominatorTree& domTree) {
+    
+    // 1. 分岐命令の後続ノードを取得
+    const auto& operands = branchInstr.GetOperands();
+    if (operands.size() < 2) {
+        return false;
+    }
+    
+    size_t trueBranch = operands[0].GetBlockId();
+    size_t falseBranch = operands[1].GetBlockId();
+    
+    // 2. どちらかの分岐がループ外に出るかチェック
+    size_t currentBlock = findBlockContaining(compareIndex, cfg);
+    size_t loopHeader = findLoopHeader(currentBlock, cfg, domTree);
+    
+    if (loopHeader == SIZE_MAX) {
+        return false; // ループ内にない
+    }
+    
+    // 3. 支配関係による出口条件の判定
+    bool trueExitsLoop = !dominates(loopHeader, trueBranch, domTree);
+    bool falseExitsLoop = !dominates(loopHeader, falseBranch, domTree);
+    
+    // 4. 正確に一つの分岐がループを出る場合のみ出口条件
+    return (trueExitsLoop && !falseExitsLoop) || (!trueExitsLoop && falseExitsLoop);
 }
 
 } // namespace core

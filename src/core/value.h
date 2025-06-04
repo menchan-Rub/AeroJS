@@ -150,10 +150,10 @@ public:
     Value pop();
 
     // オブジェクト操作（オブジェクトE場合EみE
-    Value getProperty(const std::string& key) const;
-    void setProperty(const std::string& key, const Value& value);
-    bool hasProperty(const std::string& key) const;
-    void deleteProperty(const std::string& key);
+    Value getProperty(const std::string& name) const;
+    void setProperty(const std::string& name, const Value& value);
+    bool hasProperty(const std::string& name) const;
+    void deleteProperty(const std::string& name);
     std::vector<std::string> getPropertyNames() const;
 
     // 関数呼び出し（関数の場合EみE
@@ -192,6 +192,7 @@ public:
     static Value fromInteger(int32_t value);
     static Value fromArray(const std::vector<Value>& values);
     static Value fromFunction(void* function);
+    static Value fromSymbol(void* symbol);
 
 private:
     ValueType type_;

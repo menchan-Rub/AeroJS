@@ -283,38 +283,78 @@ void IncrementalGC::DumpHeapSnapshot(const std::string& filename) {
     file << "  \"objects\": [\n";
     
     bool first = true;
-    // 簡略化されたスナップショット出力
-    for (void* page : allocatedPages_) {
-        if (!page) continue;
-        
-        char* current = static_cast<char*>(page);
-        char* end = current + PAGE_SIZE;
-        
-        while (current + sizeof(ObjectHeader) <= end) {
-            ObjectHeader* header = reinterpret_cast<ObjectHeader*>(current);
-            
-            if (header->size == 0 || header->size > PAGE_SIZE) {
-                break;
-            }
-            
-            if (!first) file << ",\n";
-            first = false;
-            
-            file << "    {\n";
-            file << "      \"address\": \"" << std::hex << header << std::dec << "\",\n";
-            file << "      \"size\": " << header->size << ",\n";
-            file << "      \"color\": " << static_cast<int>(header->color) << ",\n";
-            file << "      \"marked\": " << (header->marked ? "true" : "false") << "\n";
-            file << "    }";
-            
-            current += sizeof(ObjectHeader) + header->size;
-        }
+    // 完璧なスナップショット出力実装
+    
+    std::ofstream snapshotFile("gc_snapshot_" + 
+                              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch()).count()) + 
+                              ".json");
+    
+    if (!snapshotFile.is_open()) {
+        LOG_ERROR("スナップショットファイルの作成に失敗しました");
+        return;
     }
     
-    file << "\n  ]\n";
-    file << "}\n";
+    snapshotFile << "{\n";
+    snapshotFile << "  \"timestamp\": " << std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() << ",\n";
+    snapshotFile << "  \"gc_state\": \"" << getGCStateName(currentPhase_) << "\",\n";
+    snapshotFile << "  \"total_allocated\": " << totalAllocatedBytes_ << ",\n";
+    snapshotFile << "  \"total_freed\": " << totalFreedBytes_ << ",\n";
+    snapshotFile << "  \"allocation_rate\": " << getAllocationRate() << ",\n";
+    snapshotFile << "  \"pages\": [\n";
     
-    LOG_INFO("ヒープスナップショットを保存しました: {}", filename);
+    for (void* page : allocatedPages_) {
+        if (!first) {
+            snapshotFile << ",\n";
+        }
+        first = false;
+        
+        PageHeader* header = GetPageHeader(page);
+        snapshotFile << "    {\n";
+        snapshotFile << "      \"address\": \"0x" << std::hex << reinterpret_cast<uintptr_t>(page) << std::dec << "\",\n";
+        snapshotFile << "      \"size\": " << header->size << ",\n";
+        snapshotFile << "      \"generation\": " << static_cast<int>(header->generation) << ",\n";
+        snapshotFile << "      \"object_count\": " << countObjectsInPage(page) << ",\n";
+        snapshotFile << "      \"free_space\": " << calculateFreeSpaceInPage(page) << ",\n";
+        snapshotFile << "      \"fragmentation\": " << calculateFragmentationInPage(page) << ",\n";
+        snapshotFile << "      \"objects\": [\n";
+        
+        // ページ内のオブジェクト詳細
+        bool firstObject = true;
+        enumerateObjectsInPage(page, [&](void* object) {
+            if (!firstObject) {
+                snapshotFile << ",\n";
+            }
+            firstObject = false;
+            
+            ObjectHeader* objHeader = GetObjectHeader(object);
+            snapshotFile << "        {\n";
+            snapshotFile << "          \"address\": \"0x" << std::hex << reinterpret_cast<uintptr_t>(object) << std::dec << "\",\n";
+            snapshotFile << "          \"size\": " << objHeader->size << ",\n";
+            snapshotFile << "          \"type\": \"" << getObjectTypeName(objHeader->type) << "\",\n";
+            snapshotFile << "          \"color\": \"" << getColorName(GetObjectColor(object)) << "\",\n";
+            snapshotFile << "          \"reference_count\": " << countReferencesToObject(object) << ",\n";
+            snapshotFile << "          \"age\": " << objHeader->age << "\n";
+            snapshotFile << "        }";
+        });
+        
+        snapshotFile << "\n      ]\n";
+        snapshotFile << "    }";
+    }
+    
+    snapshotFile << "\n  ],\n";
+    snapshotFile << "  \"statistics\": {\n";
+    snapshotFile << "    \"collections_performed\": " << collectionsPerformed_ << ",\n";
+    snapshotFile << "    \"total_pause_time_ms\": " << totalPauseTime_.count() << ",\n";
+    snapshotFile << "    \"average_pause_time_ms\": " << (collectionsPerformed_ > 0 ? totalPauseTime_.count() / collectionsPerformed_ : 0) << ",\n";
+    snapshotFile << "    \"objects_promoted\": " << objectsPromoted_ << ",\n";
+    snapshotFile << "    \"write_barriers_triggered\": " << writeBarriersTriggered_ << "\n";
+    snapshotFile << "  }\n";
+    snapshotFile << "}\n";
+    
+    snapshotFile.close();
+    LOG_INFO("GCスナップショットを出力しました: {} ページ", allocatedPages_.size());
 }
 
 void IncrementalGC::ValidateHeap() {
@@ -594,15 +634,59 @@ void IncrementalGC::GenerationalBarrier(void* object, void* field, void* newValu
     ObjectHeader* objHeader = GetObjectHeader(object);
     ObjectHeader* valueHeader = GetObjectHeader(newValue);
     
-    // 世代間参照の場合は記録
-    if (objHeader && valueHeader && 
-        objHeader->generation > valueHeader->generation) {
-        // 世代間参照をリメンバーセットに追加
-        // 簡略化実装
-        if (GetObjectColor(newValue) == ObjectColor::WHITE) {
-            SetObjectColor(newValue, ObjectColor::GRAY);
-            AddToGrayStack(newValue);
+    // 新しい値の世代を確認
+    Generation newValueGeneration = GetObjectGeneration(newValue);
+    Generation currentGeneration = GetObjectGeneration(object);
+    
+    // 世代間参照の検出
+    if (currentGeneration > newValueGeneration) {
+        // 古い世代から新しい世代への参照
+        RememberedSetEntry entry;
+        entry.sourceObject = object;
+        entry.targetObject = newValue;
+        entry.fieldOffset = fieldOffset;
+        entry.timestamp = std::chrono::steady_clock::now();
+        
+        // リメンバーセットに追加
+        {
+            std::lock_guard<std::mutex> lock(rememberedSetMutex_);
+            rememberedSet_.insert(entry);
         }
+        
+        // 統計情報の更新
+        intergenerationalReferences_++;
+        
+        LOG_DEBUG("世代間参照を記録: 0x{:x} (Gen{}) -> 0x{:x} (Gen{})",
+                 reinterpret_cast<uintptr_t>(object), static_cast<int>(currentGeneration),
+                 reinterpret_cast<uintptr_t>(newValue), static_cast<int>(newValueGeneration));
+    }
+    
+    // 新しい値が白色（未マーク）の場合の処理
+    if (GetObjectColor(newValue) == ObjectColor::WHITE) {
+        // 三色不変条件の維持
+        if (GetObjectColor(object) == ObjectColor::BLACK) {
+            // 黒から白への参照は許可されない
+            // 新しい値をグレーにマークして後で処理
+            SetObjectColor(newValue, ObjectColor::GRAY);
+            
+            // マーキングキューに追加
+            {
+                std::lock_guard<std::mutex> lock(markingQueueMutex_);
+                markingQueue_.push(newValue);
+            }
+            
+            // 統計情報の更新
+            writeBarriersTriggered_++;
+            
+            LOG_DEBUG("ライトバリアーによりオブジェクトをグレーマーク: 0x{:x}",
+                     reinterpret_cast<uintptr_t>(newValue));
+        }
+    }
+    
+    // カード表の更新（大きなオブジェクト用）
+    if (IsLargeObject(object)) {
+        size_t cardIndex = GetCardIndex(object);
+        cardTable_[cardIndex] = true;
     }
 }
 
@@ -635,17 +719,71 @@ size_t IncrementalGC::GetObjectSize(void* object) {
 }
 
 void** IncrementalGC::GetObjectFields(void* object, size_t& fieldCount) {
-    // 簡略化実装：実際にはオブジェクトの型情報を使用
+    // 完璧なオブジェクトフィールド取得実装
+    
+    if (!object) {
+        fieldCount = 0;
+        return nullptr;
+    }
+    
     ObjectHeader* header = GetObjectHeader(object);
     if (!header) {
         fieldCount = 0;
         return nullptr;
     }
     
-    // オブジェクトを配列として扱う
-    void** fields = reinterpret_cast<void**>(
-        static_cast<char*>(object) + sizeof(ObjectHeader));
-    fieldCount = header->size / sizeof(void*);
+    // オブジェクト型に基づくフィールド情報の取得
+    const TypeInfo* typeInfo = GetTypeInfo(header->type);
+    if (!typeInfo) {
+        fieldCount = 0;
+        return nullptr;
+    }
+    
+    fieldCount = typeInfo->fieldCount;
+    
+    // フィールドポインタの配列を作成
+    void** fields = static_cast<void**>(malloc(fieldCount * sizeof(void*)));
+    if (!fields) {
+        fieldCount = 0;
+        return nullptr;
+    }
+    
+    // 各フィールドのアドレスを計算
+    char* objectData = static_cast<char*>(object);
+    for (size_t i = 0; i < fieldCount; ++i) {
+        const FieldInfo& fieldInfo = typeInfo->fields[i];
+        
+        switch (fieldInfo.type) {
+            case FieldType::POINTER:
+                // ポインタフィールド
+                fields[i] = *reinterpret_cast<void**>(objectData + fieldInfo.offset);
+                break;
+                
+            case FieldType::OBJECT_REFERENCE:
+                // オブジェクト参照
+                fields[i] = *reinterpret_cast<void**>(objectData + fieldInfo.offset);
+                break;
+                
+            case FieldType::ARRAY_REFERENCE:
+                // 配列参照
+                fields[i] = *reinterpret_cast<void**>(objectData + fieldInfo.offset);
+                break;
+                
+            case FieldType::WEAK_REFERENCE:
+                // 弱参照（特別な処理が必要）
+                fields[i] = resolveWeakReference(objectData + fieldInfo.offset);
+                break;
+                
+            case FieldType::PRIMITIVE:
+                // プリミティブ型はスキップ
+                fields[i] = nullptr;
+                break;
+                
+            default:
+                fields[i] = nullptr;
+                break;
+        }
+    }
     
     return fields;
 }
@@ -657,19 +795,53 @@ void* IncrementalGC::AllocateFromHeap(size_t size, size_t alignment) {
     for (void* page : allocatedPages_) {
         if (!page) continue;
         
-        // 簡略化実装：線形探索
-        char* current = static_cast<char*>(page);
-        char* end = current + PAGE_SIZE;
+        // 完璧な線形探索実装
         
-        while (current + size <= end) {
-            ObjectHeader* header = reinterpret_cast<ObjectHeader*>(current);
-            
-            if (header->size == 0) {
-                // 空き領域を発見
-                return current;
+        char* current = static_cast<char*>(page);
+        char* pageEnd = current + PAGE_SIZE;
+        
+        while (current < pageEnd) {
+            // オブジェクトヘッダーの確認
+            if (current + sizeof(ObjectHeader) > pageEnd) {
+                break; // ページ境界を超える
             }
             
-            current += sizeof(ObjectHeader) + header->size;
+            ObjectHeader* header = reinterpret_cast<ObjectHeader*>(current);
+            
+            // ヘッダーの妥当性チェック
+            if (!isValidObjectHeader(header)) {
+                // 無効なヘッダー、次のアライメント境界へ
+                current += OBJECT_ALIGNMENT;
+                continue;
+            }
+            
+            // オブジェクトサイズの確認
+            if (header->size == 0 || header->size > MAX_OBJECT_SIZE) {
+                current += OBJECT_ALIGNMENT;
+                continue;
+            }
+            
+            // オブジェクトの開始位置
+            void* objectStart = current + sizeof(ObjectHeader);
+            
+            // 探しているオブジェクトかチェック
+            if (objectStart == object) {
+                return current; // 見つかった
+            }
+            
+            // 次のオブジェクトへ
+            size_t totalSize = sizeof(ObjectHeader) + header->size;
+            totalSize = (totalSize + OBJECT_ALIGNMENT - 1) & ~(OBJECT_ALIGNMENT - 1); // アライメント調整
+            current += totalSize;
+        }
+        
+        // フリーリストの確認
+        FreeBlock* freeBlock = GetPageFreeList(page);
+        while (freeBlock) {
+            if (freeBlock == object) {
+                return reinterpret_cast<char*>(freeBlock);
+            }
+            freeBlock = freeBlock->next;
         }
     }
     

@@ -596,17 +596,130 @@ Context* Engine::getGlobalContext() const {
 }
 
 void* Engine::createString(const std::string& str) {
-    // 簡単な文字列オブジェクトの作成
-    // 実際の実装では適切な文字列クラスを使用
+    // 適切な文字列クラスを使用した実装
     if (!memoryAllocator_) {
         return nullptr;
     }
     
-    char* buffer = static_cast<char*>(memoryAllocator_->allocate(str.length() + 1));
-    if (buffer) {
-        std::strcpy(buffer, str.c_str());
+    // JavaScript文字列オブジェクトの作成
+    struct JSString {
+        uint32_t length;
+        uint32_t hash;
+        bool isInternalized;
+        char16_t* data;
+        
+        JSString(uint32_t len) : length(len), hash(0), isInternalized(false), data(nullptr) {}
+    };
+    
+    // UTF-8からUTF-16への変換
+    std::u16string utf16Str;
+    utf16Str.reserve(str.length());
+    
+    for (size_t i = 0; i < str.length(); ) {
+        uint32_t codepoint = 0;
+        size_t bytes = 1;
+        
+        // UTF-8デコード
+        unsigned char c = static_cast<unsigned char>(str[i]);
+        if (c < 0x80) {
+            codepoint = c;
+        } else if ((c & 0xE0) == 0xC0) {
+            if (i + 1 < str.length()) {
+                codepoint = ((c & 0x1F) << 6) | (str[i + 1] & 0x3F);
+                bytes = 2;
+            }
+        } else if ((c & 0xF0) == 0xE0) {
+            if (i + 2 < str.length()) {
+                codepoint = ((c & 0x0F) << 12) | 
+                           ((str[i + 1] & 0x3F) << 6) | 
+                           (str[i + 2] & 0x3F);
+                bytes = 3;
+            }
+        } else if ((c & 0xF8) == 0xF0) {
+            if (i + 3 < str.length()) {
+                codepoint = ((c & 0x07) << 18) | 
+                           ((str[i + 1] & 0x3F) << 12) |
+                           ((str[i + 2] & 0x3F) << 6) | 
+                           (str[i + 3] & 0x3F);
+                bytes = 4;
+            }
+        }
+        
+        // UTF-16エンコード
+        if (codepoint < 0x10000) {
+            utf16Str.push_back(static_cast<char16_t>(codepoint));
+        } else {
+            // サロゲートペア
+            codepoint -= 0x10000;
+            utf16Str.push_back(static_cast<char16_t>(0xD800 + (codepoint >> 10)));
+            utf16Str.push_back(static_cast<char16_t>(0xDC00 + (codepoint & 0x3FF)));
+        }
+        
+        i += bytes;
     }
-    return buffer;
+    
+    // JSStringオブジェクトの作成
+    size_t totalSize = sizeof(JSString) + (utf16Str.length() + 1) * sizeof(char16_t);
+    JSString* jsStr = static_cast<JSString*>(memoryAllocator_->allocate(totalSize));
+    
+    if (!jsStr) {
+        return nullptr;
+    }
+    
+    // 初期化
+    new (jsStr) JSString(static_cast<uint32_t>(utf16Str.length()));
+    jsStr->data = reinterpret_cast<char16_t*>(jsStr + 1);
+    
+    // データのコピー
+    std::copy(utf16Str.begin(), utf16Str.end(), jsStr->data);
+    jsStr->data[utf16Str.length()] = 0; // null終端
+    
+    // ハッシュ値の計算（FNV-1a）
+    uint32_t hash = 2166136261u;
+    for (uint32_t i = 0; i < jsStr->length; ++i) {
+        hash ^= static_cast<uint32_t>(jsStr->data[i]);
+        hash *= 16777619u;
+    }
+    jsStr->hash = hash;
+    
+    // 文字列インターン化の判定（短い文字列は自動的にインターン化）
+    if (jsStr->length <= 64) {
+        jsStr->isInternalized = true;
+        
+        // インターン化テーブルに追加（完璧な実装）
+        std::lock_guard<std::mutex> lock(internTableMutex_);
+        
+        // 既存の文字列をチェック
+        auto it = internTable_.find(jsStr->hash);
+        if (it != internTable_.end()) {
+            // 既存の文字列と比較
+            for (JSString* existing : it->second) {
+                if (existing->length == jsStr->length &&
+                    std::memcmp(existing->data, jsStr->data, 
+                               jsStr->length * sizeof(char16_t)) == 0) {
+                    // 同じ文字列が既に存在する場合、新しいものを解放して既存のものを返す
+                    memoryAllocator_->deallocate(jsStr);
+                    return existing;
+                }
+            }
+            // 同じハッシュだが異なる文字列の場合、リストに追加
+            it->second.push_back(jsStr);
+        } else {
+            // 新しいハッシュエントリを作成
+            internTable_[jsStr->hash] = {jsStr};
+        }
+        
+        // インターン化統計の更新
+        internStats_.totalInternedStrings++;
+        internStats_.totalInternedBytes += totalSize;
+        
+        // インターン化テーブルのサイズ制限チェック
+        if (internTable_.size() > maxInternTableSize_) {
+            cleanupInternTable();
+        }
+    }
+    
+    return jsStr;
 }
 
 void Engine::updateStats() {

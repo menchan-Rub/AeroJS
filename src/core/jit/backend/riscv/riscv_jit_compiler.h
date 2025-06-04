@@ -146,6 +146,45 @@ private:
     void OptimizeTypeChecks(IRFunction& function);
     void OptimizeGarbageCollection(IRFunction& function);
     
+    // 最適化ヘルパーメソッド
+    bool isArithmeticOperation(IROpcode opcode);
+    bool isComparisonOperation(IROpcode opcode);
+    bool isLogicalOperation(IROpcode opcode);
+    bool isTypeConversion(IROpcode opcode);
+    bool isBitwiseOperation(IROpcode opcode);
+    bool isArrayAccess(IROpcode opcode);
+    bool isStringOperation(IROpcode opcode);
+    bool isConditionalBranch(IROpcode opcode);
+    bool isTypeCheckInstruction(const IRInstruction& instr);
+    
+    // 定数畳み込みヘルパー
+    bool foldArithmeticConstants(IRFunction& function, size_t index);
+    bool foldComparisonConstants(IRFunction& function, size_t index);
+    bool foldLogicalConstants(IRFunction& function, size_t index);
+    bool foldTypeConversionConstants(IRFunction& function, size_t index);
+    bool foldBitwiseConstants(IRFunction& function, size_t index);
+    bool foldArrayAccessConstants(IRFunction& function, size_t index);
+    bool foldStringConstants(IRFunction& function, size_t index);
+    bool foldConditionalBranch(IRFunction& function, size_t index);
+    bool performConstantPropagation(IRFunction& function);
+    
+    // デッドコード除去ヘルパー
+    bool hasSideEffects(const IRInstruction& instr);
+    bool isResultUsed(size_t index, const LivenessInfo& liveVariables);
+    bool isUnreachableCode(size_t index, const IRFunction& function, 
+                          const ReachabilityInfo& reachableBlocks);
+    bool isRedundantAssignment(size_t index, const IRFunction& function,
+                              const LivenessInfo& liveVariables);
+    bool isUnusedPureCall(size_t index, const IRFunction& function,
+                         const LivenessInfo& liveVariables);
+    bool isDeadStore(size_t index, const IRFunction& function,
+                    const LivenessInfo& liveVariables);
+    bool removeEmptyBasicBlocks(IRFunction& function);
+    bool removeRedundantBranches(IRFunction& function);
+    bool isPureBuiltinFunction(const IRInstruction& instr);
+    bool isNextInstructionTarget(const IRInstruction& instr, size_t index,
+                                const IRFunction& function);
+    
     // ベクトル化ヘルパー
     bool CanVectorizeLoop(const IRLoop& loop);
     void VectorizeLoop(IRLoop& loop);
@@ -220,6 +259,27 @@ private:
         size_t registersSpilled = 0;
         double averageCompilationTime = 0.0;
         size_t codeSize = 0;
+        
+        // 最適化統計
+        size_t constantFoldingCount = 0;
+        size_t deadCodeEliminationCount = 0;
+        size_t instructionSchedulingCount = 0;
+        size_t vectorizedLoops = 0;
+        size_t vectorizedStatements = 0;
+        size_t slpVectorizedStatements = 0;
+        size_t loopOptimizationCount = 0;
+        size_t licmMovedInstructions = 0;
+        size_t unrolledLoops = 0;
+        size_t fusedLoops = 0;
+        size_t peepholeOptimizationCount = 0;
+        size_t scheduledBasicBlocks = 0;
+        
+        // JavaScript固有の最適化統計
+        size_t optimizedPropertyAccesses = 0;
+        size_t optimizedArrayAccesses = 0;
+        size_t optimizedFunctionCalls = 0;
+        size_t optimizedTypeChecks = 0;
+        size_t optimizedGCPoints = 0;
     } stats_;
     
     // RISC-V固有の定数

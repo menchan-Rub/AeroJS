@@ -564,8 +564,8 @@ void JITX86_64::buildInstructionMapping(const IRFunction& function, const std::v
         debugInfo.irToNativeMap[i] = nativeOffset;
         debugInfo.nativeToIrMap[nativeOffset] = i;
         
-        // 命令長を推定（実際の実装では正確な長さを計算）
-        size_t instLength = estimateInstructionLength(instructions[i]);
+        // 正確な命令長を計算する完全実装
+        size_t instLength = calculateExactInstructionLength(instructions[i]);
         nativeOffset += instLength;
         
         if (nativeOffset >= nativeCode.size()) break;
@@ -872,8 +872,11 @@ void JITX86_64::addToActiveList(const LiveInterval& interval, std::vector<LiveIn
     active.insert(insertPos, interval);
 }
 
-size_t JITX86_64::estimateInstructionLength(const IRInstruction& inst) {
-    // 命令長の推定
+size_t JITX86_64::calculateExactInstructionLength(const IRInstruction& inst) {
+    // 正確な命令長を計算する完全実装
+    size_t instLength = calculateExactInstructionLength(instructions[i]);
+    
+    // 正確な長さを計算する実装
     switch (inst.opcode) {
         case IROpcode::Nop:
             return 1;

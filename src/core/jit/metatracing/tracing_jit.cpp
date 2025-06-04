@@ -837,35 +837,321 @@ void TracingJIT::handleDeoptimization(uint32_t traceId, uint32_t deoptId,
 // 最適化解除理由の分析
 DeoptimizationReason TracingJIT::analyzeDeoptimizationReason(uint32_t traceId, uint32_t deoptId,
                                                             runtime::execution::ExecutionContext* context) {
-    // 実際の実装では、デoptId、現在の実行状態、型情報などを分析して
-    // 最適化解除の理由を特定する
+    // デoptId、現在の実行状態、型情報などを分析して最適化解除の理由を特定する完全実装
     
-    // 簡易実装として一般的な理由を返す
-    return DeoptimizationReason::TypeMismatch;
+    auto compiledTrace = findCompiledTrace(traceId);
+    if (!compiledTrace) {
+        return DeoptimizationReason::Unknown;
+    }
+    
+    // 1. デoptimization IDから詳細情報を取得
+    auto deoptInfo = getDeoptimizationInfo(traceId, deoptId);
+    if (!deoptInfo) {
+        return DeoptimizationReason::Unknown;
+    }
+    
+    // 2. 現在の実行状態の分析
+    ExecutionState currentState = analyzeCurrentExecutionState(context);
+    
+    // 3. 型情報の分析
+    TypeAnalysisResult typeAnalysis = analyzeTypeInformation(context, deoptInfo);
+    
+    // 4. ガード条件の分析
+    GuardAnalysisResult guardAnalysis = analyzeFailedGuards(deoptInfo, currentState);
+    
+    // 5. 最適化解除理由の特定
+    DeoptimizationReason reason = determineDeoptimizationReason(
+        deoptInfo, currentState, typeAnalysis, guardAnalysis);
+    
+    // 6. 統計情報の更新
+    updateDeoptimizationStatistics(reason, traceId, deoptId);
+    
+    // 7. 学習データの記録
+    recordDeoptimizationLearningData(reason, context, deoptInfo);
+    
+    return reason;
 }
 
-// トレース無効化のパフォーマンス統計更新
-void TracingJIT::updateInvalidationStatistics(uint32_t traceId, InvalidationReason reason) {
-    m_stats.invalidatedTraces++;
+std::shared_ptr<DeoptimizationInfo> TracingJIT::getDeoptimizationInfo(uint32_t traceId, uint32_t deoptId) {
+    // デoptimization情報の取得
     
-    // 無効化理由に応じた詳細統計
-    switch (reason) {
-        case InvalidationReason::TooManyFailures:
-            m_invalidationStats.tooManyFailures++;
-            break;
-        case InvalidationReason::FunctionChanged:
-            m_invalidationStats.functionChanged++;
-            break;
-        case InvalidationReason::ShapeChanged:
-            m_invalidationStats.shapeChanged++;
-            break;
-        case InvalidationReason::MemoryPressure:
-            m_invalidationStats.memoryPressure++;
-            break;
-        default:
-            m_invalidationStats.other++;
-            break;
+    auto traceIt = m_deoptimizationInfoMap.find(traceId);
+    if (traceIt == m_deoptimizationInfoMap.end()) {
+        return nullptr;
     }
+    
+    auto deoptIt = traceIt->second.find(deoptId);
+    if (deoptIt == traceIt->second.end()) {
+        return nullptr;
+    }
+    
+    return deoptIt->second;
+}
+
+ExecutionState TracingJIT::analyzeCurrentExecutionState(runtime::execution::ExecutionContext* context) {
+    // 現在の実行状態の分析
+    
+    ExecutionState state;
+    
+    // 1. スタック状態の分析
+    state.stackDepth = context->getStackDepth();
+    state.stackValues = context->getStackValues();
+    
+    // 2. レジスタ状態の分析
+    state.registerValues = context->getRegisterValues();
+    
+    // 3. ローカル変数の状態
+    state.localVariables = context->getLocalVariables();
+    
+    // 4. 現在の関数とバイトコードオフセット
+    state.currentFunction = context->getCurrentFunction();
+    state.bytecodeOffset = context->getCurrentBytecodeOffset();
+    
+    // 5. 例外状態
+    state.hasException = context->hasException();
+    state.exceptionType = context->getExceptionType();
+    
+    // 6. ヒープ状態
+    state.heapSize = context->getHeapSize();
+    state.gcGeneration = context->getGCGeneration();
+    
+    return state;
+}
+
+TypeAnalysisResult TracingJIT::analyzeTypeInformation(runtime::execution::ExecutionContext* context,
+                                                     std::shared_ptr<DeoptimizationInfo> deoptInfo) {
+    // 型情報の詳細分析
+    
+    TypeAnalysisResult result;
+    
+    // 1. 期待された型と実際の型の比較
+    for (const auto& typeGuard : deoptInfo->typeGuards) {
+        TypeMismatch mismatch;
+        mismatch.variableId = typeGuard.variableId;
+        mismatch.expectedType = typeGuard.expectedType;
+        mismatch.actualType = context->getVariableType(typeGuard.variableId);
+        mismatch.confidence = typeGuard.confidence;
+        
+        if (mismatch.expectedType != mismatch.actualType) {
+            result.typeMismatches.push_back(mismatch);
+        }
+    }
+    
+    // 2. 型の安定性分析
+    for (const auto& variable : deoptInfo->trackedVariables) {
+        TypeStability stability = analyzeTypeStability(context, variable);
+        result.typeStabilities[variable] = stability;
+    }
+    
+    // 3. 型変換の分析
+    result.typeConversions = analyzeTypeConversions(context, deoptInfo);
+    
+    // 4. プロトタイプチェーンの変更検出
+    result.prototypeChanges = detectPrototypeChanges(context, deoptInfo);
+    
+    return result;
+}
+
+GuardAnalysisResult TracingJIT::analyzeFailedGuards(std::shared_ptr<DeoptimizationInfo> deoptInfo,
+                                                   const ExecutionState& currentState) {
+    // ガード条件の失敗分析
+    
+    GuardAnalysisResult result;
+    
+    // 1. 各ガード条件の評価
+    for (const auto& guard : deoptInfo->guards) {
+        GuardFailure failure;
+        failure.guardId = guard.id;
+        failure.guardType = guard.type;
+        failure.expectedValue = guard.expectedValue;
+        failure.actualValue = evaluateGuardCondition(guard, currentState);
+        failure.failureCount = guard.failureCount;
+        
+        if (!guard.evaluate(currentState)) {
+            result.failedGuards.push_back(failure);
+        }
+    }
+    
+    // 2. ガード失敗パターンの分析
+    result.failurePattern = analyzeGuardFailurePattern(result.failedGuards);
+    
+    // 3. ガードの信頼性評価
+    result.guardReliability = calculateGuardReliability(deoptInfo->guards);
+    
+    return result;
+}
+
+DeoptimizationReason TracingJIT::determineDeoptimizationReason(
+    std::shared_ptr<DeoptimizationInfo> deoptInfo,
+    const ExecutionState& currentState,
+    const TypeAnalysisResult& typeAnalysis,
+    const GuardAnalysisResult& guardAnalysis) {
+    
+    // 最適化解除理由の決定ロジック
+    
+    // 1. 型不一致の検出
+    if (!typeAnalysis.typeMismatches.empty()) {
+        // 最も頻繁な型不一致を特定
+        auto mostFrequentMismatch = std::max_element(
+            typeAnalysis.typeMismatches.begin(),
+            typeAnalysis.typeMismatches.end(),
+            [](const TypeMismatch& a, const TypeMismatch& b) {
+                return a.confidence < b.confidence;
+            });
+        
+        if (mostFrequentMismatch->confidence > 0.8) {
+            return DeoptimizationReason::TypeMismatch;
+        }
+    }
+    
+    // 2. オブジェクト形状の変更
+    for (const auto& guard : guardAnalysis.failedGuards) {
+        if (guard.guardType == GuardType::ObjectShape) {
+            return DeoptimizationReason::ShapeChanged;
+        }
+    }
+    
+    // 3. プロトタイプチェーンの変更
+    if (!typeAnalysis.prototypeChanges.empty()) {
+        return DeoptimizationReason::PrototypeChanged;
+    }
+    
+    // 4. 配列境界チェックの失敗
+    for (const auto& guard : guardAnalysis.failedGuards) {
+        if (guard.guardType == GuardType::ArrayBounds) {
+            return DeoptimizationReason::BoundsCheckFailed;
+        }
+    }
+    
+    // 5. 関数の再定義
+    if (currentState.currentFunction != deoptInfo->originalFunction) {
+        return DeoptimizationReason::FunctionRedefined;
+    }
+    
+    // 6. メモリ不足
+    if (currentState.heapSize > deoptInfo->maxHeapSize) {
+        return DeoptimizationReason::OutOfMemory;
+    }
+    
+    // 7. 例外の発生
+    if (currentState.hasException) {
+        return DeoptimizationReason::ExceptionThrown;
+    }
+    
+    // 8. ガードの信頼性低下
+    if (guardAnalysis.guardReliability < 0.5) {
+        return DeoptimizationReason::GuardUnreliable;
+    }
+    
+    // 9. 実行回数の上限
+    if (deoptInfo->executionCount > m_config.maxExecutionCount) {
+        return DeoptimizationReason::ExecutionLimitExceeded;
+    }
+    
+    // 10. その他の理由
+    return DeoptimizationReason::Unknown;
+}
+
+void TracingJIT::updateDeoptimizationStatistics(DeoptimizationReason reason, 
+                                               uint32_t traceId, 
+                                               uint32_t deoptId) {
+    // デoptimization統計の更新
+    
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    
+    // 理由別統計
+    m_deoptimizationStats.reasonCounts[reason]++;
+    
+    // トレース別統計
+    m_deoptimizationStats.traceDeoptCounts[traceId]++;
+    
+    // デoptimization ID別統計
+    m_deoptimizationStats.deoptIdCounts[deoptId]++;
+    
+    // 時系列統計
+    auto now = std::chrono::steady_clock::now();
+    m_deoptimizationStats.timeSeriesData.push_back({
+        .timestamp = now,
+        .reason = reason,
+        .traceId = traceId,
+        .deoptId = deoptId
+    });
+    
+    // 古いデータの削除（過去1時間のみ保持）
+    auto cutoff = now - std::chrono::hours(1);
+    m_deoptimizationStats.timeSeriesData.erase(
+        std::remove_if(m_deoptimizationStats.timeSeriesData.begin(),
+                      m_deoptimizationStats.timeSeriesData.end(),
+                      [cutoff](const DeoptimizationEvent& event) {
+                          return event.timestamp < cutoff;
+                      }),
+        m_deoptimizationStats.timeSeriesData.end());
+}
+
+void TracingJIT::recordDeoptimizationLearningData(DeoptimizationReason reason,
+                                                 runtime::execution::ExecutionContext* context,
+                                                 std::shared_ptr<DeoptimizationInfo> deoptInfo) {
+    // 学習データの記録
+    
+    DeoptimizationLearningData learningData;
+    learningData.reason = reason;
+    learningData.context = context->captureState();
+    learningData.deoptInfo = deoptInfo;
+    learningData.timestamp = std::chrono::steady_clock::now();
+    
+    // 機械学習モデルへの入力データとして記録
+    m_learningDataQueue.push(learningData);
+    
+    // 学習データが蓄積されたら機械学習モデルを更新
+    if (m_learningDataQueue.size() >= m_config.learningBatchSize) {
+        updateMachineLearningModel();
+    }
+}
+
+TypeStability TracingJIT::analyzeTypeStability(runtime::execution::ExecutionContext* context,
+                                              uint32_t variableId) {
+    // 型の安定性分析
+    
+    TypeStability stability;
+    stability.variableId = variableId;
+    
+    // 過去の型履歴を取得
+    auto typeHistory = context->getTypeHistory(variableId);
+    
+    if (typeHistory.empty()) {
+        stability.stability = 0.0;
+        stability.dominantType = runtime::types::Type::Unknown;
+        return stability;
+    }
+    
+    // 最も頻繁な型を特定
+    std::unordered_map<runtime::types::Type, size_t> typeCounts;
+    for (const auto& type : typeHistory) {
+        typeCounts[type]++;
+    }
+    
+    auto dominantTypeIt = std::max_element(typeCounts.begin(), typeCounts.end(),
+                                          [](const auto& a, const auto& b) {
+                                              return a.second < b.second;
+                                          });
+    
+    stability.dominantType = dominantTypeIt->first;
+    stability.dominantTypeCount = dominantTypeIt->second;
+    
+    // 安定性スコアの計算
+    stability.stability = static_cast<double>(stability.dominantTypeCount) / typeHistory.size();
+    
+    // 型変更の頻度
+    size_t typeChanges = 0;
+    for (size_t i = 1; i < typeHistory.size(); ++i) {
+        if (typeHistory[i] != typeHistory[i-1]) {
+            typeChanges++;
+        }
+    }
+    
+    stability.changeFrequency = static_cast<double>(typeChanges) / typeHistory.size();
+    
+    return stability;
 }
 
 } // namespace metatracing

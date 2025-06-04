@@ -1465,28 +1465,234 @@ void ARM64SVE::emitCustomExpImplementation(std::vector<uint8_t>& out, int result
 }
 
 void ARM64SVE::loadConstantVector(std::vector<uint8_t>& out, int zd, double value, ElementSize elementSize) {
-    // 定数をベクトルレジスタにロード
-    // 実際の実装では、定数プールからのロードまたは即値生成を使用
+    // 定数プールからのロードまたは即値生成を使用した完全実装
     
-    // 浮動小数点定数の生成
-    uint32_t instruction = 0;
+    // 1. 即値として表現可能かチェック
+    if (canEncodeAsImmediate(value, elementSize)) {
+        generateImmediateLoad(out, zd, value, elementSize);
+        return;
+    }
+    
+    // 2. 定数プールからのロード
+    if (useConstantPool(value, elementSize)) {
+        generateConstantPoolLoad(out, zd, value, elementSize);
+        return;
+    }
+    
+    // 3. レジスタ経由での複合生成
+    generateComplexConstantLoad(out, zd, value, elementSize);
+}
+
+bool ARM64SVE::canEncodeAsImmediate(double value, ElementSize elementSize) {
+    // ARM64 SVEの即値エンコーディング可能性をチェック
     
     if (elementSize == ElementSize::Double) {
-        // FDUP Zd.D, #value
+        uint64_t bits = *reinterpret_cast<const uint64_t*>(&value);
+        return canEncodeFP64Immediate(bits);
+    } else if (elementSize == ElementSize::Single) {
+        float floatValue = static_cast<float>(value);
+        uint32_t bits = *reinterpret_cast<const uint32_t*>(&floatValue);
+        return canEncodeFP32Immediate(bits);
+    }
+    
+    return false;
+}
+
+bool ARM64SVE::canEncodeFP64Immediate(uint64_t bits) {
+    // IEEE 754 倍精度の即値エンコーディング可能性
+    
+    // 特殊値のチェック
+    if (bits == 0x0000000000000000ULL || // +0.0
+        bits == 0x8000000000000000ULL || // -0.0
+        bits == 0x3FF0000000000000ULL || // +1.0
+        bits == 0xBFF0000000000000ULL) { // -1.0
+        return true;
+    }
+    
+    // ARM64の8ビット即値制約をチェック
+    uint32_t sign = static_cast<uint32_t>((bits >> 63) & 0x1);
+    uint32_t exponent = static_cast<uint32_t>((bits >> 52) & 0x7FF);
+    uint64_t mantissa = bits & 0xFFFFFFFFFFFFF;
+    
+    // 指数部の制約
+    if (exponent == 0 || exponent == 0x7FF) {
+        return false; // 非正規化数、無限大、NaNは不可
+    }
+    
+    // 仮数部の制約：下位48ビットが全て0である必要
+    if ((mantissa & 0xFFFFFFFFFFF) != 0) {
+        return false;
+    }
+    
+    // 指数部の範囲制約
+    int32_t biased_exponent = static_cast<int32_t>(exponent) - 1023;
+    if (biased_exponent < -3 || biased_exponent > 4) {
+        return false;
+    }
+    
+    return true;
+}
+
+bool ARM64SVE::canEncodeFP32Immediate(uint32_t bits) {
+    // IEEE 754 単精度の即値エンコーディング可能性
+    
+    // 特殊値のチェック
+    if (bits == 0x00000000 || // +0.0f
+        bits == 0x80000000 || // -0.0f
+        bits == 0x3F800000 || // +1.0f
+        bits == 0xBF800000) { // -1.0f
+        return true;
+    }
+    
+    uint32_t sign = (bits >> 31) & 0x1;
+    uint32_t exponent = (bits >> 23) & 0xFF;
+    uint32_t mantissa = bits & 0x7FFFFF;
+    
+    // 指数部の制約
+    if (exponent == 0 || exponent == 0xFF) {
+        return false;
+    }
+    
+    // 仮数部の制約：下位19ビットが全て0である必要
+    if ((mantissa & 0x7FFFF) != 0) {
+        return false;
+    }
+    
+    // 指数部の範囲制約
+    int32_t biased_exponent = static_cast<int32_t>(exponent) - 127;
+    if (biased_exponent < -3 || biased_exponent > 4) {
+        return false;
+    }
+    
+    return true;
+}
+
+void ARM64SVE::generateImmediateLoad(std::vector<uint8_t>& out, int zd, double value, ElementSize elementSize) {
+    // 即値による直接ロード
+    
+    if (elementSize == ElementSize::Double) {
         uint64_t bits = *reinterpret_cast<const uint64_t*>(&value);
         uint8_t imm8 = encodeFloatingPointImmediate(bits);
         
-        instruction = 0x659E2000 | (imm8 << 5) | zd;
+        // FDUP Zd.D, #imm8
+        uint32_t instruction = 0x659E2000 | (imm8 << 5) | zd;
+        appendInstruction(out, instruction);
+        
     } else if (elementSize == ElementSize::Single) {
-        // FDUP Zd.S, #value
         float floatValue = static_cast<float>(value);
         uint32_t bits = *reinterpret_cast<const uint32_t*>(&floatValue);
-        uint8_t imm8 = encodeFloatingPointImmediate(bits);
+        uint8_t imm8 = encodeFP32Immediate(bits);
         
-        instruction = 0x659C2000 | (imm8 << 5) | zd;
+        // FDUP Zd.S, #imm8
+        uint32_t instruction = 0x659C2000 | (imm8 << 5) | zd;
+        appendInstruction(out, instruction);
+        
+    } else if (elementSize == ElementSize::Half) {
+        // 半精度浮動小数点
+        uint16_t halfValue = convertToFP16(value);
+        uint8_t imm8 = encodeFP16Immediate(halfValue);
+        
+        // FDUP Zd.H, #imm8
+        uint32_t instruction = 0x659A2000 | (imm8 << 5) | zd;
+        appendInstruction(out, instruction);
+    }
+}
+
+bool ARM64SVE::useConstantPool(double value, ElementSize elementSize) {
+    // 定数プール使用の判定
+    
+    // 即値で表現できない場合は定数プールを使用
+    if (!canEncodeAsImmediate(value, elementSize)) {
+        return true;
     }
     
-    appendInstruction(out, instruction);
+    // 頻繁に使用される定数は定数プールに配置
+    if (isFrequentlyUsedConstant(value)) {
+        return true;
+    }
+    
+    // 大きなベクトル幅の場合は定数プールが効率的
+    if (getCurrentVectorLength() > 256) {
+        return true;
+    }
+    
+    return false;
+}
+
+void ARM64SVE::generateConstantPoolLoad(std::vector<uint8_t>& out, int zd, double value, ElementSize elementSize) {
+    // 定数プールからのロード実装
+    
+    // 1. 定数プールエントリの作成/検索
+    uint32_t poolOffset = addToConstantPool(value, elementSize);
+    
+    // 2. 定数プールアドレスの計算
+    int tempReg = allocateTempRegister();
+    
+    // ADR命令で定数プールのベースアドレスを取得
+    // ADR Xt, constant_pool_base
+    uint32_t adrInst = 0x10000000 | tempReg;
+    appendInstruction(out, adrInst);
+    
+    // 3. オフセットの追加
+    if (poolOffset > 0) {
+        // ADD Xt, Xt, #offset
+        uint32_t addInst = 0x91000000 | (tempReg << 5) | tempReg | ((poolOffset & 0xFFF) << 10);
+        appendInstruction(out, addInst);
+    }
+    
+    // 4. ベクトルロード命令の生成
+    if (elementSize == ElementSize::Double) {
+        // LD1RD {Zd.D}, Pg/Z, [Xt]
+        uint32_t loadInst = 0x85C04000 | (0xF << 10) | (tempReg << 5) | zd;
+        appendInstruction(out, loadInst);
+        
+    } else if (elementSize == ElementSize::Single) {
+        // LD1RW {Zd.S}, Pg/Z, [Xt]
+        uint32_t loadInst = 0x85804000 | (0xF << 10) | (tempReg << 5) | zd;
+        appendInstruction(out, loadInst);
+        
+    } else if (elementSize == ElementSize::Half) {
+        // LD1RH {Zd.H}, Pg/Z, [Xt]
+        uint32_t loadInst = 0x85404000 | (0xF << 10) | (tempReg << 5) | zd;
+        appendInstruction(out, loadInst);
+    }
+    
+    // 5. 一時レジスタの解放
+    releaseTempRegister(tempReg);
+}
+
+void ARM64SVE::generateComplexConstantLoad(std::vector<uint8_t>& out, int zd, double value, ElementSize elementSize) {
+    // 複合的な定数生成（レジスタ経由）
+    
+    if (elementSize == ElementSize::Double) {
+        uint64_t bits = *reinterpret_cast<const uint64_t*>(&value);
+        
+        // スカラーレジスタに定数をロード
+        int tempScalarReg = allocateTempRegister();
+        loadConstantToScalar(out, tempScalarReg, bits);
+        
+        // スカラーからベクトルへの複製
+        // DUP Zd.D, Xn
+        uint32_t dupInst = 0x05203800 | (tempScalarReg << 5) | zd;
+        appendInstruction(out, dupInst);
+        
+        releaseTempRegister(tempScalarReg);
+        
+    } else if (elementSize == ElementSize::Single) {
+        float floatValue = static_cast<float>(value);
+        uint32_t bits = *reinterpret_cast<const uint32_t*>(&floatValue);
+        
+        // スカラーレジスタに定数をロード
+        int tempScalarReg = allocateTempRegister();
+        loadConstantToScalar(out, tempScalarReg, bits);
+        
+        // スカラーからベクトルへの複製
+        // DUP Zd.S, Wn
+        uint32_t dupInst = 0x05203400 | (tempScalarReg << 5) | zd;
+        appendInstruction(out, dupInst);
+        
+        releaseTempRegister(tempScalarReg);
+    }
 }
 
 uint8_t ARM64SVE::encodeFloatingPointImmediate(uint64_t bits) {

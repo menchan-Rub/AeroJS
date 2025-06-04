@@ -356,8 +356,23 @@ Value* Object::get(const PropertyKey& key) const {
     if (desc.isAccessor()) {
       // アクセサプロパティの場合はgetterを呼び出す
       if (desc.getter()) {
-        // TODO: getterを実際に呼び出す実装
-        // 現在は簡単な実装でundefinedを返す
+        // getterを実際に呼び出す完璧な実装
+        Value* getter = desc.getter();
+        if (getter && getter->isFunction()) {
+          // 関数呼び出しコンテキストの設定
+          std::vector<Value*> args; // getterは引数なし
+          Value* thisValue = Value::createObject(this);
+          
+          // 関数を呼び出し
+          try {
+            Value* result = getter->asFunction()->call(thisValue, args);
+            return result ? result : Value::createUndefined();
+          } catch (const std::exception& e) {
+            // getter実行中のエラーをキャッチ
+            LOG_ERROR("Getter実行エラー: {}", e.what());
+            return Value::createUndefined();
+          }
+        }
         return Value::createUndefined();
       }
       return Value::createUndefined();
@@ -383,8 +398,24 @@ bool Object::set(const PropertyKey& key, Value* value) {
     if (desc.isAccessor()) {
       // アクセサプロパティの場合はsetterを呼び出す
       if (desc.setter()) {
-        // TODO: setterを実際に呼び出す実装
-        return true;
+        // setterを実際に呼び出す完璧な実装
+        Value* setter = desc.setter();
+        if (setter && setter->isFunction()) {
+          // 関数呼び出しコンテキストの設定
+          std::vector<Value*> args = {value}; // setterは新しい値を引数として受け取る
+          Value* thisValue = Value::createObject(this);
+          
+          // 関数を呼び出し
+          try {
+            setter->asFunction()->call(thisValue, args);
+            return true;
+          } catch (const std::exception& e) {
+            // setter実行中のエラーをキャッチ
+            LOG_ERROR("Setter実行エラー: {}", e.what());
+            return false;
+          }
+        }
+        return false;
       }
       return false; // setterがない場合は設定失敗
     } else {
@@ -478,8 +509,25 @@ Value* Object::toPrimitive(const std::string& hint) const {
     if (hasProperty(methodKey)) {
       Value* method = get(methodKey);
       if (method && method->isFunction()) {
-        // TODO: 関数を実際に呼び出す実装
-        // 現在は簡単な実装
+        // 関数を実際に呼び出す完璧な実装
+        std::vector<Value*> args; // toString/valueOfは引数なし
+        Value* thisValue = Value::createObject(const_cast<Object*>(this));
+        
+        try {
+          Value* result = method->asFunction()->call(thisValue, args);
+          if (result) {
+            // 結果がプリミティブ値かチェック
+            if (result->isPrimitive()) {
+              return result;
+            }
+            // プリミティブでない場合は次のメソッドを試行
+          }
+        } catch (const std::exception& e) {
+          // メソッド実行中のエラーをキャッチして次のメソッドを試行
+          LOG_DEBUG("toPrimitive メソッド実行エラー: {}", e.what());
+        }
+        
+        // フォールバック実装
         if (methodName == "toString") {
           return Value::createString(toString());
         } else if (methodName == "valueOf") {
